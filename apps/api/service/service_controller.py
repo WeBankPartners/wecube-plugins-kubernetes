@@ -2,6 +2,8 @@
 
 from __future__ import (absolute_import, division, print_function, unicode_literals)
 
+import time
+
 from apps.common.validate_auth_info import validate_cluster_auth
 from apps.common.validate_auth_info import validate_cluster_info
 from core import local_exceptions as exception_common
@@ -128,8 +130,8 @@ class ServiceCreateController(BaseController):
         validate_cluster_auth(data)
         validation.not_allowed_null(data=data,
                                     keys=["kubernetes_url", "name",
-                                          "containerports" "nodeport",
-                                          "serviceport"]
+                                          "containerport", "nodeport",
+                                          "serviceport", "podname"]
                                     )
 
         uuid = data.get("id", None) or get_uuid()
@@ -143,7 +145,7 @@ class ServiceCreateController(BaseController):
         validation.validate_string("kubernetes_ca", kubernetes_ca)
         validate_cluster_info(kubernetes_url)
 
-        nodeport = validation.validate_port(port=data["nodeport"])
+        nodeport = validation.validate_port(port=data["nodeport"], min=30000, max=32767)
         containerport = validation.validate_port(port=data["containerport"])
         serviceport = validation.validate_port(port=data["serviceport"])
 
@@ -153,6 +155,8 @@ class ServiceCreateController(BaseController):
         selector = data.get("selector", {})
         if selector:
             selector = validation.validate_dict("selector", selector)
+        else:
+            selector = {"app": data.get("podname")}
 
         labels = data.get("labels", {})
         if labels:
@@ -202,15 +206,33 @@ class ServiceCreateController(BaseController):
         for create_data in create_datas:
             create_res = self.resource.create(**create_data)
             if create_res:
-                create_data.update({"errorCode": 0, "errorMessage": ""})
                 success_service.append(create_data)
             else:
-                create_data.update({"errorCode": 1, "errorMessage": "创建失败"})
                 failed_service.append(create_data)
+
+        if success_service:
+            time.sleep(1.5)
+
+        for success in success_service:
+            serviceinfo = self.resource.detail(name=success["name"],
+                                               kubernetes_url=success.get("kubernetes_url"),
+                                               kubernetes_token=create_data.get("kubernetes_token"),
+                                               kubernetes_ca=create_data.get("kubernetes_ca"),
+                                               apiversion=create_data.get("apiversion"),
+                                               namespace=create_data.get("namespace", "default"))
+
+            serviceinfo.update({"errorCode": 0, "errorMessage": ""})
+            result = result + [serviceinfo]
 
         failed_name = []
         for failed in failed_service:
             failed_name.append(failed["name"])
+            failedinfo = {'cluster_ip': '', 'name': '', 'service_port': '',
+                          'labels': '', 'ports': '', 'node_port': '',
+                          'created_time': '', 'pod': '', 'type': '',
+                          'containerport': '', 'uid': '',
+                          "errorCode": 1, "errorMessage": "创建失败"}
+            result = result + failedinfo
 
         failed_name = ",".join(failed_name)
         result = success_service + failed_service
@@ -270,7 +292,7 @@ class ServiceIdController(BaseController):
                 _data = {"errorCode": 1, "errorMessage": "未查找到", "name": search_data["name"]}
                 failed.append(_data)
             else:
-                success += _info
+                success += [_info]
 
         failed_name = []
         return_data = success + failed
@@ -280,7 +302,47 @@ class ServiceIdController(BaseController):
         failed_name = ",".join(failed_name)
         if failed:
             raise exception_common.ResourceNotSearchError(param="name",
-                                                          msg="未查找到pod %s" % failed_name,
+                                                          msg="未查找到service %s" % failed_name,
+                                                          return_data=return_data)
+
+        return len(return_data), return_data
+
+
+class ServiceDetailController(ServiceIdController):
+    name = "Service.id"
+    resource_describe = "Service"
+    allow_methods = ('POST',)
+    resource = ServiceApi()
+
+    def create(self, request, data, **kwargs):
+        search_datas = []
+        for info in data:
+            search_datas.append(self._format_data(info))
+
+        success = []
+        failed = []
+        for search_data in search_datas:
+            _info = self.resource.detail(name=search_data["name"],
+                                         kubernetes_url=search_data["kubernetes_url"],
+                                         kubernetes_token=search_data["kubernetes_token"],
+                                         kubernetes_ca=search_data["kubernetes_ca"],
+                                         apiversion=search_data.get("apiversion"),
+                                         namespace=search_data.get("namespace", "default"))
+            if not _info:
+                _data = {"errorCode": 1, "errorMessage": "未查找到", "name": search_data["name"]}
+                failed.append(_data)
+            else:
+                success += [_info]
+
+        failed_name = []
+        return_data = success + failed
+        for failed in failed:
+            failed_name.append(failed["name"])
+
+        failed_name = ",".join(failed_name)
+        if failed:
+            raise exception_common.ResourceNotSearchError(param="name",
+                                                          msg="未查找到service %s" % failed_name,
                                                           return_data=return_data)
 
         return len(return_data), return_data

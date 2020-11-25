@@ -59,13 +59,15 @@ def str_to_time(key, date_str):
         raise exception_common.ValueValidateError(param=key, msg=u"非法值 %s，不是合法的时间" % date_str)
 
 
-def validate_port(port):
+def validate_port(port, min=None, max=None):
     try:
         port = int(port)
     except:
         raise exception_common.ValueValidateError(param="port", msg=u"%s 非法的端口号" % port)
 
-    if port < 0 or port > 65535:
+    min = min or 1
+    max = max or 65535
+    if port < min or port > max:
         raise exception_common.ValueValidateError(param="port", msg=u"%s 非法的端口号" % port)
 
     return port

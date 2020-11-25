@@ -7,6 +7,7 @@ import json
 from apps.background.lib.drivers.KubernetesDrivers import ServiceManager
 from core.validation import validate_ipaddress
 from lib.logs import logger
+from lib.json_helper import format_json_dumps
 
 
 class ServiceApi(object):
@@ -48,18 +49,12 @@ class ServiceApi(object):
         :param kubernetes_token:
         :param kubernetes_ca:
         :param apiversion:
-              1.6版本之前 apiVsersion：extensions/v1beta1
-              1.6版本到1.9版本之间：apps/v1beta1
-              1.9版本之后:apps/v1
         :param labels:
         :param selector:
         :param clusterIP:
         :param namespace:
         :return:
         '''
-
-        authinfo = {"url": kubernetes_url, "token": kubernetes_token,
-                    "cafile": kubernetes_ca}
 
         apiversion = apiversion or "v1"
         metadata = {"name": name}
@@ -77,7 +72,7 @@ class ServiceApi(object):
         else:
             spec_port = {"port": serviceport, "targetPort": containerport}
 
-        spec_info["ports"] = spec_port
+        spec_info["ports"] = [spec_port]
 
         if clusterIP:
             validate_ipaddress(clusterIP)
@@ -135,8 +130,49 @@ class ServiceApi(object):
         :return:
         '''
 
-        return ServiceManager.query(name, url=kubernetes_url,
+        result = ServiceManager.query(name, url=kubernetes_url,
                                     token=kubernetes_token,
                                     cafile=kubernetes_ca,
                                     version=apiversion,
                                     namespace=namespace)
+        print(format_json_dumps(result))
+        return result
+
+    def detail(self, name, kubernetes_url,
+             kubernetes_token=None,
+             kubernetes_ca=None, apiversion=None,
+             namespace="default", **kwargs):
+        '''
+        :param name:
+        :param kubernetes_url:
+        :param kubernetes_token:
+        :param kubernetes_ca:
+        :param apiversion:
+        :param namespace:
+        :param kwargs:
+        :return:
+        '''
+
+        result = {}
+        info = ServiceManager.query(name, url=kubernetes_url,
+                                    token=kubernetes_token,
+                                    cafile=kubernetes_ca,
+                                    version=apiversion,
+                                    namespace=namespace)
+        if not info:
+            return info
+
+        result["cluster_ip"] = info["spec"]["cluster_ip"]
+        _selector = info["spec"]["selector"]
+        result["pod"] = _selector.get("app")
+        result["type"] = info["spec"]["type"]
+        ports = info["spec"]["ports"]
+        result["ports"] = ports
+        result["node_port"] = ports[0]["node_port"]
+        result["containerport"] = ports[0]["target_port"]
+        result["service_port"] = ports[0]["port"]
+        result["name"] = info["metadata"]["name"]
+        result["created_time"] = info["metadata"]["creation_timestamp"]
+        result["uid"] = info["metadata"]["uid"]
+        result["labels"] = info["metadata"]["labels"]
+        return result
