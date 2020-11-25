@@ -2,16 +2,16 @@
 
 from __future__ import (absolute_import, division, print_function, unicode_literals)
 
-import json
 import random
 import time
+
 from apps.common.validate_auth_info import validate_cluster_auth
 from apps.common.validate_auth_info import validate_cluster_info
 from core import local_exceptions as exception_common
 from core import validation
 from core.controller import BaseController
-from lib.uuid_util import get_uuid
 from lib.json_helper import format_json_dumps
+from lib.uuid_util import get_uuid
 from .base import RCApi
 
 
@@ -490,12 +490,12 @@ class RCDeleteController(BaseController):
     allow_methods = ("POST",)
     resource = RCApi()
 
-    def create(self, request, data, **kwargs):
+    def _format_data(self, data):
         validate_cluster_auth(data)
         validation.not_allowed_null(data=data,
                                     keys=["kubernetes_url", "name"]
                                     )
-        name = data["name"]
+
         kubernetes_url = data["kubernetes_url"]
         kubernetes_token = data.get("kubernetes_token")
         kubernetes_ca = data.get("kubernetes_ca")
@@ -505,14 +505,47 @@ class RCDeleteController(BaseController):
         validation.validate_string("kubernetes_ca", kubernetes_ca)
         validate_cluster_info(kubernetes_url)
 
-        result = self.resource.delete(name=name,
-                                      kubernetes_url=kubernetes_url,
-                                      kubernetes_token=kubernetes_token,
-                                      kubernetes_ca=kubernetes_ca,
-                                      apiversion=data.get("apiversion"),
-                                      namespace=data.get("namespace", "default")
-                                      )
-        if not result:
-            raise exception_common.ResourceNotFoundError()
+        name = data["name"]
 
-        return 1, result
+        return {"kubernetes_url": kubernetes_url,
+                "name": name,
+                "kubernetes_token": kubernetes_token,
+                "kubernetes_ca": kubernetes_ca,
+                "namespace": data.get("namespace", "default"),
+                "apiversion": data.get("apiversion")
+                }
+
+    def create(self, request, data, **kwargs):
+        search_datas = []
+        for info in data:
+            search_datas.append(self._format_data(info))
+
+        success = []
+        failed = []
+        for search_data in search_datas:
+            result = self.resource.delete(name=search_data["name"],
+                                          kubernetes_url=search_data["kubernetes_url"],
+                                          kubernetes_token=search_data["kubernetes_token"],
+                                          kubernetes_ca=search_data["kubernetes_ca"],
+                                          apiversion=search_data.get("apiversion"),
+                                          namespace=search_data.get("namespace", "default")
+                                          )
+            if result:
+                _data = {"errorCode": 0, "errorMessage": "success", "name": search_data["name"]}
+                success.append(_data)
+            else:
+                _data = {"errorCode": 1, "errorMessage": "删除失败", "name": search_data["name"]}
+                failed.append(_data)
+
+        failed_name = []
+        return_data = success + failed
+        for failed in failed:
+            failed_name.append(failed["name"])
+
+        failed_name = ",".join(failed_name)
+        if failed:
+            raise exception_common.ResourceOpearateNotSuccess(param="name",
+                                                              msg="%s 删除失败" % failed_name,
+                                                              return_data=return_data)
+
+        return len(return_data), return_data

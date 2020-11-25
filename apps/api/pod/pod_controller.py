@@ -124,7 +124,7 @@ class PodSearchController(BaseController):
     allow_methods = ("POST",)
     resouPode = PodApi()
 
-    def create(self, request, data, **kwargs):
+    def _format_data(self, data):
         validate_cluster_auth(data)
         validation.not_allowed_null(data=data,
                                     keys=["kubernetes_url", "name"]
@@ -139,27 +139,56 @@ class PodSearchController(BaseController):
         validation.validate_string("kubernetes_ca", kubernetes_ca)
         validate_cluster_info(kubernetes_url)
 
-        pods = self.resource.search_rc_pods(selector={"app": data["name"]},
-                                            kubernetes_url=kubernetes_url,
-                                            kubernetes_token=kubernetes_token,
-                                            kubernetes_ca=kubernetes_ca,
-                                            apiversion=data.get("apiversion"),
-                                            namespace=data.get("namespace", "default"))
-        if not pods:
-            return_data = {"errorCode": 1, "errorMessage": "创建失败",
-                           "pod_restart_policy": "", "pod_uid": "",
-                           "pod_created_time": "", "pod_ip": "",
-                           "pod_start_time": "", "host_memory": "",
-                           "host_ip": "", "pod_annotations": "",
-                           "pod_labels": "", "host_cpu": "", "pod_node_name": "",
-                           "host_name": "", "pod_api_version": "",
-                           "pod_namespace": "", "host_uuid": "",
-                           "containers": "", "pod_name": data["name"]}
+        name = data["name"]
+
+        return {"kubernetes_url": kubernetes_url,
+                "name": name,
+                "kubernetes_token": kubernetes_token,
+                "kubernetes_ca": kubernetes_ca,
+                "namespace": data.get("namespace", "default"),
+                "apiversion": data.get("apiversion")
+                }
+
+    def create(self, request, data, **kwargs):
+        search_datas = []
+        for info in data:
+            search_datas.append(self._format_data(info))
+
+        success_pod = []
+        failed_pod = []
+        for search_data in search_datas:
+            pods = self.resource.search_rc_pods(selector={"app": search_data["name"]},
+                                                kubernetes_url=search_data["kubernetes_url"],
+                                                kubernetes_token=search_data["kubernetes_token"],
+                                                kubernetes_ca=search_data["kubernetes_ca"],
+                                                apiversion=search_data.get("apiversion"),
+                                                namespace=search_data.get("namespace", "default"))
+            if not pods:
+                _data = {"errorCode": 1, "errorMessage": "创建失败",
+                         "pod_restart_policy": "", "pod_uid": "",
+                         "pod_created_time": "", "pod_ip": "",
+                         "pod_start_time": "", "host_memory": "",
+                         "host_ip": "", "pod_annotations": "",
+                         "pod_labels": "", "host_cpu": "", "pod_node_name": "",
+                         "host_name": "", "pod_api_version": "",
+                         "pod_namespace": "", "host_uuid": "",
+                         "containers": "", "pod_name": data["name"]}
+                failed_pod.append(_data)
+            else:
+                success_pod += pods
+
+        failed_name = []
+        return_data = success_pod + failed_pod
+        for failed in failed_pod:
+            failed_name.append(failed["name"])
+
+        failed_name = ",".join(failed_name)
+        if failed_pod:
             raise exception_common.ResourceNotSearchError(param="name",
-                                                          msg="未查找到pod %s",
+                                                          msg="未查找到pod %s" % failed_name,
                                                           return_data=return_data)
 
-        return len(pods), pods
+        return len(return_data), return_data
 
 
 class PodCreateController(BaseController):

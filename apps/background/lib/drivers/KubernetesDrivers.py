@@ -321,9 +321,15 @@ class RCManager(object):
         if not depobject:
             return 0
 
-        resp = apiclient.delete_namespaced_replication_controller(name=name,
-                                                                  namespace=namespace)
-        return resp.to_dict()
+        try:
+            resp = apiclient.delete_namespaced_replication_controller(name=name,
+                                                                      namespace=namespace)
+            return resp.to_dict()
+        except Exception, e:
+            logger.info(e)
+            logger.info(traceback.format_exc())
+            logger.info("delete rc %s error" % (name))
+            return 0
 
     @classmethod
     def rollingUpdate(cls):

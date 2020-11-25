@@ -57,6 +57,14 @@ class ResourceNotSearchError(Exception):
         _msg = "资源 %s %s未找到" % (param, msg)
         super(ResourceNotSearchError, self).__init__(_msg)
 
+class ResourceOpearateNotSuccess(Exception):
+    status_code = 400
+
+    def __init__(self, param, msg, return_data):
+        self.return_data = return_data
+        _msg = "资源 %s %s 操作失败" % (param, msg)
+        super(ResourceOpearateNotSuccess, self).__init__(_msg)
+
 
 class DataToolangError(Exception):
     status_code = 403
