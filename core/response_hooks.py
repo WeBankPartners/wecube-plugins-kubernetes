@@ -35,11 +35,11 @@ def format_response(count, msg):
         for res in msg:
             _res = {"errorCode": 0, "errorMessage": ""}
             _res.update(res)
-            result.append(format_json_dumps(_res))
+            result.append(format_string(_res))
     else:
         _res = {"errorCode": 0, "errorMessage": ""}
         _res.update(msg)
-        result = [format_json_dumps(_res)]
+        result = [format_string(_res)]
 
     return format_json_dumps({"resultCode": 0,
                               "resultMessage": "success",

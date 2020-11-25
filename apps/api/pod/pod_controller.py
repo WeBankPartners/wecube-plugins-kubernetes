@@ -19,7 +19,7 @@ class PodListController(BaseController):
     name = "Pod"
     resouPode_describe = "Pod"
     allow_methods = ('POST',)
-    resouPode = PodApi()
+    resource = PodApi()
 
     def create(self, request, data, **kwargs):
         validate_cluster_auth(data)
@@ -39,7 +39,7 @@ class PodListController(BaseController):
         validation.not_allowed_null(keys=["kubernetes_url"],
                                     data=data)
 
-        count, result = self.resouPode.list(kubernetes_url=data["kubernetes_url"],
+        count, result = self.resource.list(kubernetes_url=data["kubernetes_url"],
                                             kubernetes_token=data.get("kubernetes_token"),
                                             kubernetes_ca=data.get("kubernetes_ca"),
                                             apiversion=data.get("apiversion"),
@@ -52,7 +52,7 @@ class PodIdController(BaseController):
     name = "Pod.id"
     resouPode_describe = "Pod"
     allow_methods = ("POST",)
-    resouPode = PodApi()
+    resource = PodApi()
 
     def create(self, request, data, **kwargs):
         validate_cluster_auth(data)
@@ -70,7 +70,7 @@ class PodIdController(BaseController):
         validate_cluster_info(kubernetes_url)
 
         name = data["name"]
-        result = self.resouPode.describe(name=name,
+        result = self.resource.describe(name=name,
                                          kubernetes_url=kubernetes_url,
                                          kubernetes_token=kubernetes_token,
                                          kubernetes_ca=kubernetes_ca,
@@ -87,7 +87,7 @@ class PodDetailController(BaseController):
     name = "Pod.id"
     resouPode_describe = "Pod"
     allow_methods = ("POST",)
-    resouPode = PodApi()
+    resource = PodApi()
 
     def create(self, request, data, **kwargs):
         validate_cluster_auth(data)
@@ -105,7 +105,7 @@ class PodDetailController(BaseController):
         validate_cluster_info(kubernetes_url)
 
         name = data["name"]
-        result = self.resouPode.detail(name=name,
+        result = self.resource.detail(name=name,
                                        kubernetes_url=kubernetes_url,
                                        kubernetes_token=kubernetes_token,
                                        kubernetes_ca=kubernetes_ca,
@@ -122,7 +122,7 @@ class PodSearchController(BaseController):
     name = "Pod.id"
     resouPode_describe = "Pod"
     allow_methods = ("POST",)
-    resouPode = PodApi()
+    resource = RCApi()
 
     def _format_data(self, data):
         validate_cluster_auth(data)
@@ -172,7 +172,7 @@ class PodSearchController(BaseController):
                          "pod_labels": "", "host_cpu": "", "pod_node_name": "",
                          "host_name": "", "pod_api_version": "",
                          "pod_namespace": "", "host_uuid": "",
-                         "containers": "", "pod_name": data["name"]}
+                         "containers": "", "pod_name": search_data["name"]}
                 failed_pod.append(_data)
             else:
                 success_pod += pods
@@ -180,7 +180,7 @@ class PodSearchController(BaseController):
         failed_name = []
         return_data = success_pod + failed_pod
         for failed in failed_pod:
-            failed_name.append(failed["name"])
+            failed_name.append(failed["pod_name"])
 
         failed_name = ",".join(failed_name)
         if failed_pod:
