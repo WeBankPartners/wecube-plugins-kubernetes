@@ -1,0 +1,433 @@
+# _ coding:utf-8 _*_
+
+from __future__ import (absolute_import, division, print_function, unicode_literals)
+
+import time
+
+from apps.api.rc.base import RCApi
+from apps.common.validate_auth_info import validate_cluster_auth
+from apps.common.validate_auth_info import validate_cluster_info
+from core import local_exceptions as exception_common
+from core import validation
+from core.controller import BaseController
+from lib.uuid_util import get_uuid
+from .base import PodApi
+from apps.api.rc.rc_controller import RCDeleteController
+
+
+class PodListController(BaseController):
+    name = "Pod"
+    resouPode_describe = "Pod"
+    allow_methods = ('POST',)
+    resouPode = PodApi()
+
+    def create(self, request, data, **kwargs):
+        validate_cluster_auth(data)
+        validation.not_allowed_null(data=data,
+                                    keys=["kubernetes_url"]
+                                    )
+
+        kubernetes_url = data["kubernetes_url"]
+        kubernetes_token = data.get("kubernetes_token")
+        kubernetes_ca = data.get("kubernetes_ca")
+
+        validation.validate_string("kubernetes_url", kubernetes_url)
+        validation.validate_string("kubernetes_token", kubernetes_token)
+        validation.validate_string("kubernetes_ca", kubernetes_ca)
+        validate_cluster_info(kubernetes_url)
+
+        validation.not_allowed_null(keys=["kubernetes_url"],
+                                    data=data)
+
+        count, result = self.resouPode.list(kubernetes_url=data["kubernetes_url"],
+                                            kubernetes_token=data.get("kubernetes_token"),
+                                            kubernetes_ca=data.get("kubernetes_ca"),
+                                            apiversion=data.get("apiversion"),
+                                            namespace=data.get("namespace"),
+                                            **kwargs)
+        return count, result
+
+
+class PodIdController(BaseController):
+    name = "Pod.id"
+    resouPode_describe = "Pod"
+    allow_methods = ("POST",)
+    resouPode = PodApi()
+
+    def create(self, request, data, **kwargs):
+        validate_cluster_auth(data)
+        validation.not_allowed_null(data=data,
+                                    keys=["kubernetes_url", "name"]
+                                    )
+
+        kubernetes_url = data["kubernetes_url"]
+        kubernetes_token = data.get("kubernetes_token")
+        kubernetes_ca = data.get("kubernetes_ca")
+
+        validation.validate_string("kubernetes_url", kubernetes_url)
+        validation.validate_string("kubernetes_token", kubernetes_token)
+        validation.validate_string("kubernetes_ca", kubernetes_ca)
+        validate_cluster_info(kubernetes_url)
+
+        name = data["name"]
+        result = self.resouPode.describe(name=name,
+                                         kubernetes_url=kubernetes_url,
+                                         kubernetes_token=kubernetes_token,
+                                         kubernetes_ca=kubernetes_ca,
+                                         apiversion=data.get("apiversion"),
+                                         namespace=data.get("namespace", "default")
+                                         )
+        if not result:
+            raise exception_common.ResourceNotFoundError()
+
+        return 1, result
+
+
+class PodDetailController(BaseController):
+    name = "Pod.id"
+    resouPode_describe = "Pod"
+    allow_methods = ("POST",)
+    resouPode = PodApi()
+
+    def create(self, request, data, **kwargs):
+        validate_cluster_auth(data)
+        validation.not_allowed_null(data=data,
+                                    keys=["kubernetes_url", "name"]
+                                    )
+
+        kubernetes_url = data["kubernetes_url"]
+        kubernetes_token = data.get("kubernetes_token")
+        kubernetes_ca = data.get("kubernetes_ca")
+
+        validation.validate_string("kubernetes_url", kubernetes_url)
+        validation.validate_string("kubernetes_token", kubernetes_token)
+        validation.validate_string("kubernetes_ca", kubernetes_ca)
+        validate_cluster_info(kubernetes_url)
+
+        name = data["name"]
+        result = self.resouPode.detail(name=name,
+                                       kubernetes_url=kubernetes_url,
+                                       kubernetes_token=kubernetes_token,
+                                       kubernetes_ca=kubernetes_ca,
+                                       apiversion=data.get("apiversion"),
+                                       namespace=data.get("namespace", "default")
+                                       )
+        if not result:
+            raise exception_common.ResourceNotFoundError()
+
+        return 1, result
+
+
+class PodSearchController(BaseController):
+    name = "Pod.id"
+    resouPode_describe = "Pod"
+    allow_methods = ("POST",)
+    resouPode = PodApi()
+
+    def create(self, request, data, **kwargs):
+        validate_cluster_auth(data)
+        validation.not_allowed_null(data=data,
+                                    keys=["kubernetes_url", "name"]
+                                    )
+
+        kubernetes_url = data["kubernetes_url"]
+        kubernetes_token = data.get("kubernetes_token")
+        kubernetes_ca = data.get("kubernetes_ca")
+
+        validation.validate_string("kubernetes_url", kubernetes_url)
+        validation.validate_string("kubernetes_token", kubernetes_token)
+        validation.validate_string("kubernetes_ca", kubernetes_ca)
+        validate_cluster_info(kubernetes_url)
+
+        pods = self.resource.search_rc_pods(selector={"app": data["name"]},
+                                            kubernetes_url=kubernetes_url,
+                                            kubernetes_token=kubernetes_token,
+                                            kubernetes_ca=kubernetes_ca,
+                                            apiversion=data.get("apiversion"),
+                                            namespace=data.get("namespace", "default"))
+        if not pods:
+            return_data = {"errorCode": 1, "errorMessage": "创建失败",
+                           "pod_restart_policy": "", "pod_uid": "",
+                           "pod_created_time": "", "pod_ip": "",
+                           "pod_start_time": "", "host_memory": "",
+                           "host_ip": "", "pod_annotations": "",
+                           "pod_labels": "", "host_cpu": "", "pod_node_name": "",
+                           "host_name": "", "pod_api_version": "",
+                           "pod_namespace": "", "host_uuid": "",
+                           "containers": "", "pod_name": data["name"]}
+            raise exception_common.ResourceNotSearchError(param="name",
+                                                          msg="未查找到pod %s",
+                                                          return_data=return_data)
+
+        return len(pods), pods
+
+
+class PodCreateController(BaseController):
+    name = "pod"
+    resource_describe = "pod"
+    allow_methods = ("POST")
+    resource = RCApi()
+
+    def _format_data(self, deployment):
+        validate_cluster_auth(deployment)
+        validation.not_allowed_null(data=deployment,
+                                    keys=["kubernetes_url", "name", "image",
+                                          "containername", "containerports"]
+                                    )
+
+        kubernetes_url = deployment["kubernetes_url"]
+        kubernetes_token = deployment.get("kubernetes_token")
+        kubernetes_ca = deployment.get("kubernetes_ca")
+
+        validation.validate_string("kubernetes_url", kubernetes_url)
+        validation.validate_string("kubernetes_token", kubernetes_token)
+        validation.validate_string("kubernetes_ca", kubernetes_ca)
+        validate_cluster_info(kubernetes_url)
+
+        name = deployment["name"]
+
+        containerlabels = deployment.get("containerlabels", {})
+        if containerlabels:
+            containerlabels = validation.validate_dict("containerlabels", containerlabels)
+        else:
+            containerlabels = {"app": name}
+
+        selector = deployment.get("selector", {})
+        if selector:
+            selector = validation.validate_dict("selector", selector)
+        else:
+            selector = {"app": name}
+
+        labels = deployment.get("labels", {})
+        if labels:
+            labels = validation.validate_dict("labels", labels)
+        else:
+            labels = {"app": name}
+
+        env = deployment.get("env")
+        if env:
+            env = validation.validate_dict("env", env)
+
+        containerports = deployment.get("containerports")
+        if containerports:
+            containerports = validation.validate_port(containerports)
+
+        request_cpu = deployment.get("request_cpu")
+        if request_cpu:
+            request_cpu = validation.validate_number("request_cpu",
+                                                     value=request_cpu,
+                                                     min=0.01, max=32)
+
+        request_memory = deployment.get("request_memory")
+        if request_memory:
+            request_memory = validation.validate_number("request_memory",
+                                                        value=request_memory,
+                                                        min=128, max=64 * 1024)
+
+        limit_cpu = deployment.get("limit_cpu")
+        if limit_cpu:
+            limit_cpu = validation.validate_number("limit_cpu",
+                                                   value=limit_cpu,
+                                                   min=0.01, max=32)
+
+        limit_memory = deployment.get("limit_memory")
+        if limit_memory:
+            limit_memory = validation.validate_number("limit_memory",
+                                                      value=limit_memory,
+                                                      min=128, max=64 * 1024)
+
+        containername = deployment.get("containername")
+        if containername:
+            containername = validation.validate_string("containername", containername)
+
+        imagePullSecrets = deployment.get("imagePullSecrets")
+        if imagePullSecrets:
+            imagePullSecrets = validation.validate_string("imagePullSecrets", imagePullSecrets)
+
+        docker_register_server = deployment.get("docker_register_server")
+        if docker_register_server:
+            docker_register_server = validation.validate_string("docker_register_server",
+                                                                docker_register_server)
+
+        docker_password = deployment.get("docker_password")
+        if docker_password:
+            docker_password = validation.validate_string("docker_password", docker_password)
+
+        docker_username = deployment.get("docker_username")
+        if docker_username:
+            docker_username = validation.validate_string("docker_username", docker_username)
+
+        replicas = deployment.get("replicas", 1)
+        apiversion = deployment.get("apiversion", "v1")
+        name = deployment["name"]
+        image = deployment["image"]
+
+        return {"kubernetes_url": kubernetes_url,
+                "name": name,
+                "id": deployment.get("id"),
+                "image": image,
+                "containerports": containerports,
+                "kubernetes_token": kubernetes_token,
+                "kubernetes_ca": kubernetes_ca,
+                "apiversion": apiversion,
+                "replicas": replicas,
+                "labels": labels,
+                "selector": selector,
+                "containername": containername,
+                "containerlabels": containerlabels,
+                "env": env,
+                "request_cpu": request_cpu,
+                "request_memory": request_memory,
+                "limit_cpu": limit_cpu,
+                "limit_memory": limit_memory,
+                "namespace": deployment.get("namespace", "default"),
+                'docker_password': docker_password,
+                'docker_username': docker_username,
+                'docker_register_server': docker_register_server,
+                'imagePullSecrets': imagePullSecrets
+                }
+
+    def _fetch_deployment(self, deployments):
+        info = {}
+        for deployment in deployments:
+            name = deployment.get("name")
+            if name in info.keys():
+                info[name].append(deployment)
+            else:
+                info[name] = [deployment]
+
+        result = []
+        for deploymentname, deploy in info.items():
+            uuid = deploy[0].get("id", None) or get_uuid()
+            _info = {"uuid": uuid,
+                     "name": deploymentname,
+                     "kubernetes_url": deploy[0]["kubernetes_url"],
+                     "kubernetes_token": deploy[0]["kubernetes_token"],
+                     "kubernetes_ca": deploy[0]["kubernetes_ca"],
+                     "apiversion": deploy[0]["apiversion"],
+                     "selector": deploy[0]["selector"],
+                     "labels": deploy[0]["labels"],
+                     "namespace": deploy[0]["namespace"],
+                     "replicas": deploy[0]["replicas"],
+                     'docker_password': deploy[0]["docker_password"],
+                     'docker_username': deploy[0]["docker_username"],
+                     'docker_register_server': deploy[0]["docker_register_server"],
+                     'imagePullSecrets': deploy[0]["imagePullSecrets"]
+                     }
+
+            containers = []
+
+            for container_info in deploy:
+                build_info = {}
+                build_info["image"] = container_info["image"]
+                build_info["name"] = container_info["containername"]
+
+                env = container_info["env"]
+                env_info = [{"name": "envcreator", "value": "wecube_plugins_kubernetes"}]
+                if env:
+                    for key, value in env.items():
+                        env_info.append({"name": key, "value": value})
+
+                build_info["env"] = env_info
+                build_info["ports"] = [{"containerPort": container_info["containerports"]}]
+                build_info["resources"] = {"requests": {"cpu": container_info.get("request_cpu", 0.01),
+                                                        "memory": str(
+                                                            container_info.get("request_memory", "256")) + "Mi"},
+                                           "limits": {"cpu": container_info.get("limit_cpu", 1),
+                                                      "memory": str(container_info.get("limit_memory", "256")) + "Mi"}}
+
+                containers.append(build_info)
+
+            _info["containers"] = containers
+            result.append(_info)
+
+        return result
+
+    def create(self, request, data, **kwargs):
+        '''
+        :param request:
+        :param data:
+        :return:
+        '''
+
+        metadata_lists = []
+        success_deploy = []
+        failed_deploy = []
+        for deployment in data:
+            metadata_lists.append(self._format_data(deployment))
+
+        create_datas = self._fetch_deployment(metadata_lists)
+
+        for create_data in create_datas:
+            try:
+                _res = self.resource.create_pod_containers(uuid=create_data["uuid"],
+                                                           kubernetes_url=create_data.get("kubernetes_url"),
+                                                           name=create_data.get("name"),
+                                                           containers=create_data.get("containers"),
+                                                           image_tags=create_data.get("image_tags", {}),
+                                                           kubernetes_token=create_data.get("kubernetes_token"),
+                                                           kubernetes_ca=create_data.get("kubernetes_ca"),
+                                                           apiversion=create_data.get("apiversion"),
+                                                           labels=create_data.get("labels"),
+                                                           replicas=create_data.get("replicas"),
+                                                           selector=create_data.get("selector"),
+                                                           namespace=create_data.get("namespace", "default"),
+                                                           imagePullSecrets=create_data.get("imagePullSecrets"),
+                                                           docker_password=create_data.get("docker_password"),
+                                                           docker_username=create_data.get("docker_username"),
+                                                           docker_register_server=create_data.get(
+                                                               "docker_register_server")
+                                                           )
+
+                if _res and _res.get("status") != 409:
+                    success_deploy.append(create_data)
+                else:
+                    create_data["status"] = 409
+                    failed_deploy.append(create_data)
+            except Exception, e:
+                failed_deploy.append(create_data)
+
+        result = []
+        if success_deploy:
+            time.sleep(1.5)
+
+        for deployment_info in success_deploy:
+            pods = self.resource.search_rc_pods(selector=deployment_info["selector"],
+                                                kubernetes_url=deployment_info.get("kubernetes_url"),
+                                                kubernetes_token=create_data.get("kubernetes_token"),
+                                                kubernetes_ca=create_data.get("kubernetes_ca"),
+                                                apiversion=create_data.get("apiversion"),
+                                                namespace=create_data.get("namespace", "default"))
+
+            result = result + pods
+
+        failed_name = []
+        for failed in failed_deploy:
+            failed_name.append(failed["name"])
+            _failed_data_ = {"errorCode": 1, "errorMessage": "创建失败",
+                             "pod_restart_policy": "", "pod_uid": "",
+                             "pod_created_time": "", "pod_ip": "",
+                             "pod_start_time": "", "host_memory": "",
+                             "host_ip": "", "pod_annotations": "",
+                             "pod_labels": "", "host_cpu": "", "pod_node_name": "",
+                             "host_name": "", "pod_api_version": "",
+                             "pod_namespace": "", "host_uuid": "",
+                             "containers": "", "pod_name": failed["name"]}
+            if failed.get("status", 0) == 409:
+                _failed_data_["errorMessage"] = "%s 已经存在， 请使用其他名称" % failed["name"]
+
+            result = result + [_failed_data_]
+
+        failed_name = ",".join(failed_name)
+
+        if failed_deploy:
+            raise exception_common.ResourceNotCompleteError(param="",
+                                                            msg="pod %s 部署失败" % failed_name,
+                                                            return_data=result)
+
+        return len(result), result
+
+
+class PodDeleteController(RCDeleteController):
+    def __repr__(self):
+        return "PodDeleteController -> RCDeleteController"
