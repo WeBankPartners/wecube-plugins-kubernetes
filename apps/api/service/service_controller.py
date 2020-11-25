@@ -214,7 +214,7 @@ class ServiceCreateController(BaseController):
 
         failed_name = ",".join(failed_name)
         result = success_service + failed_service
-        if failed_deploy:
+        if failed_service:
             raise exception_common.ResourceNotCompleteError(param="",
                                                             msg="service %s 部署失败" % failed_name,
                                                             return_data=result)
@@ -227,7 +227,7 @@ class ServiceIdController(BaseController):
     allow_methods = ('POST',)
     resource = ServiceApi()
 
-    def create(self, request, data, **kwargs):
+    def _format_data(self, data):
         validate_cluster_auth(data)
         validation.not_allowed_null(data=data,
                                     keys=["kubernetes_url", "name"]
@@ -243,17 +243,47 @@ class ServiceIdController(BaseController):
         validate_cluster_info(kubernetes_url)
 
         name = data["name"]
-        result = self.resource.show(name=name,
-                                    kubernetes_url=kubernetes_url,
-                                    kubernetes_token=kubernetes_token,
-                                    kubernetes_ca=kubernetes_ca,
-                                    apiversion=data.get("apiversion"),
-                                    namespace=data.get("namespace", "default")
-                                    )
-        if not result:
-            raise exception_common.ResourceNotFoundError()
 
-        return 1, result
+        return {"kubernetes_url": kubernetes_url,
+                "name": name,
+                "kubernetes_token": kubernetes_token,
+                "kubernetes_ca": kubernetes_ca,
+                "namespace": data.get("namespace", "default"),
+                "apiversion": data.get("apiversion")
+                }
+
+    def create(self, request, data, **kwargs):
+        search_datas = []
+        for info in data:
+            search_datas.append(self._format_data(info))
+
+        success = []
+        failed = []
+        for search_data in search_datas:
+            _info = self.resource.show(name=search_data["name"],
+                                       kubernetes_url=search_data["kubernetes_url"],
+                                       kubernetes_token=search_data["kubernetes_token"],
+                                       kubernetes_ca=search_data["kubernetes_ca"],
+                                       apiversion=search_data.get("apiversion"),
+                                       namespace=search_data.get("namespace", "default"))
+            if not _info:
+                _data = {"errorCode": 1, "errorMessage": "未查找到", "name": search_data["name"]}
+                failed.append(_data)
+            else:
+                success += _info
+
+        failed_name = []
+        return_data = success + failed
+        for failed in failed:
+            failed_name.append(failed["name"])
+
+        failed_name = ",".join(failed_name)
+        if failed:
+            raise exception_common.ResourceNotSearchError(param="name",
+                                                          msg="未查找到pod %s" % failed_name,
+                                                          return_data=return_data)
+
+        return len(return_data), return_data
 
 
 class ServiceDelIdController(BaseController):
@@ -321,4 +351,3 @@ class ServiceDelIdController(BaseController):
                                                               return_data=return_data)
 
         return len(return_data), return_data
-
