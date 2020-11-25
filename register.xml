@@ -39,12 +39,23 @@
                     <parameter datatype="string" mappingType="entity" required="Y">selector</parameter>
                     <parameter datatype="string" mappingType="entity" required="N">labels</parameter>
                     <parameter datatype="string" mappingType="entity" required="N">namespace</parameter>
+                    <parameter datatype="string" mappingType="entity" required="Y">podname</parameter>
                 </inputParameters>
                 <outputParameters>
-                    <parameter datatype="string">count</parameter>
-                    <parameter datatype="string">data</parameter>
-                    <parameter datatype="string" >errorCode</parameter>
-                    <parameter datatype="string" >errorMessage</parameter>
+                    <parameter datatype="string">labels</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">apiversion</parameter>
+                    <parameter datatype="string">selector</parameter>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">nodeport</parameter>
+                    <parameter datatype="string">kubernetes_url</parameter>
+                    <parameter datatype="string">kubernetes_ca</parameter>
+                    <parameter datatype="string">uuid</parameter>
+                    <parameter datatype="string">name</parameter>
+                    <parameter datatype="string">namespace</parameter>
+                    <parameter datatype="string">serviceport</parameter>
+                    <parameter datatype="string">kubernetes_token</parameter>
+                    <parameter datatype="string">containerport</parameter>
                 </outputParameters>
             </interface>
             <interface action="detail" path="wecube-plugins-kubernetes/v1/service/detail" httpMethod='POST'>
@@ -56,10 +67,19 @@
                     <parameter datatype="string" mappingType="entity" required="N">namespace</parameter>
                 </inputParameters>
                 <outputParameters>
-                    <parameter datatype="string">count</parameter>
-                    <parameter datatype="string">data</parameter>
-                    <parameter datatype="string" >errorCode</parameter>
-                    <parameter datatype="string" >errorMessage</parameter>
+                    <parameter datatype="string">cluster_ip</parameter>
+                    <parameter datatype="string">labels</parameter>
+                    <parameter datatype="string">uid</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">created_time</parameter>
+                    <parameter datatype="string">pod</parameter>
+                    <parameter datatype="string">name</parameter>
+                    <parameter datatype="string">service_port</parameter>
+                    <parameter datatype="string">containerport</parameter>
+                    <parameter datatype="string">node_port</parameter>
+                    <parameter datatype="string">type</parameter>
+                    <parameter datatype="string">ports</parameter>
                 </outputParameters>
             </interface>
             <interface action="delete" path="wecube-plugins-kubernetes/v1/service/delete" httpMethod='POST'>
@@ -71,8 +91,7 @@
                     <parameter datatype="string" mappingType="entity" required="N">namespace</parameter>
                 </inputParameters>
                 <outputParameters>
-                    <parameter datatype="string">count</parameter>
-                    <parameter datatype="string">data</parameter>
+                    <parameter datatype="string">name</parameter>
                     <parameter datatype="string" >errorCode</parameter>
                     <parameter datatype="string" >errorMessage</parameter>
                 </outputParameters>
@@ -250,7 +269,7 @@
             </interface>
         </plugin>
         <plugin name="pod">
-            <interface action="detail" path="wecube-plugins-kubernetes/v1/pod/detail" httpMethod='POST'>
+            <interface action="detail" path="wecube-plugins-kubernetes/v1/pod/search" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -259,8 +278,86 @@
                     <parameter datatype="string" mappingType="entity" required="N">namespace</parameter>
                 </inputParameters>
                 <outputParameters>
-                    <parameter datatype="string">count</parameter>
-                    <parameter datatype="string">data</parameter>
+                    <parameter datatype="string">status</parameter>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">pod_restart_policy</parameter>
+                    <parameter datatype="string">pod_created_time</parameter>
+                    <parameter datatype="string">pod_ip</parameter>
+                    <parameter datatype="string">pod_start_time</parameter>
+                    <parameter datatype="string">host_memory</parameter>
+                    <parameter datatype="string">host_ip</parameter>
+                    <parameter datatype="string">pod_labels</parameter>
+                    <parameter datatype="string">pod_namespace</parameter>
+                    <parameter datatype="string">pod_uid</parameter>
+                    <parameter datatype="string">pod_api_version</parameter>
+                    <parameter datatype="string">host_name</parameter>
+                    <parameter datatype="string">host_cpu</parameter>
+                    <parameter datatype="string">pod_node_name</parameter>
+                    <parameter datatype="string">pod_name</parameter>
+                    <parameter datatype="string">host_uuid</parameter>
+                    <parameter datatype="string">containers</parameter>
+                    <parameter datatype="string">pod_annotations</parameter>
+                </outputParameters>
+            </interface>
+            <interface action="create" path="wecube-plugins-kubernetes/v1/pod/create" httpMethod='POST'>
+                <inputParameters>
+                    <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
+                    <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
+                    <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_token</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">docker_register_server</parameter>
+                    <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">docker_username</parameter>
+                    <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">docker_password</parameter>
+                    <parameter datatype="string" mappingType="entity" required="Y">containername</parameter>
+                    <parameter datatype="string" mappingType="entity" required="Y">name</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">replicas</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">apiversion</parameter>
+                    <parameter datatype="string" mappingType="entity" required="Y">image</parameter>
+                    <parameter datatype="string" mappingType="entity" required="Y">containerports</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">env</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">request_cpu</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">request_memory</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">limit_cpu</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">limit_memory</parameter>
+                    <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">docker_username</parameter>
+                    <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">docker_password</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">docker_register_server</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">id</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">imagePullSecrets</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">status</parameter>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">pod_restart_policy</parameter>
+                    <parameter datatype="string">pod_created_time</parameter>
+                    <parameter datatype="string">pod_ip</parameter>
+                    <parameter datatype="string">pod_start_time</parameter>
+                    <parameter datatype="string">host_memory</parameter>
+                    <parameter datatype="string">host_ip</parameter>
+                    <parameter datatype="string">pod_labels</parameter>
+                    <parameter datatype="string">pod_namespace</parameter>
+                    <parameter datatype="string">pod_uid</parameter>
+                    <parameter datatype="string">pod_api_version</parameter>
+                    <parameter datatype="string">host_name</parameter>
+                    <parameter datatype="string">host_cpu</parameter>
+                    <parameter datatype="string">pod_node_name</parameter>
+                    <parameter datatype="string">pod_name</parameter>
+                    <parameter datatype="string">host_uuid</parameter>
+                    <parameter datatype="string">containers</parameter>
+                    <parameter datatype="string">pod_annotations</parameter>
+                </outputParameters>
+            </interface>
+            <interface action="delete" path="wecube-plugins-kubernetes/v1/pod/delete" httpMethod='POST'>
+                <inputParameters>
+                    <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
+                    <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
+                    <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_token</parameter>
+                    <parameter datatype="string" mappingType="entity" required="Y">name</parameter>
+                    <parameter datatype="string" mappingType="entity" required="N">namespace</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">name</parameter>
                     <parameter datatype="string" >errorCode</parameter>
                     <parameter datatype="string" >errorMessage</parameter>
                 </outputParameters>
