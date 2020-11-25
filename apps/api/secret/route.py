@@ -9,9 +9,6 @@ from .Secret_controller import SecretIdController
 from .Secret_controller import SecretDeleteController
 
 urlpatterns = [
-    # url(r'^$', SecretController(), name='Secret'),
-    # url(r'^(?P<name>[\w-]+)$', SecretIdController(), name='Secret.id'),
-
     url(r'^add$', SecretAddController()),
     url(r'^list$', SecretListController()),
     url(r'^describe$', SecretIdController()),

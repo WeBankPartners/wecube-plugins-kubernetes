@@ -3,9 +3,7 @@
 from __future__ import (absolute_import, division, print_function, unicode_literals)
 
 import json
-
 import os
-
 from apps.api.secret.base import SecretApi
 from apps.background.lib.drivers.KubernetesDrivers import DeploymentManager
 from core import local_exceptions
@@ -187,19 +185,6 @@ class DeploymentApi(object):
         spec_data = {'containers': [container_info]}
         if imagePullSecrets:
             spec_data["imagePullSecrets"] = [{"name": imagePullSecrets}]
-
-        # create_data = {'apiVersion': apiversion,
-        #                'kind': 'ReplicationController',
-        #                'metadata': metadata,
-        #                'spec': {'replicas': replicas,
-        #                         'selector': selector,
-        #                         'template': {
-        #                             'spec': {'containers': [
-        #                                 container_info
-        #                             ]},
-        #                             'metadata': {'labels': selector}}
-        #                         }
-        #                }
 
         create_data = {'apiVersion': apiversion,
                        'kind': 'ReplicationController',

@@ -10,9 +10,6 @@ from .deployment_controller import DeploymentUpdateIdController
 from .deployment_controller import DeploymentDeleteIdController
 
 urlpatterns = [
-    # url(r'^$', DeploymentController(), name='Deployment'),
-    # url(r'^(?P<name>[\w-]+)$', DeploymentIdController(), name='Deployment.id'),
-
     url(r'^add$', DeploymentAddController()),
     url(r'^list$', DeploymentListController()),
     url(r'^describe$', DeploymentIdController()),
