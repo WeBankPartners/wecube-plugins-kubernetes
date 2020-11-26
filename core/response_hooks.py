@@ -248,18 +248,14 @@ class ResponseBase(object):
         elif e.__class__.__name__ in ['ResourceNotFoundError']:
             status_code = 404
             errmsg = self.format_err(status_code, "ResourceNotFoundError", "ResourceNotFoundError")
-            response_res = HttpResponse(status=status_code, content=errmsg,
-                                        content_type=content_type)
-
+            response_res = HttpResponse(status=status_code, content=errmsg, content_type=content_type)
         elif e.__class__.__name__ in exception_common_classes:
             errmsg = self.format_err(e.status_code, e.__class__.__name__, e)
             response_res = HttpResponse(status=e.status_code, content=errmsg, content_type=content_type)
         else:
             status_code = 500
             errmsg = self.format_err(status_code, "SericeError", "服务器遇到异常")
-            response_res = HttpResponse(status=status_code, content=errmsg,
-                                        content_type=content_type)
-
+            response_res = HttpResponse(status=status_code, content=errmsg, content_type=content_type)
         return response_res
 
 
