@@ -1,4 +1,4 @@
-FROM python:2.7
+FROM python:2.7.18-slim
 LABEL maintainer = "Webank CTB Team"
 # Install logrotate
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list && \
@@ -14,4 +14,4 @@ RUN ls -la && \
     chmod +x /app/wecube-plugins-kubernetes/bin/*.sh
 
 EXPOSE 8999
-ENTRYPOINT ["/app/wecube-plugins-kubernetes/bin/start.sh"]
+CMD ["/app/wecube-plugins-kubernetes/bin/start.sh"]
