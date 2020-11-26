@@ -2,11 +2,8 @@ current_dir=$(shell pwd)
 project_name=$(shell basename "${current_dir}")
 version=${PLUGIN_VERSION}
 
-clean:
-	rm -rf $(current_dir)/
 
-
-image: clean
+image:
 	docker build -t $(project_name):$(version) .
 
 package: image
