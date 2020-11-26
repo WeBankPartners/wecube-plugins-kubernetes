@@ -18,5 +18,5 @@ from django.conf.urls import include
 from django.contrib import admin
 
 urlpatterns = [
-        url(r'^wecube-plugins-kubernetes/v1.0.0/', include('apps.route', namespace='api')),
+        url(r'^kubernetes/v1/', include('apps.route', namespace='api')),
 ]

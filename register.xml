@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<package name="wecubepluginskubernetes" version="v1.0.0">
+<package name="kubernetes" version="{{PLUGIN_VERSION}}">
 
     <!-- 1.依赖分析 - 描述运行本插件包需要的其他插件包 -->
     <packageDependencies>
@@ -19,13 +19,13 @@
 
     <!-- 6.运行资源 - 描述部署运行本插件包需要的基础资源(如主机、虚拟机、容器、数据库等) -->
     <resourceDependencies>
-        <docker imageName="wecube_kubernetes" containerName="wecube_k8s_v1" portBindings="8080:8989" volumeBindings="/etc/localtime:/etc/localtime,{{BASE_MOUNT_PATH}}/kubernetes/logs:/home/app/kubernetes/logs" envVariables=""/>
+        <docker imageName="{{IMAGENAME}}" containerName="{{CONTAINERNAME}}" portBindings="{{ALLOCATE_PORT}}:8999" volumeBindings="/etc/localtime:/etc/localtime,{{BASE_MOUNT_PATH}}/kubernetes/logs:/app/wecube-plugins-kubernetes/logs" envVariables=""/>
     </resourceDependencies>
 
     <!-- 7.插件列表 - 描述插件包中单个插件的输入和输出 -->
     <plugins>
         <plugin name="service">
-            <interface action="create" path="wecube-plugins-kubernetes/v1/service/add" httpMethod='POST'>
+            <interface action="create" path="/kubernetes/v1/service/add" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -58,7 +58,7 @@
                     <parameter datatype="string">containerport</parameter>
                 </outputParameters>
             </interface>
-            <interface action="detail" path="wecube-plugins-kubernetes/v1/service/detail" httpMethod='POST'>
+            <interface action="detail" path="/kubernetes/v1/service/detail" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -82,7 +82,7 @@
                     <parameter datatype="string">ports</parameter>
                 </outputParameters>
             </interface>
-            <interface action="delete" path="wecube-plugins-kubernetes/v1/service/delete" httpMethod='POST'>
+            <interface action="delete" path="/kubernetes/v1/service/delete" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -98,7 +98,7 @@
             </interface>
         </plugin>
         <plugin name="deployment">
-            <interface action="create" path="wecube-plugins-kubernetes/v1/deployment/create" httpMethod='POST'>
+            <interface action="create" path="/kubernetes/v1/deployment/create" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -128,7 +128,7 @@
                     <parameter datatype="string" >errorMessage</parameter>
                 </outputParameters>
             </interface>
-            <interface action="detail" path="wecube-plugins-kubernetes/v1/deployment/detail" httpMethod='POST'>
+            <interface action="detail" path="/kubernetes/v1/deployment/detail" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -143,7 +143,7 @@
                     <parameter datatype="string" >errorMessage</parameter>
                 </outputParameters>
             </interface>
-            <interface action="update" path="wecube-plugins-kubernetes/v1/deployment/update" httpMethod='PATCH'>
+            <interface action="update" path="/kubernetes/v1/deployment/update" httpMethod='PATCH'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -159,7 +159,7 @@
                     <parameter datatype="string" >errorMessage</parameter>
                 </outputParameters>
             </interface>
-            <interface action="delete" path="wecube-plugins-kubernetes/v1/deployment/delete" httpMethod='POST'>
+            <interface action="delete" path="/kubernetes/v1/deployment/delete" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -176,7 +176,7 @@
             </interface>
         </plugin>
         <plugin name="rc">
-            <interface action="create" path="wecube-plugins-kubernetes/v1/rc/create" httpMethod='POST'>
+            <interface action="create" path="/kubernetes/v1/rc/create" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -221,7 +221,7 @@
                     <parameter datatype="string">pod_name</parameter>
                 </outputParameters>
             </interface>
-            <interface action="detail" path="wecube-plugins-kubernetes/v1/rc/detail" httpMethod='POST'>
+            <interface action="detail" path="/kubernetes/v1/rc/detail" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -236,7 +236,7 @@
                     <parameter datatype="string" >errorMessage</parameter>
                 </outputParameters>
             </interface>
-            <interface action="update" path="wecube-plugins-kubernetes/v1/rc/update" httpMethod='PATCH'>
+            <interface action="update" path="/kubernetes/v1/rc/update" httpMethod='PATCH'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -252,7 +252,7 @@
                     <parameter datatype="string" >errorMessage</parameter>
                 </outputParameters>
             </interface>
-            <interface action="delete" path="wecube-plugins-kubernetes/v1/rc/delete" httpMethod='POST'>
+            <interface action="delete" path="/kubernetes/v1/rc/delete" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -269,7 +269,7 @@
             </interface>
         </plugin>
         <plugin name="pod">
-            <interface action="detail" path="wecube-plugins-kubernetes/v1/pod/search" httpMethod='POST'>
+            <interface action="detail" path="/kubernetes/v1/pod/search" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -300,7 +300,7 @@
                     <parameter datatype="string">pod_annotations</parameter>
                 </outputParameters>
             </interface>
-            <interface action="create" path="wecube-plugins-kubernetes/v1/pod/create" httpMethod='POST'>
+            <interface action="create" path="/kubernetes/v1/pod/create" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
@@ -348,7 +348,7 @@
                     <parameter datatype="string">pod_annotations</parameter>
                 </outputParameters>
             </interface>
-            <interface action="delete" path="wecube-plugins-kubernetes/v1/pod/delete" httpMethod='POST'>
+            <interface action="delete" path="/kubernetes/v1/pod/delete" httpMethod='POST'>
                 <inputParameters>
                     <parameter datatype="string" mappingType="entity" required="Y">kubernetes_url</parameter>
                     <parameter datatype="string" sensitiveData="Y" mappingType="entity" required="N">kubernetes_ca</parameter>
