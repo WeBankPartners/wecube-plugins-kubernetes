@@ -193,6 +193,7 @@ class PodApi(object):
         templete["host_name"] = node.get("hostname")
         templete["host_ip"] = pod_info["status"]["host_ip"]
         templete["host_uuid"] = node.get("uuid")
+        templete["host_cmdb_id"] = node.get("host_cmdb_id")
 
         templete["pod_ip"] = pod_info["status"]["pod_ip"]
         templete["pod_start_time"] = pod_info["status"]["start_time"]

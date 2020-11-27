@@ -5,6 +5,7 @@ from __future__ import (absolute_import, division, print_function, unicode_liter
 import time
 
 from apps.api.rc.base import RCApi
+from apps.api.rc.rc_controller import RCDeleteController
 from apps.common.validate_auth_info import validate_cluster_auth
 from apps.common.validate_auth_info import validate_cluster_info
 from core import local_exceptions as exception_common
@@ -12,7 +13,6 @@ from core import validation
 from core.controller import BaseController
 from lib.uuid_util import get_uuid
 from .base import PodApi
-from apps.api.rc.rc_controller import RCDeleteController
 
 
 class PodListController(BaseController):
@@ -40,11 +40,11 @@ class PodListController(BaseController):
                                     data=data)
 
         count, result = self.resource.list(kubernetes_url=data["kubernetes_url"],
-                                            kubernetes_token=data.get("kubernetes_token"),
-                                            kubernetes_ca=data.get("kubernetes_ca"),
-                                            apiversion=data.get("apiversion"),
-                                            namespace=data.get("namespace"),
-                                            **kwargs)
+                                           kubernetes_token=data.get("kubernetes_token"),
+                                           kubernetes_ca=data.get("kubernetes_ca"),
+                                           apiversion=data.get("apiversion"),
+                                           namespace=data.get("namespace"),
+                                           **kwargs)
         return count, result
 
 
@@ -71,12 +71,12 @@ class PodIdController(BaseController):
 
         name = data["name"]
         result = self.resource.describe(name=name,
-                                         kubernetes_url=kubernetes_url,
-                                         kubernetes_token=kubernetes_token,
-                                         kubernetes_ca=kubernetes_ca,
-                                         apiversion=data.get("apiversion"),
-                                         namespace=data.get("namespace", "default")
-                                         )
+                                        kubernetes_url=kubernetes_url,
+                                        kubernetes_token=kubernetes_token,
+                                        kubernetes_ca=kubernetes_ca,
+                                        apiversion=data.get("apiversion"),
+                                        namespace=data.get("namespace", "default")
+                                        )
         if not result:
             raise exception_common.ResourceNotFoundError()
 
@@ -106,12 +106,12 @@ class PodDetailController(BaseController):
 
         name = data["name"]
         result = self.resource.detail(name=name,
-                                       kubernetes_url=kubernetes_url,
-                                       kubernetes_token=kubernetes_token,
-                                       kubernetes_ca=kubernetes_ca,
-                                       apiversion=data.get("apiversion"),
-                                       namespace=data.get("namespace", "default")
-                                       )
+                                      kubernetes_url=kubernetes_url,
+                                      kubernetes_token=kubernetes_token,
+                                      kubernetes_ca=kubernetes_ca,
+                                      apiversion=data.get("apiversion"),
+                                      namespace=data.get("namespace", "default")
+                                      )
         if not result:
             raise exception_common.ResourceNotFoundError()
 
@@ -146,7 +146,9 @@ class PodSearchController(BaseController):
                 "kubernetes_token": kubernetes_token,
                 "kubernetes_ca": kubernetes_ca,
                 "namespace": data.get("namespace", "default"),
-                "apiversion": data.get("apiversion")
+                "apiversion": data.get("apiversion"),
+                "id": data.get("id"),
+                "callbackParameter": data.get("callbackParameter")
                 }
 
     def create(self, request, data, **kwargs):
@@ -173,9 +175,15 @@ class PodSearchController(BaseController):
                          "host_name": "", "pod_api_version": "",
                          "pod_namespace": "", "host_uuid": "",
                          "containers": "", "pod_name": search_data["name"]}
+
+                _data["id"] = search_data["id"]
+                _data["callbackParameter"] = search_data["callbackParameter"]
                 failed_pod.append(_data)
             else:
-                success_pod += pods
+                _pod = pods[0]
+                _pod["id"] = search_data["id"]
+                _pod["callbackParameter"] = search_data["callbackParameter"]
+                success_pod += [_pod]
 
         failed_name = []
         return_data = success_pod + failed_pod
@@ -196,6 +204,19 @@ class PodCreateController(BaseController):
     resource_describe = "pod"
     allow_methods = ("POST")
     resource = RCApi()
+
+    def _format_env(self, envstring):
+        env = {}
+        envstring = validation.validate_string("env", envstring)
+        envstring = envstring.replace("\u0001", "")
+        env_keys = envstring.split("=")[0]
+        env_keys_list = env_keys.split(",")
+        env_values = envstring.split("=")[1]
+        env_values_list = env_values.split(",")
+        for i in xrange(len(env_keys_list)):
+            env[env_keys_list[i]] = env_values_list[i]
+
+        return env
 
     def _format_data(self, deployment):
         validate_cluster_auth(deployment)
@@ -233,9 +254,10 @@ class PodCreateController(BaseController):
         else:
             labels = {"app": name}
 
-        env = deployment.get("env")
-        if env:
-            env = validation.validate_dict("env", env)
+        # env = deployment.get("env")
+        # if env:
+        #     env = validation.validate_dict("env", env)
+        env = self._format_env(deployment.get("env"))
 
         containerports = deployment.get("containerports")
         if containerports:
@@ -288,8 +310,10 @@ class PodCreateController(BaseController):
 
         replicas = deployment.get("replicas", 1)
         apiversion = deployment.get("apiversion", "v1")
-        name = deployment["name"]
+
+        deploymentname = deployment.get("deployment")
         image = deployment["image"]
+        callbackParameter = deployment.get("callbackParameter")
 
         return {"kubernetes_url": kubernetes_url,
                 "name": name,
@@ -313,7 +337,8 @@ class PodCreateController(BaseController):
                 'docker_password': docker_password,
                 'docker_username': docker_username,
                 'docker_register_server': docker_register_server,
-                'imagePullSecrets': imagePullSecrets
+                'imagePullSecrets': imagePullSecrets,
+                "callbackParameter": callbackParameter
                 }
 
     def _fetch_deployment(self, deployments):
@@ -327,8 +352,11 @@ class PodCreateController(BaseController):
 
         result = []
         for deploymentname, deploy in info.items():
+            if len(deploy) > 1:
+                raise exception_common.ResourceUniqueException("name", deploymentname)
+
             uuid = deploy[0].get("id", None) or get_uuid()
-            _info = {"uuid": uuid,
+            _info = {"id": uuid,
                      "name": deploymentname,
                      "kubernetes_url": deploy[0]["kubernetes_url"],
                      "kubernetes_token": deploy[0]["kubernetes_token"],
@@ -368,6 +396,7 @@ class PodCreateController(BaseController):
                 containers.append(build_info)
 
             _info["containers"] = containers
+            _info["callbackParameter"] = deploy[0]["callbackParameter"]
             result.append(_info)
 
         return result
@@ -389,7 +418,7 @@ class PodCreateController(BaseController):
 
         for create_data in create_datas:
             try:
-                _res = self.resource.create_pod_containers(uuid=create_data["uuid"],
+                _res = self.resource.create_pod_containers(uuid=create_data["id"],
                                                            kubernetes_url=create_data.get("kubernetes_url"),
                                                            name=create_data.get("name"),
                                                            containers=create_data.get("containers"),
@@ -427,8 +456,11 @@ class PodCreateController(BaseController):
                                                 kubernetes_ca=create_data.get("kubernetes_ca"),
                                                 apiversion=create_data.get("apiversion"),
                                                 namespace=create_data.get("namespace", "default"))
+            _pod = pods[0]
+            _pod["id"] = deployment_info["id"]
+            _pod["callbackParameter"] = deployment_info["callbackParameter"]
 
-            result = result + pods
+            result = result + [_pod]
 
         failed_name = []
         for failed in failed_deploy:
@@ -442,6 +474,9 @@ class PodCreateController(BaseController):
                              "host_name": "", "pod_api_version": "",
                              "pod_namespace": "", "host_uuid": "",
                              "containers": "", "pod_name": failed["name"]}
+            _pod["id"] = failed["id"]
+            _pod["callbackParameter"] = failed["callbackParameter"]
+
             if failed.get("status", 0) == 409:
                 _failed_data_["errorMessage"] = "%s 已经存在， 请使用其他名称" % failed["name"]
 
