@@ -128,18 +128,21 @@ class ServiceCreateController(BaseController):
         ports = validation.validate_string("ports", ports)
         port_lists = ports.split(",")
         ports = []
+
         for port_list in port_lists:
             _create_port = {}
             port_args = port_list.split("&")
             for port_arg in port_args:
                 if port_arg.startswith("nodeport"):
-                    _create_port["nodeport"] = validation.validate_port(port_arg.split(":")[1], min=30000, max=32767)
+                    _create_port["nodePort"] = validation.validate_port(port_arg.split(":")[1], min=30000, max=32767)
                 if port_arg.startswith("containerport"):
-                    _create_port["containerport"] = validation.validate_port(port_arg.split(":")[1], min=30000,
-                                                                             max=32767)
+                    _create_port["targetPort"] = validation.validate_port(port_arg.split(":")[1])
                 if port_arg.startswith("serviceport"):
-                    _create_port["serviceport"] = validation.validate_port(port_arg.split(":")[1], min=30000, max=32767)
+                    _create_port["port"] = validation.validate_port(port_arg.split(":")[1])
 
+            if len(_create_port) != 3:
+                raise exception_common.ResourceValidateError("port", "缺少必要的端口参数")
+            _create_port["name"] = "svr-%s" % (_create_port["port"])
             ports.append(_create_port)
 
         return ports
@@ -187,8 +190,9 @@ class ServiceCreateController(BaseController):
                 'apiversion': apiversion,
                 'labels': labels,
                 'selector': selector,
-                'namespace': data.get("namespace", "default")
-                }, callbackParameter
+                'namespace': data.get("namespace", "default"),
+                "callbackParameter": callbackParameter
+                }
 
     def create(self, request, data, **kwargs):
         '''
@@ -207,8 +211,17 @@ class ServiceCreateController(BaseController):
         success_service = []
         failed_service = []
         for create_data in create_datas:
-            create_res, callbackParameter = self.resource.create(**create_data)
-            create_data["callbackParameter"] = callbackParameter
+            create_res = self.resource.create(uuid=create_data["id"],
+                                              name=create_data["name"],
+                                              ports=create_data["ports"],
+                                              kubernetes_url=create_data["kubernetes_url"],
+                                              type=create_data.get("type"),
+                                              kubernetes_token=create_data["kubernetes_token"],
+                                              kubernetes_ca=create_data["kubernetes_ca"],
+                                              apiversion=create_data["apiversion"],
+                                              labels=create_data["labels"],
+                                              selector=create_data["selector"],
+                                              namespace=create_data["namespace"], )
             if create_res:
                 success_service.append(create_data)
             else:
@@ -226,6 +239,7 @@ class ServiceCreateController(BaseController):
                                                namespace=create_data.get("namespace", "default"))
 
             serviceinfo["id"] = success["id"]
+            serviceinfo["callbackParameter"] = success["callbackParameter"]
             serviceinfo.update({"errorCode": 0, "errorMessage": ""})
             result = result + [serviceinfo]
 
@@ -233,17 +247,17 @@ class ServiceCreateController(BaseController):
         for failed in failed_service:
             failed_name.append(failed["name"])
 
-            failedinfo = {'cluster_ip': '', 'name': '', 'service_port': '',
-                          'labels': '', 'ports': '', 'node_port': '',
+            failedinfo = {'cluster_ip': '', 'name': '',
+                          'labels': '', 'ports': '', 'uid': '',
                           'created_time': '', 'pod': '', 'type': '',
-                          'containerport': '', 'uid': '',
                           "errorCode": 1, "errorMessage": "创建失败"}
 
             failedinfo["id"] = failed["id"]
-            result = result + failedinfo
+            failedinfo["callbackParameter"] = failed["callbackParameter"]
+            result = result + [failedinfo]
 
         failed_name = ",".join(failed_name)
-        result = success_service + failed_service
+
         if failed_service:
             raise exception_common.ResourceNotCompleteError(param="",
                                                             msg="service %s 部署失败" % failed_name,
@@ -279,7 +293,9 @@ class ServiceIdController(BaseController):
                 "kubernetes_token": kubernetes_token,
                 "kubernetes_ca": kubernetes_ca,
                 "namespace": data.get("namespace", "default"),
-                "apiversion": data.get("apiversion")
+                "apiversion": data.get("apiversion"),
+                "id": data.get("id"),
+                "callbackParameter": data.get("callbackParameter")
                 }
 
     def create(self, request, data, **kwargs):
@@ -337,9 +353,16 @@ class ServiceDetailController(ServiceIdController):
                                          apiversion=search_data.get("apiversion"),
                                          namespace=search_data.get("namespace", "default"))
             if not _info:
-                _data = {"errorCode": 1, "errorMessage": "未查找到", "name": search_data["name"]}
+                _data = {"errorCode": 1, "errorMessage": "未查找到", "name": search_data["name"],
+                         'cluster_ip': '', 'labels': '', 'created_time': '', 'pod': '',
+                         'type': '', 'ports': '', 'uid': ''}
+
+                _data["id"] = search_data["id"]
+                _data["callbackParameter"] = search_data["callbackParameter"]
                 failed.append(_data)
             else:
+                _info["id"] = search_data.get("id")
+                _info["callbackParameter"] = search_data["callbackParameter"]
                 success += [_info]
 
         failed_name = []
@@ -384,7 +407,9 @@ class ServiceDelIdController(BaseController):
                 "kubernetes_token": kubernetes_token,
                 "kubernetes_ca": kubernetes_ca,
                 "namespace": data.get("namespace", "default"),
-                "apiversion": data.get("apiversion")
+                "apiversion": data.get("apiversion"),
+                "id": data.get("id"),
+                "callbackParameter": data.get("callbackParameter")
                 }
 
     def create(self, request, data, **kwargs):
@@ -404,9 +429,13 @@ class ServiceDelIdController(BaseController):
                                           )
             if result:
                 _data = {"errorCode": 0, "errorMessage": "success", "name": search_data["name"]}
+                _data["id"] = search_data["id"]
+                _data["callbackParameter"] = search_data["callbackParameter"]
                 success.append(_data)
             else:
                 _data = {"errorCode": 1, "errorMessage": "删除失败", "name": search_data["name"]}
+                _data["id"] = search_data["id"]
+                _data["callbackParameter"] = search_data["callbackParameter"]
                 failed.append(_data)
 
         failed_name = []
