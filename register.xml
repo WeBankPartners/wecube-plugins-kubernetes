@@ -10,8 +10,13 @@
     </menus>
 
     <!-- 3.数据模型 - 描述本插件包的数据模型,并且描述和Framework数据模型的关系 -->
-    <dataModel isDynamic="true" path="/data-model" method="GET">
+    <dataModel>
     </dataModel>
+
+    <!-- 4.系统参数 - 描述运行本插件包需要的系统参数 -->
+    <systemParameters>
+    </systemParameters>
+
 
     <!-- 5.权限设定 -->
     <authorities>
