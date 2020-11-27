@@ -106,9 +106,7 @@ class ServiceAddController(BaseController):
         else:
             labels = {"svr": name}
 
-        result = self.resource.create(uuid=uuid, name=name, nodeport=nodeport,
-                                      serviceport=serviceport,
-                                      containerport=containerport,
+        result = self.resource.create(uuid=uuid, name=name, ports=None,
                                       kubernetes_url=kubernetes_url,
                                       kubernetes_token=kubernetes_token,
                                       kubernetes_ca=kubernetes_ca,
@@ -126,12 +124,30 @@ class ServiceCreateController(BaseController):
     allow_methods = ("POST",)
     resource = ServiceApi()
 
+    def _format_port(self, ports):
+        ports = validation.validate_string("ports", ports)
+        port_lists = ports.split(",")
+        ports = []
+        for port_list in port_lists:
+            _create_port = {}
+            port_args = port_list.split("&")
+            for port_arg in port_args:
+                if port_arg.startswith("nodeport"):
+                    _create_port["nodeport"] = validation.validate_port(port_arg.split(":")[1], min=30000, max=32767)
+                if port_arg.startswith("containerport"):
+                    _create_port["containerport"] = validation.validate_port(port_arg.split(":")[1], min=30000,
+                                                                             max=32767)
+                if port_arg.startswith("serviceport"):
+                    _create_port["serviceport"] = validation.validate_port(port_arg.split(":")[1], min=30000, max=32767)
+
+            ports.append(_create_port)
+
+        return ports
+
     def _format_data(self, data):
         validate_cluster_auth(data)
         validation.not_allowed_null(data=data,
-                                    keys=["kubernetes_url", "name",
-                                          "containerport", "nodeport",
-                                          "serviceport", "podname"]
+                                    keys=["kubernetes_url", "name", "ports", "podname"]
                                     )
 
         uuid = data.get("id", None) or get_uuid()
@@ -144,10 +160,6 @@ class ServiceCreateController(BaseController):
         validation.validate_string("kubernetes_token", kubernetes_token)
         validation.validate_string("kubernetes_ca", kubernetes_ca)
         validate_cluster_info(kubernetes_url)
-
-        nodeport = validation.validate_port(port=data["nodeport"], min=30000, max=32767)
-        containerport = validation.validate_port(port=data["containerport"])
-        serviceport = validation.validate_port(port=data["serviceport"])
 
         apiversion = data.get("apiversion", "v1")
         name = data["name"]
@@ -164,10 +176,11 @@ class ServiceCreateController(BaseController):
         else:
             labels = {"svr": name}
 
-        return {"uuid": uuid, "name": name,
-                "nodeport": nodeport,
-                "serviceport": serviceport,
-                "containerport": containerport,
+        ports = self._format_port(ports=data.get("ports"))
+        callbackParameter = data.get("callbackParameter")
+
+        return {"id": uuid, "name": name,
+                "ports": ports,
                 "kubernetes_url": kubernetes_url,
                 'kubernetes_token': kubernetes_token,
                 'kubernetes_ca': kubernetes_ca,
@@ -175,23 +188,13 @@ class ServiceCreateController(BaseController):
                 'labels': labels,
                 'selector': selector,
                 'namespace': data.get("namespace", "default")
-                }
+                }, callbackParameter
 
     def create(self, request, data, **kwargs):
         '''
                 :param request:
                 :param data:
                 example:
-                data = {"kubernetes_url": "xxx",
-                        "kubernetes_token": "xxx",
-                        "kubernetes_ca": "xxxx",
-                        "apiversion": "v1",
-                        "labels": "app:nginx, service:nginx",
-                        "name": "nginx-dep",
-                        "containerports": 8080,
-                        "selector": "app:nginx",
-                        "nodeport": 8080,
-                        "serviceport"： 8080}
                 :param kwargs:
                 :return:
                 '''
@@ -204,7 +207,8 @@ class ServiceCreateController(BaseController):
         success_service = []
         failed_service = []
         for create_data in create_datas:
-            create_res = self.resource.create(**create_data)
+            create_res, callbackParameter = self.resource.create(**create_data)
+            create_data["callbackParameter"] = callbackParameter
             if create_res:
                 success_service.append(create_data)
             else:
@@ -221,17 +225,21 @@ class ServiceCreateController(BaseController):
                                                apiversion=create_data.get("apiversion"),
                                                namespace=create_data.get("namespace", "default"))
 
+            serviceinfo["id"] = success["id"]
             serviceinfo.update({"errorCode": 0, "errorMessage": ""})
             result = result + [serviceinfo]
 
         failed_name = []
         for failed in failed_service:
             failed_name.append(failed["name"])
+
             failedinfo = {'cluster_ip': '', 'name': '', 'service_port': '',
                           'labels': '', 'ports': '', 'node_port': '',
                           'created_time': '', 'pod': '', 'type': '',
                           'containerport': '', 'uid': '',
                           "errorCode": 1, "errorMessage": "创建失败"}
+
+            failedinfo["id"] = failed["id"]
             result = result + failedinfo
 
         failed_name = ",".join(failed_name)

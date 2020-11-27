@@ -14,6 +14,5 @@ urlpatterns = [
     url(r'^list$', ServiceListController()),
     url(r'^describe$', ServiceIdController()),
     url(r'^detail$', ServiceDetailController()),
-    # url(r'^update$', ServiceUpdateController()),
     url(r'^delete$', ServiceDelIdController()),
 ]
