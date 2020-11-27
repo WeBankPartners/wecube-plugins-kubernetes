@@ -61,6 +61,9 @@ class NodeApi(object):
             if info.get("type") == "Hostname":
                 return info.get("address")
 
+    def _get_cmdb_id(self,lables):
+        return lables.get("host_cmdb_id")
+
     def node_info(self, name, kubernetes_url,
                   kubernetes_token=None, kubernetes_ca=None,
                   apiversion=None, namespace="default", **kwargs):
@@ -93,11 +96,13 @@ class NodeApi(object):
             kernel_version = __node_info__.get("kernel_version")
             hostname = self._get_hostname_(node_info=node_info["status"])
             name = node_info["metadata"]["name"]
+            labels = node_info["metadata"]["labels"]
 
             result = {"name": name, "hostname": hostname,
                       "cpu": cpu, "uuid": uuid,
                       "memory": memory,
                       "kernel_version": kernel_version,
+                      "host_cmdb_id": self._get_cmdb_id(labels)
                       }
         else:
             result = {}
