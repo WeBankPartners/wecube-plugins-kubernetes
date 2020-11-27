@@ -6,8 +6,8 @@ import json
 
 from apps.background.lib.drivers.KubernetesDrivers import ServiceManager
 from core.validation import validate_ipaddress
-from lib.logs import logger
 from lib.json_helper import format_json_dumps
+from lib.logs import logger
 
 
 class ServiceApi(object):
@@ -37,7 +37,8 @@ class ServiceApi(object):
                type=None, kubernetes_token=None,
                kubernetes_ca=None, apiversion=None,
                labels=None, selector=None,
-               clusterIP=None, namespace="default"):
+               clusterIP=None, namespace="default",
+               **kwargs):
         '''
         :param uuid:
         :param name:
@@ -125,17 +126,25 @@ class ServiceApi(object):
         '''
 
         result = ServiceManager.query(name, url=kubernetes_url,
-                                    token=kubernetes_token,
-                                    cafile=kubernetes_ca,
-                                    version=apiversion,
-                                    namespace=namespace)
+                                      token=kubernetes_token,
+                                      cafile=kubernetes_ca,
+                                      version=apiversion,
+                                      namespace=namespace)
         print(format_json_dumps(result))
         return result
 
+    def _fetch_ports(self, ports):
+        port_lists = []
+        for port in ports:
+            _port = "nodeport:%s&containerport:%s&serviceport:%s]" % (port["node_port"], port["target_port"], port["port"])
+            port_lists.append(_port)
+
+        return ",".join(port_lists)
+
     def detail(self, name, kubernetes_url,
-             kubernetes_token=None,
-             kubernetes_ca=None, apiversion=None,
-             namespace="default", **kwargs):
+               kubernetes_token=None,
+               kubernetes_ca=None, apiversion=None,
+               namespace="default", **kwargs):
         '''
         :param name:
         :param kubernetes_url:
@@ -161,10 +170,7 @@ class ServiceApi(object):
         result["pod"] = _selector.get("app")
         result["type"] = info["spec"]["type"]
         ports = info["spec"]["ports"]
-        result["ports"] = ports
-        result["node_port"] = ports[0]["node_port"]
-        result["containerport"] = ports[0]["target_port"]
-        result["service_port"] = ports[0]["port"]
+        result["ports"] = self._fetch_ports(ports)
         result["name"] = info["metadata"]["name"]
         result["created_time"] = info["metadata"]["creation_timestamp"]
         result["uid"] = info["metadata"]["uid"]
