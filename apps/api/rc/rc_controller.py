@@ -511,7 +511,9 @@ class RCDeleteController(BaseController):
                 "kubernetes_token": kubernetes_token,
                 "kubernetes_ca": kubernetes_ca,
                 "namespace": data.get("namespace", "default"),
-                "apiversion": data.get("apiversion")
+                "apiversion": data.get("apiversion"),
+                "id": data.get("id"),
+                "callbackParameter": data.get("callbackParameter")
                 }
 
     def create(self, request, data, **kwargs):
@@ -531,9 +533,13 @@ class RCDeleteController(BaseController):
                                           )
             if result:
                 _data = {"errorCode": 0, "errorMessage": "success", "name": search_data["name"]}
+                _data["id"] = search_data["id"]
+                _data["callbackParameter"] = search_data["callbackParameter"]
                 success.append(_data)
             else:
                 _data = {"errorCode": 1, "errorMessage": "删除失败", "name": search_data["name"]}
+                _data["id"] = search_data["id"]
+                _data["callbackParameter"] = search_data["callbackParameter"]
                 failed.append(_data)
 
         failed_name = []
