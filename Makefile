@@ -9,7 +9,7 @@ image:
 package: image
 	rm -rf package
 	mkdir -p package
-	cd package && sed 's/{{PLUGIN_VERSION}}/$(version)/'  ../register.xml
+	cd package && sed -i 's/{{PLUGIN_VERSION}}/$(version)/'  ../register.xml
 	cd package && sed -i 's/{{IMAGENAME}}/$(project_name):$(version)/g' ../register.xml
 	cd package && sed -i 's/{{CONTAINERNAME}}/$(project_name)-$(version)/g' ../register.xml
 	cd package && docker save -o image.tar $(project_name):$(version)
