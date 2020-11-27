@@ -118,7 +118,7 @@ class ResourceUniqueException(AppBaseException):
     status_code = 400
 
     def __init__(self, param, value):
-        _msg = "参数 %s 校验错误， 原因： %s 已存在" % (param, value)
+        _msg = "参数 %s 校验错误， 原因： %s 必须唯一" % (param, value)
         super(ResourceUniqueException, self).__init__(_msg)
 
 
