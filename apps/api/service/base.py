@@ -32,8 +32,8 @@ class ServiceApi(object):
                                      namespace=namespace)
         return len(result), result
 
-    def create(self, uuid, name, nodeport,
-               serviceport, containerport, kubernetes_url,
+    def create(self, uuid, name,
+               ports, kubernetes_url,
                type=None, kubernetes_token=None,
                kubernetes_ca=None, apiversion=None,
                labels=None, selector=None,
@@ -66,13 +66,7 @@ class ServiceApi(object):
 
         spec_info = {"type": type, "selector": selector}
 
-        if nodeport:
-            spec_port = {"port": serviceport,
-                         "targetPort": containerport, "nodePort": nodeport}
-        else:
-            spec_port = {"port": serviceport, "targetPort": containerport}
-
-        spec_info["ports"] = [spec_port]
+        spec_info["ports"] = ports
 
         if clusterIP:
             validate_ipaddress(clusterIP)

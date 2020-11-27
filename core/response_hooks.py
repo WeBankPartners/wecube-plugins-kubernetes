@@ -4,11 +4,12 @@ from __future__ import (absolute_import, division, print_function, unicode_liter
 
 import json
 import traceback
+
 from django.http import HttpResponse
 from django.http import HttpResponseNotAllowed
+
 from core import local_exceptions as exception_common
 from core.validation import validate_column_line
-from core.validation import validate_resource_id
 from lib.classtools import get_all_class_for_module
 from lib.json_helper import format_json_dumps
 from lib.logs import logger
@@ -48,29 +49,11 @@ def format_response(count, msg):
                               }})
 
 
-class HooksHanderBase(object):
+class ResponseController(object):
+    name = None
+    allow_methods = tuple()
+    requestId = ""
     resource = None
-
-    def run_get(self, request, **kwargs):
-        data = request.GET
-        data = data.dict()
-        if len(request.META.get("QUERY_STRING", "")) > 2048:
-            raise exception_common.DataToolangError(msg="请求URL过长")
-        count, res = self.list(request, data, **kwargs)
-        return format_response(count, res)
-
-    def run_id_get(self, request, **kwargs):
-        data = request.GET
-        data = data.dict()
-        if len(request.META.get("QUERY_STRING", "")) > 2048:
-            raise exception_common.DataToolangError(msg="请求URL过长")
-        rid = kwargs.get("rid", "")
-        if rid:
-            validate_resource_id(rid)
-        res = self.show(request, data, **kwargs)
-        if not res:
-            raise exception_common.ResourceNotFoundError()
-        return format_response(1, res)
 
     def run_post(self, request, **kwargs):
         data = request.body
@@ -88,77 +71,31 @@ class HooksHanderBase(object):
         else:
             raise exception_common.RequestValidateError("未知请求数据类型")
 
-        count, res = self.create(request, data, **kwargs)
-        return format_response(count, res)
-
-    def run_delete(self, request, **kwargs):
-        data = request.GET
-        data = data.dict()
-        rid = kwargs.get("rid", "")
-        if rid:
-            validate_resource_id(rid)
-        count, res = self.delete(request, data, **kwargs)
-        if not res:
-            raise exception_common.ResourceNotFoundError()
-        return format_response(count, res)
-
-    def run_patch(self, request, **kwargs):
-        data = request.body
         try:
-            data = json.loads(data)
+            data = data["inputs"]
         except:
-            raise exception_common.RequestValidateError("请求参数不为json")
-        rid = kwargs.get("rid", "")
-        if rid:
-            validate_resource_id(rid)
-        for cid, value in data.items():
-            validate_column_line(cid)
-        count, res = self.update(request, data, **kwargs)
-        if not res:
-            raise exception_common.ResourceNotFoundError()
+            logger.info(traceback.format_exc())
+            raise exception_common.RequestValidateError("非法的请求数据格式")
 
+        count, res = self.on_create(request, data, **kwargs)
         return format_response(count, res)
 
-    def list(self, request, data, **kwargs):
-        return self.resource.list(filter=data, **kwargs)
-
-    def show(self, request, data, **kwargs):
-        rid = kwargs.pop("rid", None)
-        return self.resource.show(rid)
+    def on_create(self, request, data, **kwargs):
+        try:
+            return self.create(request, data, **kwargs)
+        except Exception, e:
+            logger.info(traceback.format_exc())
+            raise e
 
     def create(self, request, data, **kwargs):
         return self.resource.create(data)
 
-    def delete(self, request, data, **kwargs):
-        rid = kwargs.pop("rid", None)
-        return self.resource.delete(rid, where_and=data)
-
-    def update(self, request, data, **kwargs):
-        rid = kwargs.pop("rid", None)
-        return self.resource.update(rid, data, where_and=kwargs)
-
-
-class ReqHanderBase(HooksHanderBase):
-    resource = None
-
     def handler_http(self, request, **kwargs):
         method = request.method.upper()
-        if method == "GET":
-            return self.run_get(request, **kwargs)
-        elif method == "POST":
+        if method == "POST":
             return self.run_post(request, **kwargs)
-        elif method == "DELETE":
-            return self.run_delete(request, **kwargs)
-        elif method == "PATCH":
-            return self.run_patch(request, **kwargs)
         else:
-            raise exception_common.HttpMethodsNotAllowed("(GET,POST, PATCH,DELETE)")
-
-
-class ResponseBase(object):
-    name = None
-    allow_methods = tuple()
-    requestId = ""
+            raise exception_common.HttpMethodsNotAllowed("(POST,)")
 
     def auth_method(self, request):
         method = request.method.upper()
@@ -222,9 +159,6 @@ class ResponseBase(object):
                 errmsg = self.format_err(405, "HttpMethodsNotAllowed", self.allow_methods)
                 return HttpResponseNotAllowed(self.allow_methods, content=errmsg, content_type=content_type)
 
-    def _request_response(self, request, method, **kwargs):
-        pass
-
     def exception_response(self, e):
         if e.__class__.__name__ in ['UnicodeDecodeError']:
             status_code = 400
@@ -258,8 +192,6 @@ class ResponseBase(object):
             response_res = HttpResponse(status=status_code, content=errmsg, content_type=content_type)
         return response_res
 
-
-class ResponseController(ResponseBase, ReqHanderBase):
     def _request_response(self, request, method, **kwargs):
         try:
             msg = self.handler_http(request=request, **kwargs)
