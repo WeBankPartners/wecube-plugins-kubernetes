@@ -235,6 +235,7 @@ class PodCreateController(BaseController):
         validate_cluster_info(kubernetes_url)
 
         name = deployment["name"]
+        image = deployment["image"]
 
         containerlabels = deployment.get("containerlabels", {})
         if containerlabels:
@@ -299,6 +300,8 @@ class PodCreateController(BaseController):
         if docker_register_server:
             docker_register_server = validation.validate_string("docker_register_server",
                                                                 docker_register_server)
+        else:
+            docker_register_server = image.split("/")[0]
 
         docker_password = deployment.get("docker_password")
         if docker_password:
@@ -312,7 +315,7 @@ class PodCreateController(BaseController):
         apiversion = deployment.get("apiversion", "v1")
 
         deploymentname = deployment.get("deployment")
-        image = deployment["image"]
+
         callbackParameter = deployment.get("callbackParameter")
 
         return {"kubernetes_url": kubernetes_url,
