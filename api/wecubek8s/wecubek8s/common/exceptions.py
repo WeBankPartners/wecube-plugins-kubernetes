@@ -100,3 +100,17 @@ class ConflictError(PluginError):
     @property
     def message_format(self):
         return _('object[%(oid)s] is used by %(name)s')
+
+
+class K8sCallError(PluginError):
+    """K8s调用错误异常"""
+    code = 200
+    error_code = 40000
+
+    @property
+    def title(self):
+        return _('K8s Processing Error')
+
+    @property
+    def message_format(self):
+        return _('Cluster(%(cluster)s) process error, detail: %(msg)s')

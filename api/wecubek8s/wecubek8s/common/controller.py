@@ -2,6 +2,8 @@
 
 from __future__ import absolute_import
 
+import logging
+
 import falcon
 from talos.common.controller import CollectionController
 from talos.common.controller import ItemController
@@ -13,6 +15,8 @@ from talos.db import crud
 from talos.db import validator
 
 from wecubek8s.common import exceptions
+
+LOG = logging.getLogger(__name__)
 
 
 class Controller(BaseController):
@@ -190,12 +194,14 @@ class Plugin(BaseController):
                         single_result.update(process_result)
                     result['results']['outputs'].append(single_result)
                 except Exception as e:
+                    LOG.exception(e)
                     single_result['errorCode'] = '1'
                     single_result['errorMessage'] = str(e)
                     result['results']['outputs'].append(single_result)
                     is_item_error = True
                     error_indexes.append(str(idx + 1))
         except Exception as e:
+            LOG.exception(e)
             result['resultCode'] = '1'
             result['resultMessage'] = str(e)
         if is_item_error:
