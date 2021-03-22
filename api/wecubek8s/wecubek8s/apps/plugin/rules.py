@@ -49,10 +49,7 @@ volume_item_rules = [
                              ['configMap', 'hostPath', 'emptyDir', 'secret', 'nfs', 'persistentVolumeClaim']),
                          validate_on=['check:M'],
                          nullable=False),
-    crud.ColumnValidator(field='typeSpec',
-                         rule=validator.TypeValidator(dict),
-                         validate_on=['check:O'],
-                         nullable=True),
+    crud.ColumnValidator(field='typeSpec', rule=validator.TypeValidator(dict), validate_on=['check:O'], nullable=True),
 ]
 
 deployment_rules = [
@@ -179,6 +176,23 @@ service_instances_rules = [
                          nullable=False),
     crud.ColumnValidator(field='nodePort',
                          rule=validator.RegexValidator(r'^\d*$'),
+                         validate_on=['check:O'],
+                         nullable=True),
+]
+
+remove_rules = [
+    crud.ColumnValidator(field='clusterUrl',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='clusterToken',
+                         rule=validator.LengthValidator(1, 2048),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
+    # default 'default'
+    crud.ColumnValidator(field='namespace',
+                         rule=validator.LengthValidator(0, 255),
                          validate_on=['check:O'],
                          nullable=True),
 ]

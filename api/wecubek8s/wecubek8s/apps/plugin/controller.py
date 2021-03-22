@@ -21,7 +21,7 @@ class Deployment(controller.Plugin):
             if not item.get(key):
                 item[key] = value
 
-    def validate_item(self, item_index, item):
+    def validate_item_apply(self, item_index, item):
         clean_item = crud.ColumnValidator.get_clean_data(rules.deployment_rules, item, 'check')
         self.set_item_default(clean_item)
         for idx, instance in enumerate(clean_item['instances']):
@@ -38,8 +38,17 @@ class Deployment(controller.Plugin):
                                                      msg='!= inputs.%d.instances.%d' % (item_index + 1, idx))
         return clean_item
 
-    def process(self, reqid, operator, item_index, item, **kwargs):
+    def validate_item_remove(self, item_index, item):
+        clean_item = crud.ColumnValidator.get_clean_data(rules.remove_rules, item, 'check')
+        if not clean_item.get('namespace'):
+            clean_item['namespace'] = 'default'
+        return clean_item
+
+    def apply(self, reqid, operator, item_index, item, **kwargs):
         return plugin_api.Deployment().apply(item)
+
+    def remove(self, reqid, operator, item_index, item, **kwargs):
+        return plugin_api.Deployment().remove(item)
 
 
 class Service(controller.Plugin):
@@ -58,7 +67,7 @@ class Service(controller.Plugin):
             if not item.get(key):
                 item[key] = value
 
-    def validate_item(self, item_index, item):
+    def validate_item_apply(self, item_index, item):
         clean_item = crud.ColumnValidator.get_clean_data(rules.service_rules, item, 'check')
         self.set_item_default(clean_item)
         for idx, instance in enumerate(clean_item['instances']):
@@ -67,5 +76,14 @@ class Service(controller.Plugin):
             clean_item['instances'][idx] = clean_instance
         return clean_item
 
-    def process(self, reqid, operator, item_index, item, **kwargs):
+    def validate_item_remove(self, item_index, item):
+        clean_item = crud.ColumnValidator.get_clean_data(rules.remove_rules, item, 'check')
+        if not clean_item.get('namespace'):
+            clean_item['namespace'] = 'default'
+        return clean_item
+
+    def apply(self, reqid, operator, item_index, item, **kwargs):
         return plugin_api.Service().apply(item)
+
+    def remove(self, reqid, operator, item_index, item, **kwargs):
+        return plugin_api.Service().remove(item)

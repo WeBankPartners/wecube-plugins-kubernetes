@@ -71,6 +71,14 @@ class Deployment:
                                                            self.to_resource(k8s_client, data))
         return exists_resource.to_dict()['spec']
 
+    def remove(self, data):
+        k8s_auth = k8s.AuthToken(data['clusterUrl'], data['clusterToken'])
+        k8s_client = k8s.Client(k8s_auth)
+        exists_resource = k8s_client.get_deployment(data['name'], data['namespace'])
+        if exists_resource is not None:
+            k8s_client.delete_deployment(data['name'], data['namespace'])
+        return {}
+
 
 class Service:
     def to_resource(self, k8s_client, data):
@@ -114,3 +122,11 @@ class Service:
             exists_resource = k8s_client.update_service(data['name'], data['namespace'],
                                                         self.to_resource(k8s_client, data))
         return exists_resource.to_dict()['spec']
+
+    def remove(self, data):
+        k8s_auth = k8s.AuthToken(data['clusterUrl'], data['clusterToken'])
+        k8s_client = k8s.Client(k8s_auth)
+        exists_resource = k8s_client.get_service(data['name'], data['namespace'])
+        if exists_resource is not None:
+            k8s_client.delete_service(data['name'], data['namespace'])
+        return {}
