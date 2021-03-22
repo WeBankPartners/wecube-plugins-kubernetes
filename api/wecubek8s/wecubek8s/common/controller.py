@@ -160,6 +160,10 @@ class Plugin(BaseController):
                              nullable=False),
     ]
 
+    def __init__(self, action=None) -> None:
+        super().__init__()
+        self._default_action = action or 'process'
+
     def on_post(self, req, resp, **kwargs):
         self._validate_method(req)
         self._validate_data(req)
@@ -188,8 +192,10 @@ class Plugin(BaseController):
                     'errorMessage': 'success'
                 }
                 try:
-                    clean_item = self.validate_item(idx, item)
-                    process_result = self.process(reqid, operator, idx, clean_item, **kwargs)
+                    validate_item_func = getattr(self, 'validate_item_' + self._default_action, self.validate_item)
+                    clean_item = validate_item_func(idx, item)
+                    process_func = getattr(self, self._default_action, self.process)
+                    process_result = process_func(reqid, operator, idx, clean_item, **kwargs)
                     if process_result:
                         single_result.update(process_result)
                     result['results']['outputs'].append(single_result)
