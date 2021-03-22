@@ -3,9 +3,11 @@
 
 from __future__ import absolute_import
 import logging
-from os import name
+import json
+import base64
 
 from kubernetes import client
+from kubernetes.client import exceptions as k8s_exceptions
 from talos.core import config
 from talos.core import utils
 from talos.core import exceptions as base_ex
@@ -38,42 +40,108 @@ class AuthUserPass:
 
 
 class Client:
-    def __init__(self, auth, version='V1') -> None:
-        # FIXME: unused version
+    def __init__(self, auth) -> None:
         configuration = client.Configuration()
         auth(configuration)
+        self.auth = auth
         api_client = client.ApiClient(configuration)
         self.core_client = client.CoreV1Api(api_client)
         self.app_client = client.AppsV1Api(api_client)
 
+    def _action(self, client, func_name, *args, **kwargs):
+        func = getattr(client, func_name)
+        try:
+            result = func(*args, **kwargs)
+            return result
+        except k8s_exceptions.ApiException as e:
+            raise exceptions.K8sCallError(cluster=self.auth.api_server, msg=json.loads(e.body)['message'])
+
+    def _action_detail(self, client, func_name, *args, **kwargs):
+        func = getattr(client, func_name)
+        try:
+            result = func(*args, **kwargs)
+            return result
+        except k8s_exceptions.ApiException as e:
+            if e.status == 404:
+                return None
+            raise exceptions.K8sCallError(cluster=self.auth.api_server, msg=json.loads(e.body)['message'])
+
     # deployment
     def create_deployment(self, namespace, body, **kwargs):
-        return self.app_client.create_namespaced_deployment(namespace, body, **kwargs)
+        return self._action(self.app_client, 'create_namespaced_deployment', namespace, body, **kwargs)
 
     def update_deployment(self, name, namespace, body, **kwargs):
-        return self.app_client.patch_namespaced_deployment(name, namespace, body, **kwargs)
+        return self._action(self.app_client, 'patch_namespaced_deployment', name, namespace, body, **kwargs)
 
     def delete_deployment(self, name, namespace, **kwargs):
-        return self.app_client.delete_namespaced_deployment(name, namespace, **kwargs)
+        return self._action(self.app_client, 'delete_namespaced_deployment', name, namespace, **kwargs)
 
     def get_deployment(self, name, namespace, **kwargs):
-        return self.app_client.read_namespaced_deployment(name, namespace, **kwargs)
+        return self._action_detail(self.app_client, 'read_namespaced_deployment', name, namespace, **kwargs)
 
     def list_deployment(self, namespace, **kwargs):
-        return self.app_client.list_namespaced_deployment(namespace, **kwargs)
+        return self._action(self.app_client, 'list_namespaced_deployment', namespace, **kwargs)
 
     # service
     def create_service(self, namespace, body, **kwargs):
-        return self.core_client.create_namespaced_service(namespace, body, **kwargs)
+        return self._action(self.core_client, 'create_namespaced_service', namespace, body, **kwargs)
 
     def update_service(self, name, namespace, body, **kwargs):
-        return self.core_client.patch_namespaced_service(name, namespace, body, **kwargs)
+        return self._action(self.core_client, 'patch_namespaced_service', name, namespace, body, **kwargs)
 
     def delete_service(self, name, namespace, **kwargs):
-        return self.core_client.delete_namespaced_service(name, namespace, **kwargs)
+        return self._action(self.core_client, 'delete_namespaced_service', name, namespace, **kwargs)
 
     def get_service(self, name, namespace, **kwargs):
-        return self.core_client.read_namespaced_service(name, namespace, **kwargs)
+        return self._action_detail(self.core_client, 'read_namespaced_service', name, namespace, **kwargs)
 
     def list_service(self, namespace, **kwargs):
-        return self.core_client.list_namespaced_service(namespace, **kwargs)
+        return self._action(self.core_client, 'list_namespaced_service', namespace, **kwargs)
+
+    # secret
+    def create_secret(self, namespace, body, **kwargs):
+        return self._action(self.core_client, 'create_namespaced_secret', namespace, body, **kwargs)
+
+    def update_secret(self, name, namespace, body, **kwargs):
+        return self._action(self.core_client, 'patch_namespaced_secret', name, namespace, body, **kwargs)
+
+    def delete_secret(self, name, namespace, **kwargs):
+        return self._action(self.core_client, 'delete_namespaced_secret', name, namespace, **kwargs)
+
+    def get_secret(self, name, namespace, **kwargs):
+        return self._action_detail(self.core_client, 'read_namespaced_secret', name, namespace, **kwargs)
+
+    def list_secret(self, namespace, **kwargs):
+        return self._action(self.core_client, 'list_namespaced_secret', namespace, **kwargs)
+
+    def ensure_registry_secret(self, name, namespace, server, username, password, email=None, **kwargs):
+        auth_data = {
+            'auths': {
+                server: {
+                    "username": username,
+                    "password": password,
+                    "auth": base64.b64encode(("%s:%s" % (username, password)).encode('utf-8')).decode()
+                }
+            }
+        }
+        if email is not None:
+            auth_data[server]['email'] = email
+
+        body = {
+            'apiVersion': 'v1',
+            'kind': 'Secret',
+            'metadata': {
+                'name': name,
+                'namespace': namespace
+            },
+            "type": "kubernetes.io/dockerconfigjson",
+            "data": {
+                ".dockerconfigjson": base64.b64encode((json.dumps(auth_data).encode('utf-8'))).decode()
+            }
+        }
+        has_secret = self.get_secret(name, namespace)
+        if has_secret is None:
+            self.create_secret(namespace, body, **kwargs)
+        else:
+            self.update_secret(name, namespace, body)
+        return True

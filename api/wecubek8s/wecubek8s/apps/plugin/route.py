@@ -6,4 +6,5 @@ from wecubek8s.apps.plugin import controller
 
 
 def add_routes(api):
-    pass
+    api.add_route('/kubernetes/v1/deployments/apply', controller.Deployment())
+    api.add_route('/kubernetes/v1/services/apply', controller.Service())

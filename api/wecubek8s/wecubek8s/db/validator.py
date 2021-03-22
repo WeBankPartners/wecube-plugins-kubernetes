@@ -2,9 +2,15 @@
 
 from __future__ import absolute_import
 
+import collections
+
+from talos.core import exceptions
 from talos.core import utils
 from talos.core.i18n import _
 from talos.db import validator
+
+RegexValidator = validator.RegexValidator
+InValidator = validator.InValidator
 
 
 class LengthValidator(validator.NullValidator):
@@ -37,18 +43,50 @@ class BackRefValidator(validator.NullValidator):
 TypeValidator = validator.TypeValidator
 
 
-class RepeatableValidator(validator.NullValidator):
+class IterableValidator(validator.NullValidator):
+    def __init__(self, validate_func, rules, situation, length_min=0, length_max=None):
+        self.validate_func = validate_func
+        self.rules = rules
+        self.situation = situation
+        self.length_min = length_min
+        self.length_max = length_max
+
     def validate(self, value):
-        choices = ['?', '+', '*']
-        if utils.is_string_type(value):
-            if value not in choices:
-                return _('expected %(choices)s, not %(value)s') % {'choices': choices, 'value': value}
-        elif isinstance(value, int):
-            if value < 1:
-                return _('value should be >= 1, not %(value)s') % {'value': value}
+        if utils.is_list_type(value):
+            if len(value) < self.length_min:
+                return _('length[%(length)s] < minimum length[%(minimum)s]') % {
+                    'length': len(value),
+                    'minimum': self.length_min
+                }
+            if self.length_max is not None and len(value) > self.length_max:
+                return _('length[%(length)s] > maximum length[%(maximum)s]') % {
+                    'length': len(value),
+                    'maximum': self.length_max
+                }
+            for idx, item in enumerate(value):
+                try:
+                    self.validate_func(self.rules, item, self.situation)
+                except exceptions.Error as e:
+                    return _('validate failed for index[%(index)s], because: %(msg)s' % {
+                        'index': idx + 1,
+                        'msg': str(e)
+                    })
         else:
-            return _('expected string in %(choices)s or int(>=1), not %(type)s ') % {
-                'choices': choices,
-                'type': type(value).__name__
-            }
+            return _('expected type of list/tuple/set, not %(type)s ') % {'type': type(value).__name__}
+        return True
+
+
+class MappingValidator(validator.NullValidator):
+    def __init__(self, validate_func, rules, situation):
+        self.validate_func = validate_func
+        self.rules = rules
+        self.situation = situation
+
+    def validate(self, value):
+        if not isinstance(value, collections.Mapping):
+            return _('type invalid: %(type)s, expected: %(expected)s') % {'type': type(value), 'expected': 'dict'}
+        try:
+            self.validate_func(self.rules, value, self.situation)
+        except exceptions.Error as e:
+            return _('validate failed , because: %(msg)s' % {'msg': str(e)})
         return True
