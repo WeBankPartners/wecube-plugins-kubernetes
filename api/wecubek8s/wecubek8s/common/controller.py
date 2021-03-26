@@ -215,3 +215,42 @@ class Plugin(BaseController):
             result['resultMessage'] = _('Fail to process [%(num)s] record, detail error in the data block') % dict(
                 num=','.join(error_indexes))
         return result
+
+
+class ModelPostQuery(BaseController):
+    allow_methods = ('POST', )
+
+    def on_post(self, req, resp, **kwargs):
+        self._validate_method(req)
+        self._validate_data(req)
+        refs = []
+        count = 0
+        criteria = {'filters': []}
+        for _filter in req.json.get('additionalFilters', []):
+            criteria['filters'].append({
+                'name': _filter['attrName'],
+                'operator': _filter['op'],
+                'value': _filter['condition']
+            })
+        refs = self.list(req, criteria, **kwargs)
+        count = self.count(req, criteria, results=refs, **kwargs)
+        resp.json = {'code': 200, 'status': 'OK', 'count': count, 'data': refs, 'message': 'success'}
+
+    def count(self, req, criteria, results=None):
+        return len(results or [])
+
+
+class ModelGetQuery(BaseController):
+    allow_methods = ('GET', )
+
+    def on_get(self, req, resp, **kwargs):
+        self._validate_method(req)
+        refs = []
+        count = 0
+        criteria = {'filters': []}
+        refs = self.list(req, criteria, **kwargs)
+        count = self.count(req, criteria, results=refs, **kwargs)
+        resp.json = {'code': 200, 'status': 'OK', 'count': count, 'data': refs, 'message': 'success'}
+
+    def count(self, req, criteria, results=None):
+        return len(results or [])
