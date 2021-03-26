@@ -26,7 +26,7 @@
             <attribute name="cluster_id" datatype="ref" description="所属集群"
                        refPackage="" refVersion="" refEntity="cluster" ref="id"/>
             <attribute name="correlation_id" datatype="ref" description="关联资源ID"
-                       refPackage="wecmdb" refVersion="" refEntity="resource_set" ref="id"/>
+                       refPackage="wecmdb" refVersion="" refEntity="host_resource_instance" ref="id"/>
         </entity>
         <entity name="deployment" displayName="Deployment" description="Deployment控制器">
             <attribute name="id" datatype="str" description="唯一ID"/>
@@ -70,8 +70,6 @@
 
     <!-- 5.权限设定 -->
     <authorities>
-        <authority systemRoleName="SUPER_ADMIN">
-        </authority>
     </authorities>
 
     <!-- 6.运行资源 - 描述部署运行本插件包需要的基础资源(如主机、虚拟机、容器、数据库等) -->
