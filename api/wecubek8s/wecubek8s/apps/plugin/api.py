@@ -7,6 +7,9 @@ import logging
 from talos.core import config
 from talos.core.i18n import _
 from wecubek8s.common import k8s
+from wecubek8s.common import exceptions
+from wecubek8s.common import const
+from wecubek8s.db import resource as db_resource
 from wecubek8s.apps.plugin import utils as api_utils
 
 CONF = config.CONF
@@ -15,12 +18,15 @@ LOG = logging.getLogger(__name__)
 
 class Deployment:
     def to_resource(self, k8s_client, data):
+        resource_id = data['id']
         resource_name = data['name']
         resource_namespace = data['namespace']
         resource_tags = api_utils.convert_tag(data['tags'])
+        resource_tags[const.Tag.DEPLOYMENT_ID_TAG] = resource_id
         replicas = len(data['instances'])
         pod_spec = data['instances'][0]
         pod_spec_tags = api_utils.convert_tag(pod_spec['tags'])
+        pod_spec_tags[const.Tag.POD_AUTO_TAG] = 'auto-test-01'  # resource_name
         pod_spec_ports = api_utils.convert_pod_ports(pod_spec['ports'])
         pod_spec_envs = api_utils.convert_env(pod_spec['envs'])
         pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(pod_spec['volumes'])
@@ -61,7 +67,12 @@ class Deployment:
         return template
 
     def apply(self, data):
-        k8s_auth = k8s.AuthToken(data['clusterUrl'], data['clusterToken'])
+        cluster_info = db_resource.Cluster().list({'name': data['cluster']})
+        if not cluster_info:
+            raise exceptions.ValidationError(attribute='cluster',
+                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+        cluster_info = cluster_info[0]
+        k8s_auth = k8s.AuthToken(cluster_info['api_server'], cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
         exists_resource = k8s_client.get_deployment(data['name'], data['namespace'])
         if exists_resource is None:
@@ -69,21 +80,31 @@ class Deployment:
         else:
             exists_resource = k8s_client.update_deployment(data['name'], data['namespace'],
                                                            self.to_resource(k8s_client, data))
+        # TODO: 返回数据规整
+        # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return exists_resource.to_dict()['spec']
 
     def remove(self, data):
-        k8s_auth = k8s.AuthToken(data['clusterUrl'], data['clusterToken'])
+        cluster_info = db_resource.Cluster().list({'name': data['cluster']})
+        if not cluster_info:
+            raise exceptions.ValidationError(attribute='cluster',
+                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+        cluster_info = cluster_info[0]
+        k8s_auth = k8s.AuthToken(cluster_info['api_server'], cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
         exists_resource = k8s_client.get_deployment(data['name'], data['namespace'])
         if exists_resource is not None:
             k8s_client.delete_deployment(data['name'], data['namespace'])
+        # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return {}
 
 
 class Service:
     def to_resource(self, k8s_client, data):
+        resource_id = data['id']
         resource_name = data['name']
         resource_tags = api_utils.convert_tag(data['tags'])
+        resource_tags[const.Tag.SERVICE_ID_TAG] = resource_id
         resource_type = data['type']
         resource_headless = 'clusterIP' in data and data['clusterIP'] is None
         resource_cluster_ip = data.get('clusterIP', None)
@@ -113,7 +134,12 @@ class Service:
         return template
 
     def apply(self, data):
-        k8s_auth = k8s.AuthToken(data['clusterUrl'], data['clusterToken'])
+        cluster_info = db_resource.Cluster().list({'name': data['cluster']})
+        if not cluster_info:
+            raise exceptions.ValidationError(attribute='cluster',
+                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+        cluster_info = cluster_info[0]
+        k8s_auth = k8s.AuthToken(cluster_info['api_server'], cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
         exists_resource = k8s_client.get_service(data['name'], data['namespace'])
         if not exists_resource:
@@ -121,12 +147,20 @@ class Service:
         else:
             exists_resource = k8s_client.update_service(data['name'], data['namespace'],
                                                         self.to_resource(k8s_client, data))
+        # TODO: 返回数据规整
+        # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return exists_resource.to_dict()['spec']
 
     def remove(self, data):
-        k8s_auth = k8s.AuthToken(data['clusterUrl'], data['clusterToken'])
+        cluster_info = db_resource.Cluster().list({'name': data['cluster']})
+        if not cluster_info:
+            raise exceptions.ValidationError(attribute='cluster',
+                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+        cluster_info = cluster_info[0]
+        k8s_auth = k8s.AuthToken(cluster_info['api_server'], cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
         exists_resource = k8s_client.get_service(data['name'], data['namespace'])
         if exists_resource is not None:
             k8s_client.delete_service(data['name'], data['namespace'])
+        # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return {}

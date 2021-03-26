@@ -4,17 +4,18 @@ from __future__ import absolute_import
 import datetime
 
 from talos.core.i18n import _
+from talos.core import utils
 from talos.db import crud
-from talos.db import validator
 from talos.utils import scoped_globals
 
-from wecubek8s.common import exceptions
 from wecubek8s.db import models
-from wecubek8s.db import validator as my_validator
 
 
 class MetaCRUD(crud.ResourceBase):
+    _id_prefix = ''
+
     def _before_create(self, resource, validate):
+        resource['id'] = utils.generate_prefix_uuid(self._id_prefix)
         resource['created_by'] = scoped_globals.GLOBALS.request.auth_user or None
         resource['created_time'] = datetime.datetime.now()
 
@@ -23,3 +24,8 @@ class MetaCRUD(crud.ResourceBase):
         resource['updated_time'] = datetime.datetime.now()
 
 
+class Cluster(MetaCRUD):
+    orm_meta = models.Cluster
+    _primary_keys = 'id'
+    _default_order = ['-created_time']
+    _id_prefix = 'cluster-'

@@ -53,14 +53,11 @@ volume_item_rules = [
 ]
 
 deployment_rules = [
-    crud.ColumnValidator(field='clusterUrl',
+    crud.ColumnValidator(field='cluster',
                          rule=validator.LengthValidator(1, 255),
                          validate_on=['check:M'],
                          nullable=False),
-    crud.ColumnValidator(field='clusterToken',
-                         rule=validator.LengthValidator(1, 2048),
-                         validate_on=['check:M'],
-                         nullable=False),
+    crud.ColumnValidator(field='id', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
     crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
     # default 'default'
     crud.ColumnValidator(field='namespace',
@@ -98,10 +95,7 @@ deployment_instances_rules = [
                          nullable=True),
     # for stateful set, difference env & volume for each pod
     crud.ColumnValidator(field='tags',
-                         rule=validator.IterableValidator(crud.ColumnValidator.get_clean_data,
-                                                          tag_item_rules,
-                                                          'check',
-                                                          length_min=1),
+                         rule=validator.IterableValidator(crud.ColumnValidator.get_clean_data, tag_item_rules, 'check'),
                          validate_on=['check:M'],
                          nullable=True),
     crud.ColumnValidator(field='envs',
@@ -116,14 +110,11 @@ deployment_instances_rules = [
 ]
 
 service_rules = [
-    crud.ColumnValidator(field='clusterUrl',
+    crud.ColumnValidator(field='cluster',
                          rule=validator.LengthValidator(1, 255),
                          validate_on=['check:M'],
                          nullable=False),
-    crud.ColumnValidator(field='clusterToken',
-                         rule=validator.LengthValidator(1, 2048),
-                         validate_on=['check:M'],
-                         nullable=False),
+    crud.ColumnValidator(field='id', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
     crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
     # default 'default'
     crud.ColumnValidator(field='namespace',
@@ -181,12 +172,8 @@ service_instances_rules = [
 ]
 
 remove_rules = [
-    crud.ColumnValidator(field='clusterUrl',
+    crud.ColumnValidator(field='cluster',
                          rule=validator.LengthValidator(1, 255),
-                         validate_on=['check:M'],
-                         nullable=False),
-    crud.ColumnValidator(field='clusterToken',
-                         rule=validator.LengthValidator(1, 2048),
                          validate_on=['check:M'],
                          nullable=False),
     crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
