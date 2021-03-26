@@ -20,15 +20,15 @@ class BaseEntity:
     def list(self, filters=None):
         clusters = db_resource.Cluster().list()
 
-        results = self.all(clusters)
+        results = self.cached_all(clusters)
         if filters:
             results = [ret for ret in results if jsonfilter.match_all(filters, ret)]
         return results
 
-    def cached_all(self, clusters):
+    def cached_all(self, clusters, expires=3):
         cached_key = 'k8s.' + ','.join([cluster['id'] for cluster in sorted(clusters, key=lambda x: x['id'])
                                         ]) + '.' + self.__class__.__name__
-        cached_data = cache.get(cached_key, 3)
+        cached_data = cache.get(cached_key, expires)
         if not cache.validate(cached_data):
             cached_data = self.all(clusters)
             cache.set(cached_key, cached_data)
