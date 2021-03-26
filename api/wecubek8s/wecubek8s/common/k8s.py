@@ -9,8 +9,6 @@ import base64
 from kubernetes import client
 from kubernetes.client import exceptions as k8s_exceptions
 from talos.core import config
-from talos.core import utils
-from talos.core import exceptions as base_ex
 from talos.core.i18n import _
 from wecubek8s.common import exceptions
 
@@ -66,7 +64,15 @@ class Client:
                 return None
             raise exceptions.K8sCallError(cluster=self.auth.api_server, msg=json.loads(e.body)['message'])
 
-    # deployment
+    # Node
+    def list_node(self, **kwargs):
+        return self._action(self.core_client, 'list_node', **kwargs)
+
+    # Namespace
+    def list_namespace(self, **kwargs):
+        return self._action(self.core_client, 'list_namespace', **kwargs)
+
+    # Deployment
     def create_deployment(self, namespace, body, **kwargs):
         return self._action(self.app_client, 'create_namespaced_deployment', namespace, body, **kwargs)
 
@@ -82,7 +88,18 @@ class Client:
     def list_deployment(self, namespace, **kwargs):
         return self._action(self.app_client, 'list_namespaced_deployment', namespace, **kwargs)
 
-    # service
+    def list_all_deployment(self, **kwargs):
+        return self._action(self.app_client, 'list_deployment_for_all_namespaces', **kwargs)
+
+    # ReplcaSet
+    def list_all_replica_set(self, **kwargs):
+        return self._action(self.app_client, 'list_replica_set_for_all_namespaces', **kwargs)
+
+    # Pod
+    def list_all_pod(self, **kwargs):
+        return self._action(self.core_client, 'list_pod_for_all_namespaces', **kwargs)
+
+    # Service
     def create_service(self, namespace, body, **kwargs):
         return self._action(self.core_client, 'create_namespaced_service', namespace, body, **kwargs)
 
@@ -98,7 +115,10 @@ class Client:
     def list_service(self, namespace, **kwargs):
         return self._action(self.core_client, 'list_namespaced_service', namespace, **kwargs)
 
-    # secret
+    def list_all_service(self, **kwargs):
+        return self._action(self.core_client, 'list_service_for_all_namespaces', **kwargs)
+
+    # Secret
     def create_secret(self, namespace, body, **kwargs):
         return self._action(self.core_client, 'create_namespaced_secret', namespace, body, **kwargs)
 
