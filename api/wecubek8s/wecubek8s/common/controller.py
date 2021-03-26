@@ -226,6 +226,13 @@ class ModelPostQuery(BaseController):
         refs = []
         count = 0
         criteria = {'filters': []}
+        if req.json.get('criteria'):
+            key_filter = req.json.get('criteria')
+            criteria['filters'].append({
+                'name': key_filter['attrName'],
+                'operator': 'eq',
+                'value': key_filter['condition']
+            })
         for _filter in req.json.get('additionalFilters', []):
             criteria['filters'].append({
                 'name': _filter['attrName'],
