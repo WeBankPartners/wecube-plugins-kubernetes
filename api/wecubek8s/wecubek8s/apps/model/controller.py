@@ -15,17 +15,12 @@ class PostQueryCluster(controller.ModelPostQuery):
         return model_api.Cluster().list(criteria['filters'])
 
 
-class GetQueryCluster(controller.ModelGetQuery):
-    def list(self, req, criteria):
-        return model_api.Cluster().list(criteria['filters'])
+# class GetQueryCluster(controller.ModelGetQuery):
+#     def list(self, req, criteria):
+#         return model_api.Cluster().list(criteria['filters'])
 
 
 class PostQueryNode(controller.ModelPostQuery):
-    def list(self, req, criteria):
-        return model_api.Node().list(criteria['filters'])
-
-
-class GetQueryNode(controller.ModelGetQuery):
     def list(self, req, criteria):
         return model_api.Node().list(criteria['filters'])
 
@@ -35,26 +30,11 @@ class PostQueryDeployment(controller.ModelPostQuery):
         return model_api.Deployment().list(criteria['filters'])
 
 
-class GetQueryDeployment(controller.ModelGetQuery):
-    def list(self, req, criteria):
-        return model_api.Deployment().list(criteria['filters'])
-
-
 class PostQueryService(controller.ModelPostQuery):
     def list(self, req, criteria):
         return model_api.Service().list(criteria['filters'])
 
 
-class GetQueryService(controller.ModelGetQuery):
-    def list(self, req, criteria):
-        return model_api.Service().list(criteria['filters'])
-
-
 class PostQueryPod(controller.ModelPostQuery):
-    def list(self, req, criteria):
-        return model_api.Pod().list(criteria['filters'])
-
-
-class GetQueryPod(controller.ModelGetQuery):
     def list(self, req, criteria):
         return model_api.Pod().list(criteria['filters'])
