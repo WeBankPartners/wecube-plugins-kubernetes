@@ -20,7 +20,7 @@ def escape_name(name):
     (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')
     '''
     rule = r'[^.a-z0-9]'
-    return re.sub(rule, '--', name.lower())
+    return re.sub(rule, '-', name.lower())
 
 
 def convert_tag(items):
