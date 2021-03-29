@@ -163,9 +163,9 @@ def match_all(filters, data):
             results.add(True) if val else results.add(False)
         elif op in ('notset', 'notSet'):
             results.add(False) if val else results.add(True)
-        elif op == 'null':
+        elif op in ('is', 'null'):
             results.add(True) if val is None else results.add(False)
-        elif op in ('notNull', 'notnull'):
+        elif op == ('isnot', 'notNull', 'notnull'):
             results.add(True) if val is not None else results.add(False)
         elif op == 'ilike':
             _match_ilike(results, val, val_cmp)
