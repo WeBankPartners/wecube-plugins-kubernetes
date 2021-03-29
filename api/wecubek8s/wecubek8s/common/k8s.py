@@ -5,6 +5,7 @@ from __future__ import absolute_import
 import logging
 import json
 import base64
+import urllib3
 
 from kubernetes import client
 from kubernetes.client import exceptions as k8s_exceptions
@@ -12,6 +13,7 @@ from talos.core import config
 from talos.core.i18n import _
 from wecubek8s.common import exceptions
 
+urllib3.disable_warnings()
 LOG = logging.getLogger(__name__)
 CONF = config.CONF
 
