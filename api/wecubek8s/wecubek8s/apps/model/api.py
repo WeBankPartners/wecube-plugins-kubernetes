@@ -19,9 +19,13 @@ LOG = logging.getLogger(__name__)
 class BaseEntity:
     def list(self, filters=None):
         clusters = db_resource.Cluster().list()
-
+        # all cached as default(3s)
         results = self.cached_all(clusters)
         if filters:
+            # The following options of operator is required by wecube-platform: eq/neq/is/isnot/gt/lt/like/in
+            # but kubernetes plugin supports for more: gte/lte/notin/regex/set/notset
+            # set test false/0/''/[]/{}/None as false
+            # you can also use regex to match the value
             results = [ret for ret in results if jsonfilter.match_all(filters, ret)]
         return results
 
