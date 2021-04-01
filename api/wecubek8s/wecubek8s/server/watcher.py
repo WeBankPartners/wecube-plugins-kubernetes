@@ -12,7 +12,7 @@ LOG = logging.getLogger(__name__)
 
 def notify_pod(event, cluster_id, data):
     # TODO: handle added,deleted
-    print(event, cluster_id, data)
+    LOG.info('event: %s from cluster: %s with data: %s', event, cluster_id, data)
 
 
 def watch_pod(cluster, event_stop):
