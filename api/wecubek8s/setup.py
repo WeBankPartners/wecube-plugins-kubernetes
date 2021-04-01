@@ -119,6 +119,7 @@ setup(
         'console_scripts': [
             'wecubek8s_server=wecubek8s.server.simple_server:main',
             'wecubek8s_scheduler=wecubek8s.server.scheduler:main',
+            'wecubek8s_watcher=wecubek8s.server.watcher:main',
         ],
     },
 )

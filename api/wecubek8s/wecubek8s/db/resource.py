@@ -25,6 +25,7 @@ class MetaCRUD(crud.ResourceBase):
 
 
 class Cluster(MetaCRUD):
+    # TODO: encrypt token
     orm_meta = models.Cluster
     _primary_keys = 'id'
     _default_order = ['-created_time']
