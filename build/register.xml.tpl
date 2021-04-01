@@ -43,6 +43,7 @@
             <attribute name="name" datatype="str" description="名称"/>
             <attribute name="displayName" datatype="str" description="显示名称"/>
             <attribute name="namespace" datatype="str" description="命名空间"/>
+            <attribute name="ip_address" datatype="str" description="IP地址"/>
             <attribute name="cluster_id" datatype="ref" description="所属集群"
                        refPackage="" refVersion="" refEntity="cluster" ref="id"/>
             <attribute name="correlation_id" datatype="ref" description="关联资源ID"
@@ -53,6 +54,7 @@
             <attribute name="name" datatype="str" description="名称"/>
             <attribute name="displayName" datatype="str" description="显示名称"/>
             <attribute name="namespace" datatype="str" description="命名空间"/>
+            <attribute name="ip_address" datatype="str" description="IP地址"/>
             <attribute name="deployment_id" datatype="ref" description="所属Deployment"
                        refPackage="" refVersion="" refEntity="deployment" ref="id"/>
             <attribute name="node_id" datatype="ref" description="所属计算节点"
