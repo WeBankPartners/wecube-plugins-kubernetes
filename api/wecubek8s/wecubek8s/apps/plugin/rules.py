@@ -79,11 +79,10 @@ deployment_rules = [
                          rule=validator.IterableValidator(crud.ColumnValidator.get_clean_data, tag_item_rules, 'check'),
                          validate_on=['check:O'],
                          nullable=True),
-    crud.ColumnValidator(field='instances', rule=validator.TypeValidator(list), validate_on=['check:M'],
-                         nullable=False),
-]
-
-deployment_instances_rules = [
+    crud.ColumnValidator(field='replicas',
+                         rule=validator.NumberValidator(int, range_min=0),
+                         validate_on=['check:O'],
+                         nullable=True),
     crud.ColumnValidator(field='ports', rule=validator.LengthValidator(0, 255), validate_on=['check:O'], nullable=True),
     crud.ColumnValidator(field='cpu',
                          rule=validator.RegexValidator(r'^((\d+\.\d+)|(\d+))m?$'),
@@ -94,7 +93,7 @@ deployment_instances_rules = [
                          validate_on=['check:O'],
                          nullable=True),
     # for stateful set, difference env & volume for each pod
-    crud.ColumnValidator(field='tags',
+    crud.ColumnValidator(field='pod_tags',
                          rule=validator.IterableValidator(crud.ColumnValidator.get_clean_data, tag_item_rules, 'check'),
                          validate_on=['check:M'],
                          nullable=True),

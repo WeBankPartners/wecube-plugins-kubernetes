@@ -23,14 +23,13 @@ class Deployment:
         resource_namespace = data['namespace']
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.DEPLOYMENT_ID_TAG] = resource_id
-        replicas = len(data['instances'])
-        pod_spec = data['instances'][0]
-        pod_spec_tags = api_utils.convert_tag(pod_spec.get('tags', []))
+        replicas = data['replicas']
+        pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
         pod_spec_tags[const.Tag.POD_AUTO_TAG] = data['name']
-        pod_spec_ports = api_utils.convert_pod_ports(pod_spec.get('ports', ''))
-        pod_spec_envs = api_utils.convert_env(pod_spec.get('envs', []))
-        pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(pod_spec.get('volumes', []))
-        pod_spec_limit = api_utils.convert_resource_limit(pod_spec)
+        pod_spec_ports = api_utils.convert_pod_ports(data.get('ports', ''))
+        pod_spec_envs = api_utils.convert_env(data.get('envs', []))
+        pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
+        pod_spec_limit = api_utils.convert_resource_limit(data.get('cpu', None), data.get('memory', None))
         containers = api_utils.convert_container(data['images'], pod_spec_ports, pod_spec_envs, pod_spec_mnt_vols,
                                                  pod_spec_limit)
         registry_secrets = []
@@ -74,6 +73,7 @@ class Deployment:
         cluster_info = cluster_info[0]
         k8s_auth = k8s.AuthToken(cluster_info['api_server'], cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
+        k8s_client.ensure_namespace(data['namespace'])
         resource_name = api_utils.escape_name(data['name'])
         exists_resource = k8s_client.get_deployment(resource_name, data['namespace'])
         if exists_resource is None:
@@ -81,9 +81,8 @@ class Deployment:
         else:
             exists_resource = k8s_client.update_deployment(resource_name, data['namespace'],
                                                            self.to_resource(k8s_client, data))
-        # TODO: 返回数据规整
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
-        return exists_resource.to_dict()['spec']
+        return {'id': exists_resource.metadata.uid, 'name': exists_resource.metadata.name}
 
     def remove(self, data):
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
@@ -143,6 +142,7 @@ class Service:
         cluster_info = cluster_info[0]
         k8s_auth = k8s.AuthToken(cluster_info['api_server'], cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
+        k8s_client.ensure_namespace(data['namespace'])
         resource_name = api_utils.escape_name(data['name'])
         exists_resource = k8s_client.get_service(resource_name, data['namespace'])
         if not exists_resource:
@@ -150,9 +150,8 @@ class Service:
         else:
             exists_resource = k8s_client.update_service(resource_name, data['namespace'],
                                                         self.to_resource(k8s_client, data))
-        # TODO: 返回数据规整
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
-        return exists_resource.to_dict()['spec']
+        return {'id': exists_resource.metadata.uid, 'name': exists_resource.metadata.name}
 
     def remove(self, data):
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})

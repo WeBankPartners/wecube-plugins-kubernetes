@@ -140,14 +140,14 @@ def convert_volume(items):
     return volumes, mounts
 
 
-def convert_resource_limit(item):
+def convert_resource_limit(cpu, memory):
     ret = {'limits': {}, 'requests': {}}
-    if item.get('cpu'):
-        ret['limits'].setdefault('cpu', item['cpu'])
-        ret['requests'].setdefault('cpu', item['cpu'])
-    if item.get('memory'):
-        ret['limits'].setdefault('memory', item['memory'])
-        ret['requests'].setdefault('memory', item['memory'])
+    if cpu:
+        ret['limits'].setdefault('cpu', cpu)
+        ret['requests'].setdefault('cpu', cpu)
+    if memory:
+        ret['limits'].setdefault('memory', memory)
+        ret['requests'].setdefault('memory', memory)
     return ret
 
 

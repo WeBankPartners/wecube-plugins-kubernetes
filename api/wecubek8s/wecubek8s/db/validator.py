@@ -11,6 +11,7 @@ from talos.db import validator
 
 RegexValidator = validator.RegexValidator
 InValidator = validator.InValidator
+NumberValidator = validator.NumberValidator
 
 
 class LengthValidator(validator.NullValidator):
