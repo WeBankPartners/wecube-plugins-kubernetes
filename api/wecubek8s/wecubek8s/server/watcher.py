@@ -4,15 +4,47 @@ import logging
 import time
 from threading import Event
 from concurrent.futures import ThreadPoolExecutor as PoolExecutor
+from talos.core import config
+from talos.core import utils
+
 from wecubek8s.server.wsgi_server import application
 from wecubek8s.apps.model import api
+from wecubek8s.common import wecube
 
 LOG = logging.getLogger(__name__)
+CONF = config.CONF
 
 
 def notify_pod(event, cluster_id, data):
-    # TODO: handle added,deleted
     LOG.info('event: %s from cluster: %s with data: %s', event, cluster_id, data)
+    try:
+        if event == 'POD.ADDED':
+            client = wecube.WeCubeClient(CONF.wecube.base_url, None)
+            client.login_subsystem()
+            client.post(
+                client.build_url('/platform/v1/operation-events'), {
+                    "eventSeqNo": utils.generate_prefix_uuid("kubernetes-pod-"),
+                    "eventType": event,
+                    "sourceSubSystem": CONF.wecube.sub_system_code,
+                    "operationKey": CONF.notify.pod_added,
+                    "operationData": data['id'],
+                    "operationUser": "plugin-kubernetes-watcher"
+                })
+        elif event == 'POD.DELETED':
+            client = wecube.WeCubeClient(CONF.wecube.base_url, None)
+            client.login_subsystem()
+            client.post(
+                client.build_url('/platform/v1/operation-events'), {
+                    "eventSeqNo": utils.generate_prefix_uuid("kubernetes-pod-"),
+                    "eventType": event,
+                    "sourceSubSystem": CONF.wecube.sub_system_code,
+                    "operationKey": CONF.notify.pod_deleted,
+                    "operationData": data['id'],
+                    "operationUser": "plugin-kubernetes-watcher"
+                })
+    except Exception as e:
+        LOG.error('exception raised while notify pod: %s', data['id'])
+        LOG.exception(e)
 
 
 def watch_pod(cluster, event_stop):
