@@ -3,22 +3,35 @@ project_name=$(shell basename "${current_dir}")
 version=${PLUGIN_VERSION}
 
 clean:
-	rm -rf package
+	rm -rf api/wecubek8s/dist/
 
+build: clean
+	cd api/wecubek8s && pip3 install wheel
+	cd api/wecubek8s && python3 setup.py bdist_wheel
+	# cd ui && npm --registry https://registry.npm.taobao.org  install --unsafe-perm
+	# cd ui && npm rebuild node-sass
+	# cd ui && npm run plugin
 
-image: clean
+image: build
 	docker build -t $(project_name):$(version) .
 
 package: image
 	rm -rf package
 	mkdir -p package
-	cd package && sed -i 's/{{PLUGIN_VERSION}}/$(version)/'  ../register.xml
-	cd package && sed -i 's/{{IMAGENAME}}/$(project_name):$(version)/g' ../register.xml
-	cd package && sed -i 's/{{CONTAINERNAME}}/$(project_name)-$(version)/g' ../register.xml
+	echo "$(version)" > api/wecubek8s/VERSION
+	cd package && sed 's/{{PLUGIN_VERSION}}/$(version)/' ../build/register.xml.tpl > ./register.xml
+	cd package && sed -i 's/{{IMAGENAME}}/$(project_name):$(version)/g' ./register.xml
+	cd package && sed -i 's/{{CONTAINERNAME}}/$(project_name)-$(version)/g' ./register.xml 
 	cd package && docker save -o image.tar $(project_name):$(version)
-	cp register.xml  package/
-	cd package && zip -9 $(project_name)-$(version).zip image.tar register.xml
+	# cd ui/dist && zip -9 -r ui.zip .
+	# cd package && mv ../ui/dist/ui.zip .
+	cd package && cp ../init.sql ./init.sql
+	# cd package && zip -9 $(project_name)-$(version).zip image.tar register.xml init.sql ui.zip
+	cd package && zip -9 $(project_name)-$(version).zip image.tar register.xml init.sql
 	cd package && rm -f image.tar
+	cd package && rm -f register.xml
+	# cd package && rm -f ui.zip
+	cd package && rm -f init.sql
 	docker rmi $(project_name):$(version)
 
 upload: package
