@@ -71,6 +71,18 @@ class Client:
         return self._action(self.core_client, 'list_node', **kwargs)
 
     # Namespace
+    def create_namespace(self, body, **kwargs):
+        return self._action(self.core_client, 'create_namespace', body, **kwargs)
+
+    def update_namespace(self, name, body, **kwargs):
+        return self._action(self.core_client, 'patch_namespace', name, body, **kwargs)
+
+    def delete_namespace(self, name, **kwargs):
+        return self._action(self.core_client, 'delete_namespace', name, **kwargs)
+
+    def get_namespace(self, name, **kwargs):
+        return self._action_detail(self.core_client, 'read_namespace', name, **kwargs)
+
     def list_namespace(self, **kwargs):
         return self._action(self.core_client, 'list_namespace', **kwargs)
 
@@ -156,9 +168,9 @@ class Client:
                 'name': name,
                 'namespace': namespace
             },
-            "type": "kubernetes.io/dockerconfigjson",
-            "data": {
-                ".dockerconfigjson": base64.b64encode((json.dumps(auth_data).encode('utf-8'))).decode()
+            'type': 'kubernetes.io/dockerconfigjson',
+            'data': {
+                '.dockerconfigjson': base64.b64encode((json.dumps(auth_data).encode('utf-8'))).decode()
             }
         }
         has_secret = self.get_secret(name, namespace)
@@ -166,4 +178,13 @@ class Client:
             self.create_secret(namespace, body, **kwargs)
         else:
             self.update_secret(name, namespace, body)
+        return True
+
+    def ensure_namespace(self, name, **kwargs):
+        body = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name}, 'labels': {}}
+        has_namespace = self.get_namespace(name)
+        if has_namespace is None:
+            self.create_namespace(body, **kwargs)
+        else:
+            self.update_namespace(name, body)
         return True
