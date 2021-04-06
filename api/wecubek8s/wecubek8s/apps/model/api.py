@@ -61,7 +61,11 @@ class Cluster(BaseEntity):
             'id': item['id'],
             'name': item['name'],
             'displayName': item['name'],
-            'correlation_id': item['correlation_id']
+            'correlation_id': item['correlation_id'],
+            'api_server': item['api_server'],
+            'token': item['token'],
+            'metric_server': item['metric_server'],
+            'metric_port': item['metric_port'],
         }
         return result
 

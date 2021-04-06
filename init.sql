@@ -5,6 +5,8 @@ CREATE TABLE `cluster` (
   `correlation_id` varchar(36) DEFAULT NULL,
   `api_server` varchar(255) NOT NULL,
   `token` varchar(2048) NOT NULL,
+  `metric_server` varchar(63) DEFAULT NULL,
+  `metric_port` int(11) DEFAULT NULL,
   `created_by` varchar(36) DEFAULT NULL,
   `created_time` datetime DEFAULT NULL,
   `updated_by` varchar(36) DEFAULT NULL,
