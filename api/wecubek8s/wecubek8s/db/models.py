@@ -18,7 +18,7 @@ class Cluster(Base, DictBase):
     correlation_id = Column(String(36))
     api_server = Column(String(255), nullable=False)
     token = Column(String(2048), nullable=False)
-    metric_server = Column(String(63), nullable=False)
+    metric_host = Column(String(63), nullable=False)
     metric_port = Column(Integer, nullable=False)
     created_by = Column(String(36))
     created_time = Column(DateTime)

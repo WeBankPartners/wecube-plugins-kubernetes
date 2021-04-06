@@ -4,6 +4,7 @@ from __future__ import absolute_import
 
 import logging
 import datetime
+from urllib.parse import urlparse
 
 from kubernetes import watch
 from talos.common import cache
@@ -57,14 +58,23 @@ class BaseEntity:
 class Cluster(BaseEntity):
     @classmethod
     def to_dict(cls, cluster, item):
+        parse_info = urlparse(item['api_server'])
+        api_info = parse_info.netloc.rsplit(':', 1)
+        api_host = ''
+        api_port = 0
+        if len(api_info) >= 2:
+            api_host = api_info[0]
+            api_port = int(api_info[1]) or (443 if api_info.scheme == 'https' else 80)
         result = {
             'id': item['id'],
             'name': item['name'],
             'displayName': item['name'],
             'correlation_id': item['correlation_id'],
             'api_server': item['api_server'],
+            'api_host': api_host,
+            'api_port': api_port,
             'token': item['token'],
-            'metric_server': item['metric_server'],
+            'metric_host': item['metric_host'],
             'metric_port': item['metric_port'],
         }
         return result
