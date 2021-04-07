@@ -19,7 +19,7 @@
                        refPackage="wecmdb" refVersion="" refEntity="resource_set" ref="id"/>
             <attribute name="api_server" datatype="str" description="API URL"/>
             <attribute name="api_host" datatype="str" description="API地址"/>
-            <attribute name="api_port" datatype="str" description="API端口"/>
+            <attribute name="api_port" datatype="int" description="API端口"/>
             <attribute name="token" datatype="str" description="API Token"/>
             <attribute name="metric_host" datatype="str" description="指标服务地址"/>
             <attribute name="metric_port" datatype="int" description="指标服务端口"/>
