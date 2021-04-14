@@ -24,8 +24,10 @@ class Deployment:
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.DEPLOYMENT_ID_TAG] = resource_id
         replicas = data['replicas']
+        pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, data['name'])
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
         pod_spec_tags[const.Tag.POD_AUTO_TAG] = data['name']
+        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = data['name']
         pod_spec_ports = api_utils.convert_pod_ports(data.get('ports', ''))
         pod_spec_envs = api_utils.convert_env(data.get('envs', []))
         pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
@@ -54,6 +56,7 @@ class Deployment:
                         'labels': pod_spec_tags
                     },
                     'spec': {
+                        'affinity': pod_spec_affinity,
                         'containers': containers,
                         'volumes': pod_spec_src_vols
                     }

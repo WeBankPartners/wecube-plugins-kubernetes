@@ -232,3 +232,40 @@ def convert_registry_secret(k8s_client, images, namespace, username, password):
             k8s_client.ensure_registry_secret(name, namespace, registry_server, username, password)
             rets.append({'name': name})
     return rets
+
+
+def convert_affinity(strategy, tag_key, tag_value):
+    if strategy == 'anti-host-preferred':
+        return {
+            'podAntiAffinity': {
+                'preferredDuringSchedulingIgnoredDuringExecution': [{
+                    'weight': 100,
+                    'podAffinityTerm': {
+                        'labelSelector': {
+                            'matchExpressions': [{
+                                'key': tag_key,
+                                'operator': 'In',
+                                'values': [tag_value]
+                            }]
+                        },
+                        'topologyKey': 'kubernetes.io/hostname'
+                    }
+                }]
+            }
+        }
+    elif strategy == 'anti-host-required':
+        return {
+            'podAntiAffinity': {
+                'requiredDuringSchedulingIgnoredDuringExecution': [{
+                    'labelSelector': {
+                        'matchExpressions': [{
+                            'key': tag_key,
+                            'operator': 'In',
+                            'values': [tag_value]
+                        }]
+                    },
+                    'topologyKey': 'kubernetes.io/hostname'
+                }]
+            }
+        }
+    return {}
