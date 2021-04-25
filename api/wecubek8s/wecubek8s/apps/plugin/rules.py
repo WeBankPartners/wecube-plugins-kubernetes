@@ -174,7 +174,7 @@ service_instances_rules = [
                          nullable=True),
 ]
 
-remove_rules = [
+destroy_rules = [
     crud.ColumnValidator(field='cluster',
                          rule=validator.LengthValidator(1, 255),
                          validate_on=['check:M'],
