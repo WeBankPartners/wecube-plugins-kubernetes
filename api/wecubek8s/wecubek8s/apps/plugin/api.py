@@ -45,7 +45,7 @@ class Deployment:
                 'name': resource_name
             },
             'spec': {
-                'replicas': replicas,
+                'replicas': int(replicas),
                 'selector': {
                     'matchLabels': pod_spec_tags
                 },

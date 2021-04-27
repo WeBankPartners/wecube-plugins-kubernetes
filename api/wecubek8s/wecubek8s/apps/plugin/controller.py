@@ -16,7 +16,7 @@ class Deployment(controller.Plugin):
     name = 'k8s.plugin.deployment'
 
     def set_item_default(self, item):
-        defaults = {'namespace': 'default', 'replicas': 1, 'affinity': 'anti-host-preferred'}
+        defaults = {'namespace': 'default', 'replicas': '1', 'affinity': 'anti-host-preferred'}
         for key, value in defaults.items():
             if not item.get(key):
                 item[key] = value
