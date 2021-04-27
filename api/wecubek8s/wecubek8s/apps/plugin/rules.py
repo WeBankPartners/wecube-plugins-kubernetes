@@ -11,6 +11,11 @@ tag_item_rules = [
     crud.ColumnValidator(field='value', rule=validator.TypeValidator(str), validate_on=['check:M'], nullable=False),
 ]
 
+image_item_rules = [
+    crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
+    crud.ColumnValidator(field='ports', rule=validator.LengthValidator(0, 512), validate_on=['check:O'], nullable=True),
+]
+
 # env = name, value, valueFrom
 #   valueFrom in [configMapKeyRef, fieldRef, resourceFieldRef, secretKeyRef]
 #     * configMapKeyRef = name,key
@@ -64,7 +69,11 @@ deployment_rules = [
                          rule=validator.LengthValidator(0, 255),
                          validate_on=['check:O'],
                          nullable=True),
-    crud.ColumnValidator(field='images', rule=validator.TypeValidator(list), validate_on=['check:M'], nullable=False),
+    crud.ColumnValidator(field='images',
+                         rule=validator.IterableValidator(crud.ColumnValidator.get_clean_data, image_item_rules,
+                                                          'check', length_min=1),
+                         validate_on=['check:M'],
+                         nullable=False),
     # default no auth
     crud.ColumnValidator(field='image_pull_username',
                          rule=validator.LengthValidator(0, 255),
@@ -83,7 +92,6 @@ deployment_rules = [
                          rule=validator.NumberValidator(int, range_min=0),
                          validate_on=['check:O'],
                          nullable=True),
-    crud.ColumnValidator(field='ports', rule=validator.LengthValidator(0, 255), validate_on=['check:O'], nullable=True),
     crud.ColumnValidator(field='cpu',
                          rule=validator.RegexValidator(r'^((\d+\.\d+)|(\d+))m?$'),
                          validate_on=['check:O'],
