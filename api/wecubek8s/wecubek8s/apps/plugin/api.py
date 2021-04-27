@@ -28,12 +28,10 @@ class Deployment:
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
         pod_spec_tags[const.Tag.POD_AUTO_TAG] = data['name']
         pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = data['name']
-        pod_spec_ports = api_utils.convert_pod_ports(data.get('ports', ''))
         pod_spec_envs = api_utils.convert_env(data.get('envs', []))
         pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
         pod_spec_limit = api_utils.convert_resource_limit(data.get('cpu', None), data.get('memory', None))
-        containers = api_utils.convert_container(data['images'], pod_spec_ports, pod_spec_envs, pod_spec_mnt_vols,
-                                                 pod_spec_limit)
+        containers = api_utils.convert_container(data['images'], pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit)
         registry_secrets = []
         if data.get('image_pull_username') and data.get('image_pull_password'):
             registry_secrets = api_utils.convert_registry_secret(k8s_client, data['images'], resource_namespace,
