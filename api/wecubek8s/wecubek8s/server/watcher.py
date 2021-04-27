@@ -18,7 +18,7 @@ CONF = config.CONF
 def notify_pod(event, cluster_id, data):
     LOG.info('event: %s from cluster: %s with data: %s', event, cluster_id, data)
     try:
-        if event == 'POD.ADDED':
+        if event == 'POD.ADDED' and CONF.notify.pod_added:
             client = wecube.WeCubeClient(CONF.wecube.base_url, None)
             client.login_subsystem()
             client.post(
@@ -30,7 +30,7 @@ def notify_pod(event, cluster_id, data):
                     "operationData": data['id'],
                     "operationUser": "plugin-kubernetes-watcher"
                 })
-        elif event == 'POD.DELETED':
+        elif event == 'POD.DELETED' and CONF.notify.pod_deleted:
             client = wecube.WeCubeClient(CONF.wecube.base_url, None)
             client.login_subsystem()
             client.post(
