@@ -4,7 +4,6 @@
 talos-api
 dogpile.cache
 gunicorn
-paramiko
 requests
 pyjwt<2.0.0
 pycrypto

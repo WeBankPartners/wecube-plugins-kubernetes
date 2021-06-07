@@ -34,23 +34,19 @@ def convert_pod_ports(item):
     # convert pod ports
     # eg. 12, 23:32, 45::UDP, 678:876:TCP
     rets = []
-    part_per_images = item.split('|')
-    for part_item in part_per_images:
-        parts = re.split(r',|;', part_item)
-        image_ret = []
-        for part in parts:
-            if part.strip():
-                part = part.strip()
-                map_parts = part.split(':', 2)
-                ret = {'containerPort': int(map_parts[0]), 'protocol': 'TCP'}
-                if len(map_parts) >= 1:
-                    image_ret.append(ret)
-                if len(map_parts) >= 2:
-                    if map_parts[1]:
-                        ret['hostPort'] = int(map_parts[1])
-                if len(map_parts) >= 3:
-                    ret['protocol'] = map_parts[2]
-        rets.append(image_ret)
+    parts = re.split(r',|;', item)
+    for part in parts:
+        if part.strip():
+            part = part.strip()
+            map_parts = part.split(':', 2)
+            ret = {'containerPort': int(map_parts[0]), 'protocol': 'TCP'}
+            if len(map_parts) >= 1:
+                rets.append(ret)
+            if len(map_parts) >= 2:
+                if map_parts[1]:
+                    ret['hostPort'] = int(map_parts[1])
+            if len(map_parts) >= 3:
+                ret['protocol'] = map_parts[2]
     return rets
 
 
@@ -194,7 +190,7 @@ def parse_image_url(image_url):
     return None, None, None, None
 
 
-def convert_container(items, ports, envs, vols, resource_limit):
+def convert_container(images, envs, vols, resource_limit):
     containers = []
     container_template = {
         'name': '',
@@ -205,17 +201,12 @@ def convert_container(items, ports, envs, vols, resource_limit):
         'volumeMounts': vols,
         'resources': resource_limit
     }
-    for idx, image in enumerate(items):
+    for image_info in images:
         container = container_template.copy()
-        registry_server, registry_namespace, image_name, image_tag = parse_image_url(image.strip())
+        registry_server, registry_namespace, image_name, image_tag = parse_image_url(image_info['name'].strip())
         container['name'] = image_name
-        container['image'] = image.strip()
-        # if can not map ports => image one to one, then leave it empty
-        if len(ports) != len(items):
-            if idx < len(ports):
-                container['ports'] = ports[idx]
-        else:
-            container['ports'] = ports[idx]
+        container['image'] = image_info['name'].strip()
+        container['ports'] = convert_pod_ports(image_info.get('ports', ''))
         containers.append(container)
 
     return containers
@@ -223,8 +214,8 @@ def convert_container(items, ports, envs, vols, resource_limit):
 
 def convert_registry_secret(k8s_client, images, namespace, username, password):
     rets = []
-    for image in images:
-        registry_server, registry_namespace, image_name, image_tag = parse_image_url(image.strip())
+    for image_info in images:
+        registry_server, registry_namespace, image_name, image_tag = parse_image_url(image_info['name'].strip())
         if registry_server:
             name = ''
             name = registry_server + '#' + username
@@ -232,3 +223,40 @@ def convert_registry_secret(k8s_client, images, namespace, username, password):
             k8s_client.ensure_registry_secret(name, namespace, registry_server, username, password)
             rets.append({'name': name})
     return rets
+
+
+def convert_affinity(strategy, tag_key, tag_value):
+    if strategy == 'anti-host-preferred':
+        return {
+            'podAntiAffinity': {
+                'preferredDuringSchedulingIgnoredDuringExecution': [{
+                    'weight': 100,
+                    'podAffinityTerm': {
+                        'labelSelector': {
+                            'matchExpressions': [{
+                                'key': tag_key,
+                                'operator': 'In',
+                                'values': [tag_value]
+                            }]
+                        },
+                        'topologyKey': 'kubernetes.io/hostname'
+                    }
+                }]
+            }
+        }
+    elif strategy == 'anti-host-required':
+        return {
+            'podAntiAffinity': {
+                'requiredDuringSchedulingIgnoredDuringExecution': [{
+                    'labelSelector': {
+                        'matchExpressions': [{
+                            'key': tag_key,
+                            'operator': 'In',
+                            'values': [tag_value]
+                        }]
+                    },
+                    'topologyKey': 'kubernetes.io/hostname'
+                }]
+            }
+        }
+    return {}
