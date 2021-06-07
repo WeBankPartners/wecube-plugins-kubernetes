@@ -6,6 +6,34 @@ from talos.db import crud
 from talos.db import converter
 from wecubek8s.db import validator
 
+cluster_rules = [
+    crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
+    crud.ColumnValidator(field='correlation_id',
+                         rule=validator.LengthValidator(1, 36),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='api_server',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='token',
+                         rule=validator.LengthValidator(1, 2048),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='metric_host',
+                         rule=validator.LengthValidator(0, 63),
+                         validate_on=['check:O'],
+                         nullable=False),
+    crud.ColumnValidator(field='metric_port',
+                         rule=validator.LengthValidator(0, 20),
+                         validate_on=['check:O'],
+                         nullable=False)
+]
+
+cluster_destroy_rules = [
+    crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
+]
+
 tag_item_rules = [
     crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
     crud.ColumnValidator(field='value', rule=validator.TypeValidator(str), validate_on=['check:M'], nullable=False),

@@ -16,6 +16,28 @@ CONF = config.CONF
 LOG = logging.getLogger(__name__)
 
 
+class Cluster:
+    def apply(self, data):
+        cluster_info = db_resource.Cluster().list({'name': data['name']})
+        result = None
+        if not cluster_info:
+            data['id'] = 'cluster-' + data['name']
+            result = db_resource.Cluster().create(data)
+        else:
+            cluster_info = cluster_info[0]
+            result_before, result = db_resource.Cluster().update(cluster_info['id'], data)
+        return result
+
+    def remove(self, data):
+        cluster_info = db_resource.Cluster().list({'name': data['name']})
+        result = {}
+        if cluster_info:
+            cluster_info = cluster_info[0]
+            ref_count, refs = db_resource.Cluster().delete(cluster_info['id'])
+            result = refs[0]
+        return result
+
+
 class Deployment:
     def to_resource(self, k8s_client, data):
         resource_id = data['id']
