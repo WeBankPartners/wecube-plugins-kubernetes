@@ -9,7 +9,7 @@ from wecubek8s.db import validator
 cluster_rules = [
     crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
     crud.ColumnValidator(field='correlation_id',
-                         rule=validator.LengthValidator(1, 36),
+                         rule=validator.LengthValidator(1, 64),
                          validate_on=['check:M'],
                          nullable=False),
     crud.ColumnValidator(field='api_server',
@@ -90,7 +90,10 @@ deployment_rules = [
                          rule=validator.LengthValidator(1, 255),
                          validate_on=['check:M'],
                          nullable=False),
-    crud.ColumnValidator(field='id', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
+    crud.ColumnValidator(field='correlation_id',
+                         rule=validator.LengthValidator(1, 64),
+                         validate_on=['check:M'],
+                         nullable=False),
     crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
     # default 'default'
     crud.ColumnValidator(field='namespace',
@@ -133,7 +136,7 @@ deployment_rules = [
     # for stateful set, difference env & volume for each pod
     crud.ColumnValidator(field='pod_tags',
                          rule=validator.IterableValidator(crud.ColumnValidator.get_clean_data, tag_item_rules, 'check'),
-                         validate_on=['check:M'],
+                         validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='affinity',
                          rule=validator.InValidator(['anti-host-preferred', 'anti-host-required']),
@@ -155,7 +158,10 @@ service_rules = [
                          rule=validator.LengthValidator(1, 255),
                          validate_on=['check:M'],
                          nullable=False),
-    crud.ColumnValidator(field='id', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
+    crud.ColumnValidator(field='correlation_id',
+                         rule=validator.LengthValidator(1, 64),
+                         validate_on=['check:M'],
+                         nullable=False),
     crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
     # default 'default'
     crud.ColumnValidator(field='namespace',
