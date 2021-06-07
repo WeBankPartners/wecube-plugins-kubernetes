@@ -15,7 +15,7 @@ class Cluster(Base, DictBase):
 
     id = Column(String(255), primary_key=True)
     name = Column(String(255), unique=True)
-    correlation_id = Column(String(36))
+    correlation_id = Column(String(64))
     api_server = Column(String(255), nullable=False)
     token = Column(String(2048), nullable=False)
     metric_host = Column(String(63), nullable=False)
