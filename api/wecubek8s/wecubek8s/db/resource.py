@@ -19,7 +19,8 @@ class MetaCRUD(crud.ResourceBase):
     _id_prefix = ''
 
     def _before_create(self, resource, validate):
-        resource['id'] = utils.generate_prefix_uuid(self._id_prefix)
+        if 'id' not in resource:
+            resource['id'] = utils.generate_prefix_uuid(self._id_prefix)
         resource['created_by'] = scoped_globals.GLOBALS.request.auth_user or None
         resource['created_time'] = datetime.datetime.now()
 

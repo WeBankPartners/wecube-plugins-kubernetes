@@ -72,7 +72,7 @@ class Cluster(BaseEntity):
             'correlation_id': item['correlation_id'],
             'api_server': item['api_server'],
             'api_host': api_host,
-            'api_port': api_port,
+            'api_port': str(api_port),
             'token': item['token'],
             'metric_host': item['metric_host'],
             'metric_port': item['metric_port'],

@@ -16,6 +16,28 @@ CONF = config.CONF
 LOG = logging.getLogger(__name__)
 
 
+class Cluster:
+    def apply(self, data):
+        cluster_info = db_resource.Cluster().list({'name': data['name']})
+        result = None
+        if not cluster_info:
+            data['id'] = 'cluster-' + data['name']
+            result = db_resource.Cluster().create(data)
+        else:
+            cluster_info = cluster_info[0]
+            result_before, result = db_resource.Cluster().update(cluster_info['id'], data)
+        return result
+
+    def remove(self, data):
+        cluster_info = db_resource.Cluster().list({'name': data['name']})
+        result = {}
+        if cluster_info:
+            cluster_info = cluster_info[0]
+            ref_count, refs = db_resource.Cluster().delete(cluster_info['id'])
+            result = refs[0]
+        return result
+
+
 class Deployment:
     def to_resource(self, k8s_client, data):
         resource_id = data['id']
@@ -24,14 +46,14 @@ class Deployment:
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.DEPLOYMENT_ID_TAG] = resource_id
         replicas = data['replicas']
+        pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, data['name'])
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
         pod_spec_tags[const.Tag.POD_AUTO_TAG] = data['name']
-        pod_spec_ports = api_utils.convert_pod_ports(data.get('ports', ''))
+        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = data['name']
         pod_spec_envs = api_utils.convert_env(data.get('envs', []))
         pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
         pod_spec_limit = api_utils.convert_resource_limit(data.get('cpu', None), data.get('memory', None))
-        containers = api_utils.convert_container(data['images'], pod_spec_ports, pod_spec_envs, pod_spec_mnt_vols,
-                                                 pod_spec_limit)
+        containers = api_utils.convert_container(data['images'], pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit)
         registry_secrets = []
         if data.get('image_pull_username') and data.get('image_pull_password'):
             registry_secrets = api_utils.convert_registry_secret(k8s_client, data['images'], resource_namespace,
@@ -45,7 +67,7 @@ class Deployment:
                 'name': resource_name
             },
             'spec': {
-                'replicas': replicas,
+                'replicas': int(replicas),
                 'selector': {
                     'matchLabels': pod_spec_tags
                 },
@@ -54,6 +76,7 @@ class Deployment:
                         'labels': pod_spec_tags
                     },
                     'spec': {
+                        'affinity': pod_spec_affinity,
                         'containers': containers,
                         'volumes': pod_spec_src_vols
                     }

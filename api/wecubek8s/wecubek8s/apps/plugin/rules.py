@@ -6,9 +6,42 @@ from talos.db import crud
 from talos.db import converter
 from wecubek8s.db import validator
 
+cluster_rules = [
+    crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
+    crud.ColumnValidator(field='correlation_id',
+                         rule=validator.LengthValidator(1, 36),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='api_server',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='token',
+                         rule=validator.LengthValidator(1, 2048),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='metric_host',
+                         rule=validator.LengthValidator(0, 63),
+                         validate_on=['check:O'],
+                         nullable=False),
+    crud.ColumnValidator(field='metric_port',
+                         rule=validator.LengthValidator(0, 20),
+                         validate_on=['check:O'],
+                         nullable=False)
+]
+
+cluster_destroy_rules = [
+    crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
+]
+
 tag_item_rules = [
     crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
     crud.ColumnValidator(field='value', rule=validator.TypeValidator(str), validate_on=['check:M'], nullable=False),
+]
+
+image_item_rules = [
+    crud.ColumnValidator(field='name', rule=validator.LengthValidator(1, 255), validate_on=['check:M'], nullable=False),
+    crud.ColumnValidator(field='ports', rule=validator.LengthValidator(0, 512), validate_on=['check:O'], nullable=True),
 ]
 
 # env = name, value, valueFrom
@@ -64,7 +97,13 @@ deployment_rules = [
                          rule=validator.LengthValidator(0, 255),
                          validate_on=['check:O'],
                          nullable=True),
-    crud.ColumnValidator(field='images', rule=validator.TypeValidator(list), validate_on=['check:M'], nullable=False),
+    crud.ColumnValidator(field='images',
+                         rule=validator.IterableValidator(crud.ColumnValidator.get_clean_data,
+                                                          image_item_rules,
+                                                          'check',
+                                                          length_min=1),
+                         validate_on=['check:M'],
+                         nullable=False),
     # default no auth
     crud.ColumnValidator(field='image_pull_username',
                          rule=validator.LengthValidator(0, 255),
@@ -80,10 +119,9 @@ deployment_rules = [
                          validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='replicas',
-                         rule=validator.NumberValidator(int, range_min=0),
+                         rule=validator.RegexValidator(r'^\d+$'),
                          validate_on=['check:O'],
                          nullable=True),
-    crud.ColumnValidator(field='ports', rule=validator.LengthValidator(0, 255), validate_on=['check:O'], nullable=True),
     crud.ColumnValidator(field='cpu',
                          rule=validator.RegexValidator(r'^((\d+\.\d+)|(\d+))m?$'),
                          validate_on=['check:O'],
@@ -96,6 +134,10 @@ deployment_rules = [
     crud.ColumnValidator(field='pod_tags',
                          rule=validator.IterableValidator(crud.ColumnValidator.get_clean_data, tag_item_rules, 'check'),
                          validate_on=['check:M'],
+                         nullable=True),
+    crud.ColumnValidator(field='affinity',
+                         rule=validator.InValidator(['anti-host-preferred', 'anti-host-required']),
+                         validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='envs',
                          rule=validator.IterableValidator(crud.ColumnValidator.get_clean_data, env_item_rules, 'check'),
@@ -170,7 +212,7 @@ service_instances_rules = [
                          nullable=True),
 ]
 
-remove_rules = [
+destroy_rules = [
     crud.ColumnValidator(field='cluster',
                          rule=validator.LengthValidator(1, 255),
                          validate_on=['check:M'],

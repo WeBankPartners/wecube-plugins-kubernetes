@@ -13,13 +13,13 @@ metadata = Base.metadata
 class Cluster(Base, DictBase):
     __tablename__ = 'cluster'
 
-    id = Column(String(36), primary_key=True)
-    name = Column(String(36), unique=True)
+    id = Column(String(255), primary_key=True)
+    name = Column(String(255), unique=True)
     correlation_id = Column(String(36))
     api_server = Column(String(255), nullable=False)
     token = Column(String(2048), nullable=False)
     metric_host = Column(String(63), nullable=False)
-    metric_port = Column(Integer, nullable=False)
+    metric_port = Column(String(20), nullable=False)
     created_by = Column(String(36))
     created_time = Column(DateTime)
     updated_by = Column(String(36))
