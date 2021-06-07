@@ -1,12 +1,22 @@
-# Created by .ignore support plugin (hsz.mobi)
-.idea
-*.swp
-*.swo
-*.pid
-*.log
+/.coverage
+/.project
+/.pydevproject
+/.settings/*
 *.pyc
-static/.DS_Store
-/.idea/*
-/conf/*
-test.py
-test/
+api/wecubek8s/assets/*
+api/wecubek8s/htmlcov/*
+api/wecubek8s/unit_test_report.html
+api/wecubek8s/.vscode/*
+api/wecubek8s/wecubek8s.egg-info
+api/wecubek8s/server.log
+api/wecubek8s/simple_server.py
+api/wecubek8s/build/*
+
+# ui
+ui/node_modules
+ui/dist
+ui/package-lock.json
+api/wecubek8s/etc/locale/POTFILES.in
+api/wecubek8s/operation.log
+ui/.project
+ui/.settings/org.eclipse.m2e.core.prefs
