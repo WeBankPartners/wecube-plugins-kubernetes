@@ -11,6 +11,32 @@ from wecubek8s.apps.plugin import rules
 from wecubek8s.apps.plugin import api as plugin_api
 
 
+class Cluster(controller.Plugin):
+    allow_methods = ('POST', )
+    name = 'k8s.plugin.cluster'
+
+    def set_item_default(self, item):
+        defaults = {}
+        for key, value in defaults.items():
+            if not item.get(key):
+                item[key] = value
+
+    def validate_item_apply(self, item_index, item):
+        clean_item = crud.ColumnValidator.get_clean_data(rules.cluster_rules, item, 'check')
+        self.set_item_default(clean_item)
+        return clean_item
+
+    def validate_item_destroy(self, item_index, item):
+        clean_item = crud.ColumnValidator.get_clean_data(rules.cluster_destroy_rules, item, 'check')
+        return clean_item
+
+    def apply(self, reqid, operator, item_index, item, **kwargs):
+        return plugin_api.Cluster().apply(item)
+
+    def destroy(self, reqid, operator, item_index, item, **kwargs):
+        return plugin_api.Cluster().remove(item)
+
+
 class Deployment(controller.Plugin):
     allow_methods = ('POST', )
     name = 'k8s.plugin.deployment'

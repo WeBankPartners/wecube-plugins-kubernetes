@@ -75,7 +75,7 @@ class Cluster(BaseEntity):
             'api_port': str(api_port),
             'token': item['token'],
             'metric_host': item['metric_host'],
-            'metric_port': str(item['metric_port']),
+            'metric_port': item['metric_port'],
         }
         return result
 
