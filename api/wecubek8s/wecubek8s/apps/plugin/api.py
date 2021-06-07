@@ -30,7 +30,7 @@ class Cluster:
 
     def remove(self, data):
         cluster_info = db_resource.Cluster().list({'name': data['name']})
-        result = {}
+        result = {'id': '', 'name': '', 'correlation_id': ''}
         if cluster_info:
             cluster_info = cluster_info[0]
             ref_count, refs = db_resource.Cluster().delete(cluster_info['id'])
@@ -40,7 +40,7 @@ class Cluster:
 
 class Deployment:
     def to_resource(self, k8s_client, data):
-        resource_id = data['id']
+        resource_id = data['correlation_id']
         resource_name = api_utils.escape_name(data['name'])
         resource_namespace = data['namespace']
         resource_tags = api_utils.convert_tag(data.get('tags', []))
@@ -89,6 +89,7 @@ class Deployment:
         return template
 
     def apply(self, data):
+        resource_id = data['correlation_id']
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
             raise exceptions.ValidationError(attribute='cluster',
@@ -105,7 +106,11 @@ class Deployment:
             exists_resource = k8s_client.update_deployment(resource_name, data['namespace'],
                                                            self.to_resource(k8s_client, data))
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
-        return {'id': exists_resource.metadata.uid, 'name': exists_resource.metadata.name}
+        return {
+            'id': exists_resource.metadata.uid,
+            'name': exists_resource.metadata.name,
+            'correlation_id': resource_id
+        }
 
     def remove(self, data):
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
@@ -120,12 +125,12 @@ class Deployment:
         if exists_resource is not None:
             k8s_client.delete_deployment(resource_name, data['namespace'])
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
-        return {}
+        return {'id': '', 'name': '', 'correlation_id': ''}
 
 
 class Service:
     def to_resource(self, k8s_client, data):
-        resource_id = data['id']
+        resource_id = data['correlation_id']
         resource_name = api_utils.escape_name(data['name'])
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.SERVICE_ID_TAG] = resource_id
@@ -158,6 +163,7 @@ class Service:
         return template
 
     def apply(self, data):
+        resource_id = data['correlation_id']
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
             raise exceptions.ValidationError(attribute='cluster',
@@ -174,7 +180,11 @@ class Service:
             exists_resource = k8s_client.update_service(resource_name, data['namespace'],
                                                         self.to_resource(k8s_client, data))
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
-        return {'id': exists_resource.metadata.uid, 'name': exists_resource.metadata.name}
+        return {
+            'id': exists_resource.metadata.uid,
+            'name': exists_resource.metadata.name,
+            'correlation_id': resource_id
+        }
 
     def remove(self, data):
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
@@ -189,4 +199,4 @@ class Service:
         if exists_resource is not None:
             k8s_client.delete_service(resource_name, data['namespace'])
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
-        return {}
+        return {'id': '', 'name': '', 'correlation_id': ''}
