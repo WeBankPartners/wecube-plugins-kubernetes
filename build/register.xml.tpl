@@ -91,31 +91,31 @@
     <!-- 7.插件列表 - 描述插件包中单个插件的输入和输出 -->
     <paramObjects>
         <paramObject name="deploymentImage">
-            <property name="name" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="ports" datatype="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="ports" dataType="string" refType="" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="commonTag">
-            <property name="name" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="value" datatype="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="value" dataType="string" refType="" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="deploymentEnv">
-            <property name="name" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="value" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="valueFrom" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="valueRef" datatype="object" refType="commonTag" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="value" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="valueFrom" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="valueRef" dataType="object" refType="commonTag" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="deploymentVolume">
-            <property name="name" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="mountPath" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="readOnly" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="type" datatype="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="mountPath" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="readOnly" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="type" dataType="string" refType="" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="servicePort">
-            <property name="name" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="protocol" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="port" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="targetPort" datatype="string" refType="" mapType="constant" mapExpr="" />
-            <property name="nodePort" datatype="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="protocol" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="port" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="targetPort" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="nodePort" dataType="string" refType="" mapType="constant" mapExpr="" />
         </paramObject>
     </paramObjects>
     <plugins>
@@ -160,7 +160,7 @@
                     <parameter datatype="list"   mappingType="object" required="Y" mappingEntityExpression="deploymentImage">images</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">image_pull_username</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">image_pull_password</parameter>
-                    <parameter datatype="list"   mappingType="constant" required="N" mappingEntityExpression="commonTag">tags</parameter>
+                    <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="commonTag">tags</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">replicas</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">cpu</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">memory</parameter>
