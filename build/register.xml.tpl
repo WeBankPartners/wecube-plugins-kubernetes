@@ -157,17 +157,17 @@
                     <parameter datatype="string" mappingType="constant" required="Y">correlation_id</parameter>
                     <parameter datatype="string" mappingType="constant" required="Y">name</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">namespace</parameter>
-                    <parameter datatype="list"   mappingType="constant" required="Y" mappingEntityExpression="deploymentImage">images</parameter>
+                    <parameter datatype="list"   mappingType="object" required="Y" mappingEntityExpression="deploymentImage">images</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">image_pull_username</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">image_pull_password</parameter>
                     <parameter datatype="list"   mappingType="constant" required="N" mappingEntityExpression="commonTag">tags</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">replicas</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">cpu</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">memory</parameter>
-                    <parameter datatype="list"   mappingType="constant" required="N" mappingEntityExpression="commonTag">pod_tags</parameter>
+                    <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="commonTag">pod_tags</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">affinity</parameter>
-                    <parameter datatype="list"   mappingType="constant" required="N" mappingEntityExpression="deploymentEnv">envs</parameter>
-                    <parameter datatype="list"   mappingType="constant" required="N" mappingEntityExpression="deploymentVolume">volumes</parameter>
+                    <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="deploymentEnv">envs</parameter>
+                    <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="deploymentVolume">volumes</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>
@@ -202,9 +202,9 @@
                     <parameter datatype="string" mappingType="constant" required="N" >type</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">clusterIP</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">sessionAffinity</parameter>
-                    <parameter datatype="list"   mappingType="constant" required="N" mappingEntityExpression="commonTag">tags</parameter>
-                    <parameter datatype="list"   mappingType="constant" required="Y" mappingEntityExpression="commonTag">selectors</parameter>
-                    <parameter datatype="list"   mappingType="constant" required="Y" mappingEntityExpression="servicePort">instances</parameter>
+                    <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="commonTag">tags</parameter>
+                    <parameter datatype="list"   mappingType="object" required="Y" mappingEntityExpression="commonTag">selectors</parameter>
+                    <parameter datatype="list"   mappingType="object" required="Y" mappingEntityExpression="servicePort">instances</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>
