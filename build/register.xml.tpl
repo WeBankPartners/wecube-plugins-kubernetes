@@ -160,14 +160,14 @@
                     <parameter datatype="list"   mappingType="object" required="Y" mappingEntityExpression="deploymentImage">images</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">image_pull_username</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">image_pull_password</parameter>
-                    <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="commonTag">tags</parameter>
+                    <!-- <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="commonTag">tags</parameter> -->
                     <parameter datatype="string" mappingType="constant" required="N">replicas</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">cpu</parameter>
                     <parameter datatype="string" mappingType="constant" required="N">memory</parameter>
-                    <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="commonTag">pod_tags</parameter>
+                    <!-- <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="commonTag">pod_tags</parameter> -->
                     <parameter datatype="string" mappingType="constant" required="N">affinity</parameter>
                     <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="deploymentEnv">envs</parameter>
-                    <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="deploymentVolume">volumes</parameter>
+                    <!-- <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="deploymentVolume">volumes</parameter> -->
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>
