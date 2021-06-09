@@ -55,11 +55,11 @@ env_item_rules = [
     crud.ColumnValidator(field='value', rule=validator.TypeValidator(str), validate_on=['check:M'], nullable=False),
     crud.ColumnValidator(field='valueFrom',
                          rule=validator.InValidator(['value', 'configMap', 'secretKey', 'fieldRef']),
-                         validate_on=['check:M'],
-                         nullable=False),
+                         validate_on=['check:O'],
+                         nullable=True),
     crud.ColumnValidator(field='valueRef',
                          rule=validator.MappingValidator(crud.ColumnValidator.get_clean_data, tag_item_rules, 'check'),
-                         validate_on=['check:M'],
+                         validate_on=['check:O'],
                          nullable=True),
 ]
 

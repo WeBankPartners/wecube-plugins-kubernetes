@@ -69,6 +69,10 @@ def convert_env(items):
     # convert envs
     rets = []
     for idx, item in enumerate(items):
+        if 'valueRef' not in item:
+            item['valueRef'] = None
+        if 'valueFrom' not in item or not item['valueFrom']:
+            item['valueFrom'] = 'value'
         if item['valueRef'] is None and item['valueFrom'] != 'value':
             raise exceptions.ValidationError(attribute='envs[%s]' % (idx + 1),
                                              msg=_('valueRef is NULL, while valueFrom is %(value)s') %
