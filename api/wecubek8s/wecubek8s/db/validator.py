@@ -10,10 +10,27 @@ from talos.core import exceptions
 from talos.core import utils
 from talos.core.i18n import _
 from talos.db import validator
+from talos.db import converter
 
 RegexValidator = validator.RegexValidator
 InValidator = validator.InValidator
 NumberValidator = validator.NumberValidator
+
+
+class StringToDict(converter.NullConverter):
+    def convert(self, value):
+        if utils.is_string_type(value):
+            value = json.loads(value)
+        return value
+
+
+class StringToList(converter.NullConverter):
+    def convert(self, value):
+        if utils.is_string_type(value):
+            value = json.loads(value)
+        if isinstance(value, collections.Mapping):
+            value = [value]
+        return value
 
 
 class LengthValidator(validator.NullValidator):
