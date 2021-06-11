@@ -32,7 +32,7 @@
             <attribute name="cluster_id" datatype="ref" description="所属集群"
                        refPackage="" refVersion="" refEntity="cluster" ref="id"/>
             <attribute name="correlation_id" datatype="ref" description="关联资源ID"
-                       refPackage="wecmdb" refVersion="" refEntity="host_resource_instance" ref="id"/>
+                       refPackage="wecmdb" refVersion="" refEntity="host_resource" ref="id"/>
         </entity>
         <entity name="deployment" displayName="Deployment" description="Deployment控制器">
             <attribute name="id" datatype="str" description="唯一ID"/>
