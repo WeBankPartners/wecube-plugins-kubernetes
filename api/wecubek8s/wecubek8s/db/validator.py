@@ -3,15 +3,34 @@
 from __future__ import absolute_import
 
 import collections
+import json
+from json.decoder import JSONDecodeError
 
 from talos.core import exceptions
 from talos.core import utils
 from talos.core.i18n import _
 from talos.db import validator
+from talos.db import converter
 
 RegexValidator = validator.RegexValidator
 InValidator = validator.InValidator
 NumberValidator = validator.NumberValidator
+
+
+class StringToDict(converter.NullConverter):
+    def convert(self, value):
+        if utils.is_string_type(value):
+            value = json.loads(value)
+        return value
+
+
+class StringToList(converter.NullConverter):
+    def convert(self, value):
+        if utils.is_string_type(value):
+            value = json.loads(value)
+        if isinstance(value, collections.Mapping):
+            value = [value]
+        return value
 
 
 class LengthValidator(validator.NullValidator):
@@ -53,6 +72,13 @@ class IterableValidator(validator.NullValidator):
         self.length_max = length_max
 
     def validate(self, value):
+        if utils.is_string_type(value):
+            try:
+                value = json.loads(value)
+            except JSONDecodeError as e:
+                return str(e)
+        if isinstance(value, collections.Mapping):
+            value = [value]
         if utils.is_list_type(value):
             if len(value) < self.length_min:
                 return _('length[%(length)s] < minimum length[%(minimum)s]') % {
@@ -84,6 +110,11 @@ class MappingValidator(validator.NullValidator):
         self.situation = situation
 
     def validate(self, value):
+        if utils.is_string_type(value):
+            try:
+                value = json.loads(value)
+            except JSONDecodeError as e:
+                return str(e)
         if not isinstance(value, collections.Mapping):
             return _('type invalid: %(type)s, expected: %(expected)s') % {'type': type(value), 'expected': 'dict'}
         try:
