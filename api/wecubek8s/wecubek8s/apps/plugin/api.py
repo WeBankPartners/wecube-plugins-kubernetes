@@ -25,6 +25,8 @@ class Cluster:
             result = db_resource.Cluster().create(data)
         else:
             cluster_info = cluster_info[0]
+            # for token decryption
+            data['id'] = cluster_info['id']
             result_before, result = db_resource.Cluster().update(cluster_info['id'], data)
         return result
 
