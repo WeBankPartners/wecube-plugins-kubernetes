@@ -91,31 +91,31 @@
     <!-- 7.插件列表 - 描述插件包中单个插件的输入和输出 -->
     <paramObjects>
         <paramObject name="deploymentImage">
-            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="ports" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" mapType="constant" mapExpr="" />
+            <property name="ports" dataType="string" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="commonTag">
-            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="value" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" mapType="constant" mapExpr="" />
+            <property name="value" dataType="string" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="deploymentEnv">
-            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="value" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="valueFrom" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" mapType="constant" mapExpr="" />
+            <property name="value" dataType="string" mapType="constant" mapExpr="" />
+            <property name="valueFrom" dataType="string" mapType="constant" mapExpr="" />
             <property name="valueRef" dataType="object" multiple="N" refObjectName="commonTag" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="deploymentVolume">
-            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="mountPath" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="readOnly" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="type" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" mapType="constant" mapExpr="" />
+            <property name="mountPath" dataType="string" mapType="constant" mapExpr="" />
+            <property name="readOnly" dataType="string" mapType="constant" mapExpr="" />
+            <property name="type" dataType="string" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="servicePort">
-            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="protocol" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="port" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="targetPort" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="nodePort" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" mapType="constant" mapExpr="" />
+            <property name="protocol" dataType="string" mapType="constant" mapExpr="" />
+            <property name="port" dataType="string" mapType="constant" mapExpr="" />
+            <property name="targetPort" dataType="string" mapType="constant" mapExpr="" />
+            <property name="nodePort" dataType="string" mapType="constant" mapExpr="" />
         </paramObject>
     </paramObjects>
     <plugins>
