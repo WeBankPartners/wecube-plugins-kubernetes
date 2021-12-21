@@ -76,6 +76,7 @@
     <systemParameters>
         <systemParameter name="KUBERNETES_NOTIFY_POD_ADDED" scopeType="plugins" defaultValue="kubernetes-pod-added" />
         <systemParameter name="KUBERNETES_NOTIFY_POD_DELETED" scopeType="plugins" defaultValue="kubernetes-pod-deleted" />
+        <systemParameter name="KUBERNETES_LOG_LEVEL" scopeType="plugins" defaultValue="info" />
     </systemParameters>
 
     <!-- 5.权限设定 -->
@@ -84,50 +85,50 @@
 
     <!-- 6.运行资源 - 描述部署运行本插件包需要的基础资源(如主机、虚拟机、容器、数据库等) -->
     <resourceDependencies>
-        <docker imageName="{{IMAGENAME}}" containerName="{{CONTAINERNAME}}" portBindings="{{ALLOCATE_PORT}}:9001" volumeBindings="/etc/localtime:/etc/localtime,{{BASE_MOUNT_PATH}}/kubernetes/logs:/var/log/wecubek8s,{{BASE_MOUNT_PATH}}/certs:/certs" envVariables="GATEWAY_URL={{GATEWAY_URL}},JWT_SIGNING_KEY={{JWT_SIGNING_KEY}},SUB_SYSTEM_CODE={{SUB_SYSTEM_CODE}},SUB_SYSTEM_KEY={{SUB_SYSTEM_KEY}},KUBERNETES_DB_USERNAME={{DB_USER}},KUBERNETES_DB_PASSWORD={{DB_PWD}},KUBERNETES_DB_HOSTIP={{DB_HOST}},KUBERNETES_DB_HOSTPORT={{DB_PORT}},KUBERNETES_DB_SCHEMA={{DB_SCHEMA}},ENCRYPT_SEED={{ENCRYPT_SEED}},NOTIFY_POD_ADDED={{KUBERNETES_NOTIFY_POD_ADDED}},NOTIFY_POD_DELETED={{KUBERNETES_NOTIFY_POD_DELETED}}" />
+        <docker imageName="{{IMAGENAME}}" containerName="{{CONTAINERNAME}}" portBindings="{{ALLOCATE_PORT}}:9001" volumeBindings="/etc/localtime:/etc/localtime,{{BASE_MOUNT_PATH}}/kubernetes/logs:/var/log/wecubek8s,{{BASE_MOUNT_PATH}}/certs:/certs" envVariables="GATEWAY_URL={{GATEWAY_URL}},JWT_SIGNING_KEY={{JWT_SIGNING_KEY}},SUB_SYSTEM_CODE={{SUB_SYSTEM_CODE}},SUB_SYSTEM_KEY={{SUB_SYSTEM_KEY}},KUBERNETES_DB_USERNAME={{DB_USER}},KUBERNETES_DB_PASSWORD={{DB_PWD}},KUBERNETES_DB_HOSTIP={{DB_HOST}},KUBERNETES_DB_HOSTPORT={{DB_PORT}},KUBERNETES_DB_SCHEMA={{DB_SCHEMA}},ENCRYPT_SEED={{ENCRYPT_SEED}},NOTIFY_POD_ADDED={{KUBERNETES_NOTIFY_POD_ADDED}},NOTIFY_POD_DELETED={{KUBERNETES_NOTIFY_POD_DELETED}},KUBERNETES_LOG_LEVEL={{KUBERNETES_LOG_LEVEL}}" />
         <mysql schema="kubernetes" initFileName="init.sql" upgradeFileName="upgrade.sql" />
     </resourceDependencies>
 
     <!-- 7.插件列表 - 描述插件包中单个插件的输入和输出 -->
     <paramObjects>
         <paramObject name="deploymentImage">
-            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="ports" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" mapType="constant" mapExpr="" />
+            <property name="ports" dataType="string" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="commonTag">
-            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="value" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" mapType="constant" mapExpr="" />
+            <property name="value" dataType="string" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="deploymentEnv">
-            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="value" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="valueFrom" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="valueRef" dataType="object" refType="commonTag" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" mapType="constant" mapExpr="" />
+            <property name="value" dataType="string" mapType="constant" mapExpr="" />
+            <property name="valueFrom" dataType="string" mapType="constant" mapExpr="" />
+            <property name="valueRef" dataType="object" multiple="N" refObjectName="commonTag" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="deploymentVolume">
-            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="mountPath" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="readOnly" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="type" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" mapType="constant" mapExpr="" />
+            <property name="mountPath" dataType="string" mapType="constant" mapExpr="" />
+            <property name="readOnly" dataType="string" mapType="constant" mapExpr="" />
+            <property name="type" dataType="string" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="servicePort">
-            <property name="name" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="protocol" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="port" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="targetPort" dataType="string" refType="" mapType="constant" mapExpr="" />
-            <property name="nodePort" dataType="string" refType="" mapType="constant" mapExpr="" />
+            <property name="name" dataType="string" mapType="constant" mapExpr="" />
+            <property name="protocol" dataType="string" mapType="constant" mapExpr="" />
+            <property name="port" dataType="string" mapType="constant" mapExpr="" />
+            <property name="targetPort" dataType="string" mapType="constant" mapExpr="" />
+            <property name="nodePort" dataType="string" mapType="constant" mapExpr="" />
         </paramObject>
     </paramObjects>
     <plugins>
         <plugin name="cluster">
             <interface action="apply" path="/kubernetes/v1/clusters/apply" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
                 <inputParameters>
-                    <parameter datatype="string" mappingType="constant" required="Y">name</parameter>
-                    <parameter datatype="string" mappingType="constant" required="Y">correlation_id</parameter>
-                    <parameter datatype="string" mappingType="constant" required="Y">api_server</parameter>
-                    <parameter datatype="string" mappingType="constant" required="Y">token</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N">metric_host</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N">metric_port</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="cluster name(unique)">name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="associated ci data id">correlation_id</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="kubernetes api url">api_server</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="kubernetes auth token">token</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="kubernetes metric exporter ip">metric_host</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="kubernetes metric exporter port">metric_port</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>
@@ -153,21 +154,21 @@
         <plugin name="deployment">
             <interface action="apply" path="/kubernetes/v1/deployments/apply" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
                 <inputParameters>
-                    <parameter datatype="string" mappingType="constant" required="Y">cluster</parameter>
-                    <parameter datatype="string" mappingType="constant" required="Y">correlation_id</parameter>
-                    <parameter datatype="string" mappingType="constant" required="Y">name</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N">namespace</parameter>
-                    <parameter datatype="list"   mappingType="object" required="Y" mappingEntityExpression="deploymentImage">images</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N">image_pull_username</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N">image_pull_password</parameter>
-                    <!-- <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="commonTag">tags</parameter> -->
-                    <parameter datatype="string" mappingType="constant" required="N">replicas</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N">cpu</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N">memory</parameter>
-                    <!-- <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="commonTag">pod_tags</parameter> -->
-                    <parameter datatype="string" mappingType="constant" required="N">affinity</parameter>
-                    <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="deploymentEnv">envs</parameter>
-                    <!-- <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="deploymentVolume">volumes</parameter> -->
+                    <parameter datatype="string" mappingType="constant" required="Y" description="cluster name">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="associated ci data id">correlation_id</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="deployment name(unique)">name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="deployment namespace(default)">namespace</parameter>
+                    <parameter datatype="object" mappingType="constant" required="Y" multiple="Y" refObjectName="deploymentImage" description="pod images">images</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="docker pull image username(if private)">image_pull_username</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="docker pull image password(if private)">image_pull_password</parameter>
+                    <!-- <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag">tags</parameter> -->
+                    <parameter datatype="string" mappingType="constant" required="N" description="number of replica">replicas</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="cpu limited">cpu</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="memory limited">memory</parameter>
+                    <!-- <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag">pod_tags</parameter> -->
+                    <parameter datatype="string" mappingType="constant" required="N" description="node affinity(anti-host-preferred or anti-host-required)">affinity</parameter>
+                    <parameter datatype="object"   mappingType="object" required="N" multiple="Y" refObjectName="deploymentEnv" description="pod envs">envs</parameter>
+                    <!-- <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="deploymentVolume">volumes</parameter> -->
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>
@@ -195,16 +196,16 @@
         <plugin name="service">
             <interface action="apply" path="/kubernetes/v1/services/apply" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
                 <inputParameters>
-                    <parameter datatype="string" mappingType="constant" required="Y">cluster</parameter>
-                    <parameter datatype="string" mappingType="constant" required="Y">correlation_id</parameter>
-                    <parameter datatype="string" mappingType="constant" required="Y">name</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N">namespace</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N" >type</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N">clusterIP</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N">sessionAffinity</parameter>
-                    <parameter datatype="list"   mappingType="object" required="N" mappingEntityExpression="commonTag">tags</parameter>
-                    <parameter datatype="list"   mappingType="object" required="Y" mappingEntityExpression="commonTag">selectors</parameter>
-                    <parameter datatype="list"   mappingType="object" required="Y" mappingEntityExpression="servicePort">instances</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="cluster name">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="associated ci data id">correlation_id</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="service name(unique)">name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="service namespace(default)">namespace</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="service type(NodePort/ClusterIP/LoadBalancer)">type</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="cluster ip(if type=ClusterIP)">clusterIP</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="session affinity(RoundRobin/ClientIP)">sessionAffinity</parameter>
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag" description="service tags">tags</parameter>
+                    <parameter datatype="object" mappingType="constant" required="Y" multiple="Y" refObjectName="commonTag" description="service selectors">selectors</parameter>
+                    <parameter datatype="object" mappingType="constant" required="Y" multiple="Y" refObjectName="servicePort" description="service port mappings">instances</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>
