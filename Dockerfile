@@ -14,6 +14,7 @@ COPY api/wecubek8s/requirements.txt /tmp/requirements.txt
 COPY api/wecubek8s/dist/* /tmp/
 # Install && Clean up
 RUN apt update && apt-get -y install gcc python3-dev swig libssl-dev && \
+    pip3 install -i http://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com setuptools wheel && \
     pip3 install -i http://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -r /tmp/requirements.txt && \
     pip3 install /tmp/*.whl && \
     rm -rf /root/.cache && apt autoclean && \
