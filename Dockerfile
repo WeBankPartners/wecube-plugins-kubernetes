@@ -1,8 +1,15 @@
 FROM python:3.7-slim
 LABEL maintainer = "Webank CTB Team"
 # Install logrotate
-RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list
-RUN sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list
+# 兼容新旧版本 Debian 的 APT 源配置
+RUN if [ -f /etc/apt/sources.list ]; then \
+        sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list && \
+        sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list; \
+    fi && \
+    if [ -d /etc/apt/sources.list.d ]; then \
+        find /etc/apt/sources.list.d -name "*.sources" -exec sed -i 's/deb.debian.org/mirrors.aliyun.com/g' {} \; && \
+        find /etc/apt/sources.list.d -name "*.sources" -exec sed -i 's/security.debian.org/mirrors.aliyun.com/g' {} \; ; \
+    fi
 COPY api/wecubek8s/requirements.txt /tmp/requirements.txt
 COPY api/wecubek8s/dist/* /tmp/
 # Install && Clean up
