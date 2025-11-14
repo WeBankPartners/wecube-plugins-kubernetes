@@ -105,38 +105,79 @@ def convert_env(items):
 
 
 def convert_volume(items):
+    """
+    转换 volume 配置
+    支持两种格式：
+    1. 完整对象格式：[{'name': 'vol1', 'type': 'emptyDir', 'mountPath': '/data', ...}]
+    2. 简单路径格式：['/data/logs', '/app/logs'] 或字符串 '/data/logs,/app/logs'
+    """
     # convert volumes
     volumes = []
     mounts = []
-    for item in items:
-        volume_name = item['name']
-        volume_type = item['type']
-        volume_type_spec = item.get('typeSpec', None) or {}
-        volume_mount_path = item['mountPath']
-        volume_read_only = item.get('readOnly', None) or False
+    
+    # 如果 items 为空，直接返回
+    if not items:
+        return volumes, mounts
+    
+    for idx, item in enumerate(items):
+        # 判断是字符串路径还是完整对象
+        if isinstance(item, str):
+            # 简单路径格式：使用 emptyDir 作为默认类型
+            mount_path = item.strip()
+            if not mount_path:
+                continue
+            
+            # 生成唯一的 volume 名称（基于路径）
+            # 将路径转换为合法的 volume 名称（替换 / 为 -，去掉开头的 -）
+            volume_name = 'vol-' + mount_path.replace('/', '-').strip('-').replace('_', '-')
+            # 如果名称为空，使用索引
+            if not volume_name or volume_name == 'vol-':
+                volume_name = f'vol-{idx}'
+            
+            # 创建 emptyDir volume（默认类型）
+            volumes.append({
+                'name': volume_name,
+                'emptyDir': {}
+            })
+            
+            # 创建 mount
+            mounts.append({
+                'name': volume_name,
+                'mountPath': mount_path,
+                'readOnly': False
+            })
+        
+        elif isinstance(item, dict):
+            # 完整对象格式：保持原有逻辑
+            volume_name = item['name']
+            volume_type = item['type']
+            volume_type_spec = item.get('typeSpec', None) or {}
+            volume_mount_path = item['mountPath']
+            volume_read_only = item.get('readOnly', None) or False
 
-        volume_type_spec_new = {}
-        volumes.append({'name': volume_name, volume_type: volume_type_spec_new})
-        if volume_type == 'configMap':
-            volume_type_spec_new['name'] = volume_type_spec['name']
-        elif volume_type == 'secret':
-            volume_type_spec_new['secretName'] = volume_type_spec['name']
-        elif volume_type == 'hostPath':
-            volume_type_spec_new['path'] = volume_type_spec['path']
-            volume_type_spec_new['type'] = volume_type_spec.get('type', None) or ''
-        elif volume_type == 'emptyDir':
-            volume_type_spec_new['medium'] = volume_type_spec.get('medium', '') or ''
-            if 'sizeLimit' in volume_type_spec and volume_type_spec['sizeLimit']:
-                volume_type_spec_new['sizeLimit'] = volume_type_spec['sizeLimit']
-        elif volume_type == 'nfs':
-            volume_type_spec_new['server'] = volume_type_spec['server']
-            volume_type_spec_new['path'] = volume_type_spec['path']
-            volume_type_spec_new['readOnly'] = volume_read_only
-        elif volume_type == 'persistentVolumeClaim':
-            volume_type_spec_new['claimName'] = volume_type_spec['name']
-            volume_type_spec_new['readOnly'] = volume_read_only
+            volume_type_spec_new = {}
+            volumes.append({'name': volume_name, volume_type: volume_type_spec_new})
+            if volume_type == 'configMap':
+                volume_type_spec_new['name'] = volume_type_spec['name']
+            elif volume_type == 'secret':
+                volume_type_spec_new['secretName'] = volume_type_spec['name']
+            elif volume_type == 'hostPath':
+                volume_type_spec_new['path'] = volume_type_spec['path']
+                volume_type_spec_new['type'] = volume_type_spec.get('type', None) or ''
+            elif volume_type == 'emptyDir':
+                volume_type_spec_new['medium'] = volume_type_spec.get('medium', '') or ''
+                if 'sizeLimit' in volume_type_spec and volume_type_spec['sizeLimit']:
+                    volume_type_spec_new['sizeLimit'] = volume_type_spec['sizeLimit']
+            elif volume_type == 'nfs':
+                volume_type_spec_new['server'] = volume_type_spec['server']
+                volume_type_spec_new['path'] = volume_type_spec['path']
+                volume_type_spec_new['readOnly'] = volume_read_only
+            elif volume_type == 'persistentVolumeClaim':
+                volume_type_spec_new['claimName'] = volume_type_spec['name']
+                volume_type_spec_new['readOnly'] = volume_read_only
 
-        mounts.append({'name': volume_name, 'mountPath': volume_mount_path, 'readOnly': volume_read_only})
+            mounts.append({'name': volume_name, 'mountPath': volume_mount_path, 'readOnly': volume_read_only})
+    
     return volumes, mounts
 
 
@@ -217,15 +258,50 @@ def convert_container(images, envs, vols, resource_limit):
 
 
 def convert_registry_secret(k8s_client, images, namespace, username, password):
+    """
+    为镜像列表创建 registry secret
+    参数:
+        k8s_client: Kubernetes 客户端
+        images: 镜像列表，可以是：
+            - 字典列表，每个字典包含 'name' 字段，如 [{'name': 'image1'}, {'name': 'image2'}]
+            - 字符串列表，如 ['image1', 'image2']
+            - 单个字符串，如 'image1'
+        namespace: 命名空间
+        username: 用户名
+        password: 密码
+    返回:
+        rets: Secret 引用列表，去重后的结果
+    """
     rets = []
-    for image_info in images:
-        registry_server, registry_namespace, image_name, image_tag = parse_image_url(image_info['name'].strip())
+    seen_secrets = set()  # 用于去重，避免同一个 registry 创建多个 secret
+    
+    # 统一处理：将单个字符串或字符串列表转换为统一格式
+    if isinstance(images, str):
+        images = [images]
+    elif not isinstance(images, list):
+        images = []
+    
+    for image_item in images:
+        # 处理字典格式 {'name': 'image'} 或字符串格式 'image'
+        if isinstance(image_item, dict):
+            image_name = image_item.get('name', '').strip()
+        else:
+            image_name = str(image_item).strip()
+        
+        if not image_name:
+            continue
+            
+        registry_server, registry_namespace, image_name_parsed, image_tag = parse_image_url(image_name)
         if registry_server:
-            name = ''
             name = registry_server + '#' + username
             name = escape_name(name)
-            k8s_client.ensure_registry_secret(name, namespace, registry_server, username, password)
-            rets.append({'name': name})
+            
+            # 去重：同一个 registry 和 username 只创建一个 secret
+            if name not in seen_secrets:
+                k8s_client.ensure_registry_secret(name, namespace, registry_server, username, password)
+                rets.append({'name': name})
+                seen_secrets.add(name)
+    
     return rets
 
 
@@ -264,3 +340,78 @@ def convert_affinity(strategy, tag_key, tag_value):
             }
         }
     return {}
+
+
+def setup_package_init_container(data, containers, volumes, cluster_info=None):
+    """
+    处理 packageUrl：添加 initContainer 和共享 volume
+    参数:
+        data: 包含 packageUrl 的字典
+        containers: 主容器列表（会被修改，添加 volumeMounts）
+        volumes: volumes 列表（会被修改，添加共享 volume）
+        cluster_info: 集群信息，包含 private_registry（新增参数）
+    返回:
+        init_containers: initContainer 列表，如果没有 packageUrl 则返回空列表
+    """
+    from wecubek8s.common import const  # 导入常量
+    
+    init_containers = []
+    package_url = data.get('packageUrl')
+    if package_url:
+        # 使用常量定义的镜像名称
+        init_container_image = const.Registry.INIT_CONTAINER_IMAGE
+        
+        # 从 cluster_info 读取私有仓库地址，如果没有则使用默认值
+        if cluster_info:
+            private_registry = cluster_info.get('private_registry', const.Registry.DEFAULT_PRIVATE_REGISTRY)
+        else:
+            private_registry = const.Registry.DEFAULT_PRIVATE_REGISTRY
+        
+        # 拼接完整的镜像地址
+        if private_registry:
+            full_init_image = f"{private_registry}/{init_container_image}"
+        else:
+            full_init_image = init_container_image
+        
+        # 创建共享 volume 名称（固定目录）
+        shared_volume_name = 'package-shared-volume'
+        shared_mount_path = '/shared-data/diff-var-files/'  # 固定目录路径
+        
+        # 添加共享 emptyDir volume
+        shared_volume = {
+            'name': shared_volume_name,
+            'emptyDir': {}
+        }
+        volumes.append(shared_volume)
+        
+        # 创建 initContainer
+        # 使用环境变量 PACKAGE_URL 传递下载地址
+        # 镜像的 ENTRYPOINT 会读取该环境变量并执行下载脚本
+        init_container = {
+            'name': 'package-downloader',
+            'image': full_init_image,  # 使用拼接后的完整镜像地址
+            'imagePullPolicy': 'IfNotPresent',
+            'env': [
+                {
+                    'name': 'PACKAGE_URL',
+                    'value': package_url
+                }
+            ],
+            'volumeMounts': [
+                {
+                    'name': shared_volume_name,
+                    'mountPath': shared_mount_path
+                }
+            ]
+        }
+        init_containers.append(init_container)
+        
+        # 将共享 volume 挂载到所有主容器
+        for container in containers:
+            container['volumeMounts'].append({
+                'name': shared_volume_name,
+                'mountPath': shared_mount_path,
+                'readOnly': True  # 主容器只读访问
+            })
+    
+    return init_containers

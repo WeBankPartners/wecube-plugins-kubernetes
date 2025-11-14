@@ -21,8 +21,6 @@
             <attribute name="api_host" datatype="str" description="API地址"/>
             <attribute name="api_port" datatype="str" description="API端口"/>
             <attribute name="token" datatype="str" description="API Token"/>
-            <attribute name="metric_host" datatype="str" description="指标服务地址"/>
-            <attribute name="metric_port" datatype="str" description="指标服务端口"/>
         </entity>
         <entity name="node" displayName="计算节点" description="K8s集群的Node">
             <attribute name="id" datatype="str" description="唯一ID"/>
@@ -91,10 +89,6 @@
 
     <!-- 7.插件列表 - 描述插件包中单个插件的输入和输出 -->
     <paramObjects>
-        <paramObject name="deploymentImage">
-            <property name="name" dataType="string" mapType="constant" mapExpr="" />
-            <property name="ports" dataType="string" mapType="constant" mapExpr="" />
-        </paramObject>
         <paramObject name="commonTag">
             <property name="name" dataType="string" mapType="constant" mapExpr="" />
             <property name="value" dataType="string" mapType="constant" mapExpr="" />
@@ -104,12 +98,6 @@
             <property name="value" dataType="string" mapType="constant" mapExpr="" />
             <property name="valueFrom" dataType="string" mapType="constant" mapExpr="" />
             <property name="valueRef" dataType="object" multiple="N" refObjectName="commonTag" mapType="constant" mapExpr="" />
-        </paramObject>
-        <paramObject name="deploymentVolume">
-            <property name="name" dataType="string" mapType="constant" mapExpr="" />
-            <property name="mountPath" dataType="string" mapType="constant" mapExpr="" />
-            <property name="readOnly" dataType="string" mapType="constant" mapExpr="" />
-            <property name="type" dataType="string" mapType="constant" mapExpr="" />
         </paramObject>
         <paramObject name="servicePort">
             <property name="name" dataType="string" mapType="constant" mapExpr="" />
@@ -127,8 +115,9 @@
                     <parameter datatype="string" mappingType="constant" required="Y" description="associated ci data id">correlation_id</parameter>
                     <parameter datatype="string" mappingType="constant" required="Y" description="kubernetes api url">api_server</parameter>
                     <parameter datatype="string" mappingType="constant" required="Y" description="kubernetes auth token">token</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N" description="kubernetes metric exporter ip">metric_host</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N" description="kubernetes metric exporter port">metric_port</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="image pull username">image_pull_username</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="image pull password">image_pull_password</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="private registry address">private_registry</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>
@@ -158,17 +147,19 @@
                     <parameter datatype="string" mappingType="constant" required="Y" description="associated ci data id">correlation_id</parameter>
                     <parameter datatype="string" mappingType="constant" required="Y" description="deployment name(unique)">name</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="deployment namespace(default)">namespace</parameter>
-                    <parameter datatype="object" mappingType="constant" required="Y" multiple="Y" refObjectName="deploymentImage" description="pod images">images</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N" description="docker pull image username(if private)">image_pull_username</parameter>
-                    <parameter datatype="string" mappingType="constant" required="N" description="docker pull image password(if private)">image_pull_password</parameter>
-                    <!-- <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag">tags</parameter> -->
+                    <parameter datatype="string" mappingType="constant" required="Y" description="image name without registry">image_name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="image ports(comma separated)">image_port</parameter>
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag" description="deployment tags">tags</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="number of replica">replicas</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="cpu limited">cpu</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="memory limited">memory</parameter>
-                    <!-- <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag">pod_tags</parameter> -->
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag" description="pod tags">pod_tags</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="node affinity(anti-host-preferred or anti-host-required)">affinity</parameter>
-                    <parameter datatype="object"   mappingType="object" required="N" multiple="Y" refObjectName="deploymentEnv" description="pod envs">envs</parameter>
-                    <!-- <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="deploymentVolume">volumes</parameter> -->
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="deploymentEnv" description="pod envs">envs</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="volumes(comma separated paths or json)">volumes</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="package url(tar.gz)">packageUrl</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="cmdb instance id">instanceId</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="service port">port</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>
@@ -176,6 +167,8 @@
                     <parameter datatype="string">id</parameter>
                     <parameter datatype="string">name</parameter>
                     <parameter datatype="string">correlation_id</parameter>
+                    <parameter datatype="string">clusterIP</parameter>
+                    <parameter datatype="string">port</parameter>
                 </outputParameters>
             </interface>
             <interface action="destroy" path="/kubernetes/v1/deployments/destroy" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
@@ -227,6 +220,81 @@
                     <parameter datatype="string">id</parameter>
                     <parameter datatype="string">name</parameter>
                     <parameter datatype="string">correlation_id</parameter>
+                </outputParameters>
+            </interface>
+        </plugin>
+        <plugin name="statefulset">
+            <interface action="apply" path="/kubernetes/v1/statefulsets/apply" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
+                <inputParameters>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="cluster name">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="associated ci data id">correlation_id</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="statefulset name(unique)">name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="statefulset namespace(default)">namespace</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="service name for headless service">serviceName</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="image name without registry">image_name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="image ports(comma separated)">image_port</parameter>
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag" description="statefulset tags">tags</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="number of replica">replicas</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="cpu limited">cpu</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="memory limited">memory</parameter>
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag" description="pod tags">pod_tags</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="node affinity(anti-host-preferred or anti-host-required)">affinity</parameter>
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="deploymentEnv" description="pod envs">envs</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="volumes(comma separated paths or json)">volumes</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="package url(tar.gz)">packageUrl</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="cmdb instance id">instanceId</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">id</parameter>
+                    <parameter datatype="string">name</parameter>
+                    <parameter datatype="string">correlation_id</parameter>
+                    <parameter datatype="string">clusterIP</parameter>
+                    <parameter datatype="string">port</parameter>
+                    <parameter datatype="string">podName</parameter>
+                </outputParameters>
+            </interface>
+            <interface action="destroy" path="/kubernetes/v1/statefulsets/destroy" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
+                <inputParameters>
+                    <parameter datatype="string" mappingType="constant" required="Y">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y">name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N">namespace</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">id</parameter>
+                    <parameter datatype="string">name</parameter>
+                    <parameter datatype="string">correlation_id</parameter>
+                </outputParameters>
+            </interface>
+        </plugin>
+        <plugin name="node">
+            <interface action="label" path="/kubernetes/v1/nodes/label" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
+                <inputParameters>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="cluster name">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="tag name">tagName</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="tag value">tagValue</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">cluster</parameter>
+                    <parameter datatype="string">nodes_updated</parameter>
+                </outputParameters>
+            </interface>
+            <interface action="remove_label" path="/kubernetes/v1/nodes/remove_label" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
+                <inputParameters>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="cluster name">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="tag name to remove">tagName</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="specific node name(optional)">nodeName</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">cluster</parameter>
+                    <parameter datatype="string">nodes_updated</parameter>
                 </outputParameters>
             </interface>
         </plugin>

@@ -74,8 +74,6 @@ class Cluster(BaseEntity):
             'api_host': api_host,
             'api_port': str(api_port),
             'token': item['token'],
-            'metric_host': item['metric_host'],
-            'metric_port': item['metric_port'],
         }
         return result
 
@@ -257,13 +255,17 @@ class Pod(BaseEntity):
         k8s_client = self.cluster_client(cluster)
         current_time = datetime.datetime.now(datetime.timezone.utc)
         w = watch.Watch()
-        for event in w.stream(k8s_client.core_client.list_pod_for_all_namespaces):
-            if event['type'] == 'ADDED':
-                # new -> alert
-                if event['object'].metadata.creation_timestamp >= current_time:
-                    notify('POD.ADDED', cluster['id'], self.to_dict(cluster, event['object']))
-            elif event['type'] == 'DELETED':
-                # delete -> alert
-                notify('POD.DELETED', cluster['id'], self.to_dict(cluster, event['object']))
-            if event_stop.is_set():
-                w.stop()
+        try:
+            for event in w.stream(k8s_client.core_client.list_pod_for_all_namespaces):
+                if event['type'] == 'ADDED':
+                    # new -> alert
+                    if event['object'].metadata.creation_timestamp >= current_time:
+                        notify('POD.ADDED', cluster['id'], self.to_dict(cluster, event['object']))
+                elif event['type'] == 'DELETED':
+                    # delete -> alert
+                    notify('POD.DELETED', cluster['id'], self.to_dict(cluster, event['object']))
+                if event_stop.is_set():
+                    w.stop()
+                    break
+        finally:
+            w.stop()

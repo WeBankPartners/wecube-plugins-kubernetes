@@ -47,6 +47,7 @@ class Client:
         api_client = client.ApiClient(configuration)
         self.core_client = client.CoreV1Api(api_client)
         self.app_client = client.AppsV1Api(api_client)
+        self.networking_client = client.NetworkingV1Api(api_client)
 
     def _action(self, client, func_name, *args, **kwargs):
         func = getattr(client, func_name)
@@ -69,6 +70,12 @@ class Client:
     # Node
     def list_node(self, **kwargs):
         return self._action(self.core_client, 'list_node', **kwargs)
+
+    def get_node(self, name, **kwargs):
+        return self._action_detail(self.core_client, 'read_node', name, **kwargs)
+
+    def patch_node(self, name, body, **kwargs):
+        return self._action(self.core_client, 'patch_node', name, body, **kwargs)
 
     # Namespace
     def create_namespace(self, body, **kwargs):
@@ -105,11 +112,33 @@ class Client:
     def list_all_deployment(self, **kwargs):
         return self._action(self.app_client, 'list_deployment_for_all_namespaces', **kwargs)
 
+    # StatefulSet
+    def create_statefulset(self, namespace, body, **kwargs):
+        return self._action(self.app_client, 'create_namespaced_stateful_set', namespace, body, **kwargs)
+
+    def update_statefulset(self, name, namespace, body, **kwargs):
+        return self._action(self.app_client, 'patch_namespaced_stateful_set', name, namespace, body, **kwargs)
+
+    def delete_statefulset(self, name, namespace, **kwargs):
+        return self._action(self.app_client, 'delete_namespaced_stateful_set', name, namespace, **kwargs)
+
+    def get_statefulset(self, name, namespace, **kwargs):
+        return self._action_detail(self.app_client, 'read_namespaced_stateful_set', name, namespace, **kwargs)
+
+    def list_statefulset(self, namespace, **kwargs):
+        return self._action(self.app_client, 'list_namespaced_stateful_set', namespace, **kwargs)
+
+    def list_all_statefulset(self, **kwargs):
+        return self._action(self.app_client, 'list_stateful_set_for_all_namespaces', **kwargs)
+
     # ReplcaSet
     def list_all_replica_set(self, **kwargs):
         return self._action(self.app_client, 'list_replica_set_for_all_namespaces', **kwargs)
 
     # Pod
+    def list_pod(self, namespace, **kwargs):
+        return self._action(self.core_client, 'list_namespaced_pod', namespace, **kwargs)
+    
     def list_all_pod(self, **kwargs):
         return self._action(self.core_client, 'list_pod_for_all_namespaces', **kwargs)
 
@@ -188,3 +217,29 @@ class Client:
         else:
             self.update_namespace(name, body)
         return True
+
+    # Endpoint
+    def create_endpoint(self, namespace, body, **kwargs):
+        return self._action(self.core_client, 'create_namespaced_endpoints', namespace, body, **kwargs)
+
+    def update_endpoint(self, name, namespace, body, **kwargs):
+        return self._action(self.core_client, 'patch_namespaced_endpoints', name, namespace, body, **kwargs)
+
+    def delete_endpoint(self, name, namespace, **kwargs):
+        return self._action(self.core_client, 'delete_namespaced_endpoints', name, namespace, **kwargs)
+
+    def get_endpoint(self, name, namespace, **kwargs):
+        return self._action_detail(self.core_client, 'read_namespaced_endpoints', name, namespace, **kwargs)
+
+    # NetworkPolicy
+    def create_network_policy(self, namespace, body, **kwargs):
+        return self._action(self.networking_client, 'create_namespaced_network_policy', namespace, body, **kwargs)
+
+    def update_network_policy(self, name, namespace, body, **kwargs):
+        return self._action(self.networking_client, 'patch_namespaced_network_policy', name, namespace, body, **kwargs)
+
+    def delete_network_policy(self, name, namespace, **kwargs):
+        return self._action(self.networking_client, 'delete_namespaced_network_policy', name, namespace, **kwargs)
+
+    def get_network_policy(self, name, namespace, **kwargs):
+        return self._action_detail(self.networking_client, 'read_namespaced_network_policy', name, namespace, **kwargs)

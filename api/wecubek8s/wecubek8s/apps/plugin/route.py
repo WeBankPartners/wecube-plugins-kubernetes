@@ -11,5 +11,20 @@ def add_routes(api):
 
     api.add_route('/kubernetes/v1/deployments/apply', controller.Deployment(action='apply'))
     api.add_route('/kubernetes/v1/deployments/destroy', controller.Deployment(action='destroy'))
+    
+    api.add_route('/kubernetes/v1/statefulsets/apply', controller.StatefulSet(action='apply'))
+    api.add_route('/kubernetes/v1/statefulsets/destroy', controller.StatefulSet(action='destroy'))
+    
     api.add_route('/kubernetes/v1/services/apply', controller.Service(action='apply'))
     api.add_route('/kubernetes/v1/services/destroy', controller.Service(action='destroy'))
+    
+    api.add_route('/kubernetes/v1/nodes/label', controller.Node(action='label'))
+    api.add_route('/kubernetes/v1/nodes/remove_label', controller.Node(action='remove_label'))
+    
+    # 跨集群互联接口
+    api.add_route('/kubernetes/v1/interconnect/external_service',
+                  controller.ClusterInterconnect(action='create_external_service'))
+    api.add_route('/kubernetes/v1/interconnect/network_policy',
+                  controller.ClusterInterconnect(action='create_network_policy'))
+    api.add_route('/kubernetes/v1/interconnect/setup',
+                  controller.ClusterInterconnect(action='setup_interconnect'))
