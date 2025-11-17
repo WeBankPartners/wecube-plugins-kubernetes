@@ -17,7 +17,7 @@ CREATE TABLE `cluster` (
 
 SET FOREIGN_KEY_CHECKS = 1;
 
-#@v0.1.4-begin@;
+#@v0.1.5-begin@;
 -- 删除旧字段
 ALTER TABLE `cluster` DROP COLUMN IF EXISTS `metric_host`;
 ALTER TABLE `cluster` DROP COLUMN IF EXISTS `metric_port`;
@@ -27,4 +27,4 @@ ALTER TABLE `cluster` ADD COLUMN `image_pull_username` varchar(255) DEFAULT NULL
 ALTER TABLE `cluster` ADD COLUMN `image_pull_password` varchar(255) DEFAULT NULL COMMENT '镜像仓库密码';
 ALTER TABLE `cluster` ADD COLUMN `private_registry` varchar(255) DEFAULT NULL COMMENT '私有镜像仓库地址';
 
-#@v0.1.4-end@;
+#@v0.1.5-end@;
