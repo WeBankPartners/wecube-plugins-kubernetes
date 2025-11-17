@@ -1,21 +1,21 @@
 FROM python:3.7-slim
 LABEL maintainer = "Webank CTB Team"
 # Install logrotate
-# 兼容新旧版本 Debian 的 APT 源配置
+# 使用腾讯云镜像源
 RUN if [ -f /etc/apt/sources.list ]; then \
-        sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list && \
-        sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list; \
+        sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list && \
+        sed -i 's/security.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list; \
     fi && \
     if [ -d /etc/apt/sources.list.d ]; then \
-        find /etc/apt/sources.list.d -name "*.sources" -exec sed -i 's/deb.debian.org/mirrors.aliyun.com/g' {} \; && \
-        find /etc/apt/sources.list.d -name "*.sources" -exec sed -i 's/security.debian.org/mirrors.aliyun.com/g' {} \; ; \
+        find /etc/apt/sources.list.d -name "*.sources" -exec sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' {} \; && \
+        find /etc/apt/sources.list.d -name "*.sources" -exec sed -i 's/security.debian.org/mirrors.cloud.tencent.com/g' {} \; ; \
     fi
 COPY api/wecubek8s/requirements.txt /tmp/requirements.txt
 COPY api/wecubek8s/dist/* /tmp/
 # Install && Clean up
 RUN apt update && apt-get -y install gcc python3-dev swig libssl-dev && \
-    pip3 install -i http://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com setuptools wheel && \
-    pip3 install -i http://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --no-build-isolation -r /tmp/requirements.txt && \
+    pip3 install -i http://mirrors.cloud.tencent.com/pypi/simple/ --trusted-host mirrors.cloud.tencent.com setuptools wheel && \
+    pip3 install -i http://mirrors.cloud.tencent.com/pypi/simple/ --trusted-host mirrors.cloud.tencent.com --no-build-isolation -r /tmp/requirements.txt && \
     pip3 install /tmp/*.whl && \
     rm -rf /root/.cache && apt autoclean && \
     rm -rf /tmp/* /var/lib/apt/* /var/cache/* && \
