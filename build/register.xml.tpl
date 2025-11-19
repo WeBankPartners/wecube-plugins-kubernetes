@@ -160,6 +160,9 @@
                     <parameter datatype="string" mappingType="constant" required="N" description="package url(tar.gz)">packageUrl</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="cmdb instance id">instanceId</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="service port">port</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="instance deployment path for log mount">deployment_path</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="process name for liveness probe">process_name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="process keyword for liveness probe">process_keyword</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>
@@ -243,6 +246,9 @@
                     <parameter datatype="string" mappingType="constant" required="N" description="volumes(comma separated paths or json)">volumes</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="package url(tar.gz)">packageUrl</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="cmdb instance id">instanceId</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="instance deployment path for log mount">deployment_path</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="process name for liveness probe">process_name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="process keyword for liveness probe">process_keyword</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>

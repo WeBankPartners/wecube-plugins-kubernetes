@@ -60,7 +60,65 @@ class Deployment:
             pod_spec_tags['instanceId'] = data['instanceId']
         
         pod_spec_envs = api_utils.convert_env(data.get('envs', []))
+        
+        # 自动注入 Kubernetes Downward API 环境变量
+        pod_spec_envs.extend([
+            {
+                'name': 'HOST_IP',
+                'valueFrom': {
+                    'fieldRef': {
+                        'fieldPath': 'status.hostIP'
+                    }
+                }
+            },
+            {
+                'name': 'POD_IP',
+                'valueFrom': {
+                    'fieldRef': {
+                        'fieldPath': 'status.podIP'
+                    }
+                }
+            },
+            {
+                'name': 'POD_NAME',
+                'valueFrom': {
+                    'fieldRef': {
+                        'fieldPath': 'metadata.name'
+                    }
+                }
+            }
+        ])
+        
         pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
+        
+        # 自动添加 /logs hostPath 挂载（基于传入的 deployment_path 参数）
+        deployment_path = data.get('deployment_path')
+        if deployment_path:
+            # 确保路径以 / 结尾
+            if not deployment_path.endswith('/'):
+                deployment_path += '/'
+            # 构建宿主机日志路径：deployment_path + logs
+            host_log_path = deployment_path + 'logs'
+            
+            # 添加 hostPath volume
+            log_volume_name = 'instance-logs'
+            pod_spec_src_vols.append({
+                'name': log_volume_name,
+                'hostPath': {
+                    'path': host_log_path,
+                    'type': 'DirectoryOrCreate'
+                }
+            })
+            
+            # 添加 volume mount 到容器的 /logs
+            pod_spec_mnt_vols.append({
+                'name': log_volume_name,
+                'mountPath': '/logs',
+                'readOnly': False
+            })
+            
+            LOG.info('Auto-mounted host path %s to /logs', host_log_path)
+        
         pod_spec_limit = api_utils.convert_resource_limit(data.get('cpu', None), data.get('memory', None))
         
         # 从数据库的 cluster_info 中读取私有仓库地址
@@ -82,6 +140,30 @@ class Deployment:
         }]
         
         containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit)
+        
+        # 自动添加存活探针（基于传入的 process_name 和 process_keyword 参数）
+        process_name = data.get('process_name')
+        process_keyword = data.get('process_keyword')
+        
+        if process_name and process_keyword:
+            # 为所有容器添加存活探针
+            for container in containers:
+                # 使用 ps 命令检查进程，comm 列匹配进程名，args 列匹配进程关键字
+                container['livenessProbe'] = {
+                    'exec': {
+                        'command': [
+                            '/bin/sh',
+                            '-c',
+                            f"ps -eo 'pid,comm,pcpu,rsz,args' | awk '($2 == \"{process_name}\" || $0 ~ /{process_keyword}/) && NR > 1 {{exit 0}} END {{if (NR <= 1) exit 1; exit 1}}'"
+                        ]
+                    },
+                    'initialDelaySeconds': 30,  # 容器启动后30秒开始探测
+                    'periodSeconds': 10,         # 每10秒探测一次
+                    'timeoutSeconds': 5,         # 探测超时时间5秒
+                    'successThreshold': 1,       # 连续1次成功则认为健康
+                    'failureThreshold': 3        # 连续3次失败则重启容器
+                }
+            LOG.info('Added liveness probe for process_name "%s" and process_keyword "%s"', process_name, process_keyword)
         
         # 从数据库的 cluster_info 中读取镜像拉取认证信息
         image_pull_username = cluster_info.get('image_pull_username', '')
@@ -298,7 +380,65 @@ class StatefulSet:
             pod_spec_tags['instanceId'] = data['instanceId']
         
         pod_spec_envs = api_utils.convert_env(data.get('envs', []))
+        
+        # 自动注入 Kubernetes Downward API 环境变量
+        pod_spec_envs.extend([
+            {
+                'name': 'HOST_IP',
+                'valueFrom': {
+                    'fieldRef': {
+                        'fieldPath': 'status.hostIP'
+                    }
+                }
+            },
+            {
+                'name': 'POD_IP',
+                'valueFrom': {
+                    'fieldRef': {
+                        'fieldPath': 'status.podIP'
+                    }
+                }
+            },
+            {
+                'name': 'POD_NAME',
+                'valueFrom': {
+                    'fieldRef': {
+                        'fieldPath': 'metadata.name'
+                    }
+                }
+            }
+        ])
+        
         pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
+        
+        # 自动添加 /logs hostPath 挂载（基于传入的 deployment_path 参数）
+        deployment_path = data.get('deployment_path')
+        if deployment_path:
+            # 确保路径以 / 结尾
+            if not deployment_path.endswith('/'):
+                deployment_path += '/'
+            # 构建宿主机日志路径：deployment_path + logs
+            host_log_path = deployment_path + 'logs'
+            
+            # 添加 hostPath volume
+            log_volume_name = 'instance-logs'
+            pod_spec_src_vols.append({
+                'name': log_volume_name,
+                'hostPath': {
+                    'path': host_log_path,
+                    'type': 'DirectoryOrCreate'
+                }
+            })
+            
+            # 添加 volume mount 到容器的 /logs
+            pod_spec_mnt_vols.append({
+                'name': log_volume_name,
+                'mountPath': '/logs',
+                'readOnly': False
+            })
+            
+            LOG.info('Auto-mounted host path %s to /logs', host_log_path)
+        
         pod_spec_limit = api_utils.convert_resource_limit(data.get('cpu', None), data.get('memory', None))
         
         # 从数据库的 cluster_info 中读取私有仓库地址
@@ -320,6 +460,30 @@ class StatefulSet:
         }]
         
         containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit)
+        
+        # 自动添加存活探针（基于传入的 process_name 和 process_keyword 参数）
+        process_name = data.get('process_name')
+        process_keyword = data.get('process_keyword')
+        
+        if process_name and process_keyword:
+            # 为所有容器添加存活探针
+            for container in containers:
+                # 使用 ps 命令检查进程，comm 列匹配进程名，args 列匹配进程关键字
+                container['livenessProbe'] = {
+                    'exec': {
+                        'command': [
+                            '/bin/sh',
+                            '-c',
+                            f"ps -eo 'pid,comm,pcpu,rsz,args' | awk '($2 == \"{process_name}\" || $0 ~ /{process_keyword}/) && NR > 1 {{exit 0}} END {{if (NR <= 1) exit 1; exit 1}}'"
+                        ]
+                    },
+                    'initialDelaySeconds': 30,  # 容器启动后30秒开始探测
+                    'periodSeconds': 10,         # 每10秒探测一次
+                    'timeoutSeconds': 5,         # 探测超时时间5秒
+                    'successThreshold': 1,       # 连续1次成功则认为健康
+                    'failureThreshold': 3        # 连续3次失败则重启容器
+                }
+            LOG.info('Added liveness probe for process_name "%s" and process_keyword "%s"', process_name, process_keyword)
         
         # 从数据库的 cluster_info 中读取镜像拉取认证信息
         image_pull_username = cluster_info.get('image_pull_username', '')

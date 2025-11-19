@@ -170,6 +170,18 @@ deployment_rules = [
                          rule=validator.LengthValidator(0, 255),
                          validate_on=['check:O'],
                          nullable=True),
+    crud.ColumnValidator(field='deployment_path',
+                         rule=validator.LengthValidator(0, 1024),
+                         validate_on=['check:O'],
+                         nullable=True),
+    crud.ColumnValidator(field='process_name',
+                         rule=validator.LengthValidator(0, 255),
+                         validate_on=['check:O'],
+                         nullable=True),
+    crud.ColumnValidator(field='process_keyword',
+                         rule=validator.LengthValidator(0, 512),
+                         validate_on=['check:O'],
+                         nullable=True),
 ]
 
 service_rules = [
