@@ -19,8 +19,9 @@ bind = '%s:%d' % (CONF.server.bind, CONF.server.port)
 backlog = CONF.server.backlog
 # 超时
 timeout = 30
-# 进程数
-workers = max(multiprocessing.cpu_count() * 2, 8)
+# 进程数 (优化：避免创建过多worker导致线程耗尽)
+# 对于I/O密集型应用 + gevent异步模型，不需要太多worker
+workers = min(multiprocessing.cpu_count() + 1, 4)
 # 指定每个进程开启的线程数
 threads = 1
 debug = False

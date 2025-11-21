@@ -123,7 +123,9 @@ def cluster_equal(cluster1, cluster2):
 def main():
     """Watcher 主循环（带优雅关闭和异常处理）"""
     LOG.info('Starting Kubernetes Pod Watcher')
-    pool = PoolExecutor(100)
+    # 优化：减少最大线程数，避免系统线程耗尽
+    # 每个集群一个watcher线程，通常不会超过20个集群
+    pool = PoolExecutor(max_workers=20)
     cluster_mapping = {}  # 修正拼写：maping -> mapping
     shutdown_flag = Event()
     
