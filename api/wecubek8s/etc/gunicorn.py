@@ -21,7 +21,8 @@ backlog = CONF.server.backlog
 timeout = 30
 # 进程数 (优化：避免创建过多worker导致线程耗尽)
 # 对于I/O密集型应用 + gevent异步模型，不需要太多worker
-workers = min(multiprocessing.cpu_count() + 1, 4)
+# 由于 gevent threadpool 限制，进一步减少 workers
+workers = 2
 # 指定每个进程开启的线程数
 threads = 1
 debug = False
@@ -46,6 +47,18 @@ errlog.propagate = False
 # sync/gevent/eventlet/tornado/gthread/gaiohttp
 worker_class = 'gevent'
 worker_connections = 20
+
+# 配置 gevent 行为（解决 DNS 解析线程池耗尽问题）
+def post_fork(server, worker):
+    """在 worker 启动后执行的钩子"""
+    from gevent import monkey
+    # 确保 monkey patch 已应用
+    monkey.patch_all()
+    
+    # 限制 gevent threadpool 的大小（默认是 10，可能会被无限创建）
+    import gevent.threadpool
+    # 为 DNS 解析器设置最大线程数
+    gevent.get_hub().threadpool = gevent.threadpool.ThreadPool(maxsize=5)
 # 到达max requests之后worker会重启
 # max_requests = 0
 # keepalive = 5
