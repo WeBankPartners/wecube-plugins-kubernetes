@@ -5,7 +5,6 @@ from __future__ import absolute_import
 import os
 import logging
 from logging.handlers import WatchedFileHandler
-import multiprocessing
 
 from talos.core import config as __config
 
@@ -17,12 +16,10 @@ name = CONF.locale_app
 proc_name = CONF.locale_app
 bind = '%s:%d' % (CONF.server.bind, CONF.server.port)
 backlog = CONF.server.backlog
-# 超时
-timeout = 30
-# 进程数 (优化：避免创建过多worker导致线程耗尽)
-# 对于I/O密集型应用 + gevent异步模型，不需要太多worker
-# 由于 gevent threadpool 限制，进一步减少 workers
-workers = 2
+# 超时（增加以避免长时间操作被中断）
+timeout = 60
+# 进程数（单个 worker + gevent 异步可处理大量并发）
+workers = 1
 # 指定每个进程开启的线程数
 threads = 1
 debug = False
@@ -44,21 +41,41 @@ errlog.propagate = False
 # certfile =
 # ca_certs =
 # chdir = '/home/user'
-# sync/gevent/eventlet/tornado/gthread/gaiohttp
+# worker 类型：gevent 异步模型
 worker_class = 'gevent'
-worker_connections = 20
+# 每个 worker 的并发连接数（单 worker 配置较大值以提高并发能力）
+worker_connections = 50
 
-# 配置 gevent 行为（解决 DNS 解析线程池耗尽问题）
-def post_fork(server, worker):
-    """在 worker 启动后执行的钩子"""
-    from gevent import monkey
-    # 确保 monkey patch 已应用
-    monkey.patch_all()
+# 在 master 进程启动时配置 gevent（最早的配置点）
+def on_starting(server):
+    """在 gunicorn master 进程启动时执行，配置全局 gevent 行为"""
+    import logging
+    log = logging.getLogger('gunicorn.error')
+    log.info('Configuring gevent threadpool before any workers start...')
     
-    # 限制 gevent threadpool 的大小（默认是 10，可能会被无限创建）
+    # 导入并配置 gevent
+    import gevent.monkey
+    gevent.monkey.patch_all()
+    
+    import gevent
+    # 设置全局 threadpool 大小限制（防止线程耗尽）
+    gevent.config.threadpool_size = 5
+    log.info('Global gevent threadpool size limited to 5')
+
+# 在每个 worker 进程启动后再次确保配置生效
+def post_fork(server, worker):
+    """在 worker 进程启动后执行，为该 worker 设置 threadpool 限制"""
+    import logging
+    log = logging.getLogger('gunicorn.error')
+    
+    import gevent
     import gevent.threadpool
-    # 为 DNS 解析器设置最大线程数
-    gevent.get_hub().threadpool = gevent.threadpool.ThreadPool(maxsize=5)
+    
+    # 为该 worker 设置 threadpool（双重保险）
+    hub = gevent.get_hub()
+    hub.threadpool = gevent.threadpool.ThreadPool(maxsize=5)
+    
+    log.info('Worker %s: gevent threadpool limited to 5 threads', worker.pid)
 # 到达max requests之后worker会重启
 # max_requests = 0
 # keepalive = 5
