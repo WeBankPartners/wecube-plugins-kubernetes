@@ -5,13 +5,24 @@ from __future__ import absolute_import
 # ============================================================
 # 关键修复：在最开始就配置 gevent，防止线程耗尽
 # ============================================================
+import sys
 import gevent.monkey
 gevent.monkey.patch_all()
 
 import gevent
-# 限制 threadpool 大小
+import gevent.threadpool
+
+# 限制 threadpool 大小（多次设置确保生效）
 gevent.config.threadpool_size = 10
 gevent.config.threadpool_idle = 2
+
+# 立即初始化 hub 并设置 threadpool
+try:
+    _hub = gevent.get_hub()
+    _hub.threadpool = gevent.threadpool.ThreadPool(maxsize=10)
+    print(f"[INIT] Gevent threadpool configured: maxsize=10", file=sys.stderr, flush=True)
+except Exception as e:
+    print(f"[INIT] Failed to configure threadpool: {e}", file=sys.stderr, flush=True)
 
 import os
 import logging
@@ -60,20 +71,26 @@ worker_connections = 20
 # 在每个 worker 进程启动后确认 threadpool 配置
 def post_fork(server, worker):
     """在 worker 进程启动后执行，为该 worker 设置 threadpool 限制"""
+    import sys
     import logging
-    log = logging.getLogger('gunicorn.error')
-    log.info('Worker %s starting, configuring gevent threadpool...', worker.pid)
-    
     import gevent
     import gevent.threadpool
+    
+    log = logging.getLogger('gunicorn.error')
+    
+    # 打印到 stderr 确保能看到
+    print(f"[POST_FORK] Worker {worker.pid} starting, configuring gevent threadpool...", file=sys.stderr, flush=True)
+    log.info('Worker %s starting, configuring gevent threadpool...', worker.pid)
     
     # 为该 worker 设置 threadpool（强制设置）
     try:
         hub = gevent.get_hub()
         # 强制替换 threadpool
         hub.threadpool = gevent.threadpool.ThreadPool(maxsize=10)
+        print(f"[POST_FORK] Worker {worker.pid}: gevent threadpool configured with maxsize=10", file=sys.stderr, flush=True)
         log.info('Worker %s: gevent threadpool configured with maxsize=10', worker.pid)
     except Exception as e:
+        print(f"[POST_FORK] Worker {worker.pid}: Failed to configure threadpool: {e}", file=sys.stderr, flush=True)
         log.error('Worker %s: Failed to configure threadpool: %s', worker.pid, e)
 # 到达max requests之后worker会重启
 # max_requests = 0

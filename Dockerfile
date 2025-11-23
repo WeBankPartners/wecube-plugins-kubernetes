@@ -29,6 +29,10 @@ COPY api/wecubek8s/etc /etc/wecubek8s
 # RUN chown -R app:app /etc/wecubek8s/
 # RUN chown -R app:app /var/log/wecubek8s/
 # USER app
+
+# 设置环境变量限制 gevent threadpool
+ENV GEVENT_THREADPOOL=10
+
 COPY build/start_all.sh /scripts/start_all.sh
 RUN chmod +x /scripts/start_all.sh
 CMD ["/bin/sh","-c","/scripts/start_all.sh"]
