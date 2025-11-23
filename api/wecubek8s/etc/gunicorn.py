@@ -2,6 +2,17 @@
 
 from __future__ import absolute_import
 
+# ============================================================
+# 关键修复：在最开始就配置 gevent，防止线程耗尽
+# ============================================================
+import gevent.monkey
+gevent.monkey.patch_all()
+
+import gevent
+# 限制 threadpool 大小
+gevent.config.threadpool_size = 10
+gevent.config.threadpool_idle = 2
+
 import os
 import logging
 from logging.handlers import WatchedFileHandler
@@ -46,37 +57,24 @@ worker_class = 'gevent'
 # 每个 worker 的并发连接数（单 worker 配置较大值以提高并发能力）
 worker_connections = 20
 
-# 在 master 进程启动时配置 gevent（最早的配置点）
-def on_starting(server):
-    """在 gunicorn master 进程启动时执行，配置全局 gevent 行为"""
-    import logging
-    log = logging.getLogger('gunicorn.error')
-    log.info('Configuring gevent threadpool before any workers start...')
-    
-    # 导入并配置 gevent
-    import gevent.monkey
-    gevent.monkey.patch_all()
-    
-    import gevent
-    # 设置全局 threadpool 大小限制（防止线程耗尽）
-    gevent.config.threadpool_size = 10
-    gevent.config.threadpool_idle = 2
-    log.info('Global gevent threadpool size limited to 10')
-
-# 在每个 worker 进程启动后再次确保配置生效
+# 在每个 worker 进程启动后确认 threadpool 配置
 def post_fork(server, worker):
     """在 worker 进程启动后执行，为该 worker 设置 threadpool 限制"""
     import logging
     log = logging.getLogger('gunicorn.error')
+    log.info('Worker %s starting, configuring gevent threadpool...', worker.pid)
     
     import gevent
     import gevent.threadpool
     
-    # 为该 worker 设置 threadpool（双重保险）
-    hub = gevent.get_hub()
-    hub.threadpool = gevent.threadpool.ThreadPool(maxsize=10)
-    
-    log.info('Worker %s: gevent threadpool limited to 10 threads', worker.pid)
+    # 为该 worker 设置 threadpool（强制设置）
+    try:
+        hub = gevent.get_hub()
+        # 强制替换 threadpool
+        hub.threadpool = gevent.threadpool.ThreadPool(maxsize=10)
+        log.info('Worker %s: gevent threadpool configured with maxsize=10', worker.pid)
+    except Exception as e:
+        log.error('Worker %s: Failed to configure threadpool: %s', worker.pid, e)
 # 到达max requests之后worker会重启
 # max_requests = 0
 # keepalive = 5
