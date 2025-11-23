@@ -6,6 +6,11 @@ from __future__ import absolute_import
 # 关键修复：在最开始就配置 gevent，防止线程耗尽
 # ============================================================
 import sys
+import os
+
+# 强制使用 ares 或 dnspython 解析器，避免使用线程池解析 DNS
+os.environ['GEVENT_RESOLVER'] = 'ares'
+
 import gevent.monkey
 gevent.monkey.patch_all()
 
@@ -21,6 +26,7 @@ try:
     _hub = gevent.get_hub()
     _hub.threadpool = gevent.threadpool.ThreadPool(maxsize=10)
     print(f"[INIT] Gevent threadpool configured: maxsize=10", file=sys.stderr, flush=True)
+    print(f"[INIT] Gevent resolver: {os.environ.get('GEVENT_RESOLVER', 'thread')}", file=sys.stderr, flush=True)
 except Exception as e:
     print(f"[INIT] Failed to configure threadpool: {e}", file=sys.stderr, flush=True)
 

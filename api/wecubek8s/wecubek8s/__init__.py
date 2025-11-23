@@ -4,6 +4,11 @@ from __future__ import absolute_import
 
 # 在导入任何其他模块之前配置 gevent
 import sys
+import os
+
+# 强制使用 ares 解析器，避免 DNS 解析消耗线程
+os.environ.setdefault('GEVENT_RESOLVER', 'ares')
+
 import gevent.monkey
 gevent.monkey.patch_all()
 
@@ -15,6 +20,7 @@ gevent.config.threadpool_size = 10
 gevent.config.threadpool_idle = 2
 
 print("[WECUBEK8S_INIT] Configuring gevent threadpool maxsize=10", file=sys.stderr, flush=True)
+print(f"[WECUBEK8S_INIT] Using resolver: {os.environ.get('GEVENT_RESOLVER', 'thread')}", file=sys.stderr, flush=True)
 
 # 获取当前 hub 并设置 threadpool
 try:
