@@ -44,7 +44,7 @@ errlog.propagate = False
 # worker 类型：gevent 异步模型
 worker_class = 'gevent'
 # 每个 worker 的并发连接数（单 worker 配置较大值以提高并发能力）
-worker_connections = 50
+worker_connections = 20
 
 # 在 master 进程启动时配置 gevent（最早的配置点）
 def on_starting(server):
@@ -59,8 +59,9 @@ def on_starting(server):
     
     import gevent
     # 设置全局 threadpool 大小限制（防止线程耗尽）
-    gevent.config.threadpool_size = 5
-    log.info('Global gevent threadpool size limited to 5')
+    gevent.config.threadpool_size = 10
+    gevent.config.threadpool_idle = 2
+    log.info('Global gevent threadpool size limited to 10')
 
 # 在每个 worker 进程启动后再次确保配置生效
 def post_fork(server, worker):
@@ -73,9 +74,9 @@ def post_fork(server, worker):
     
     # 为该 worker 设置 threadpool（双重保险）
     hub = gevent.get_hub()
-    hub.threadpool = gevent.threadpool.ThreadPool(maxsize=5)
+    hub.threadpool = gevent.threadpool.ThreadPool(maxsize=10)
     
-    log.info('Worker %s: gevent threadpool limited to 5 threads', worker.pid)
+    log.info('Worker %s: gevent threadpool limited to 10 threads', worker.pid)
 # 到达max requests之后worker会重启
 # max_requests = 0
 # keepalive = 5

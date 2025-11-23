@@ -56,3 +56,4 @@ echo "验证配置："
 echo "  ssh $SSH_USER@NODE_IP"
 echo "  docker info | grep -A 5 'Insecure Registries'"
 
+

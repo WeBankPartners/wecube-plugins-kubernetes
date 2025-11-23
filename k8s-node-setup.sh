@@ -98,3 +98,4 @@ echo "  docker pull $REGISTRY/package-init-container:1.0.0"
 echo "  # or"
 echo "  sudo crictl pull $REGISTRY/package-init-container:1.0.0"
 
+
