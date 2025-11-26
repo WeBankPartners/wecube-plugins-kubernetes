@@ -77,10 +77,14 @@ class IterableValidator(validator.NullValidator):
 
     def validate(self, value):
         if utils.is_string_type(value):
-            try:
-                value = json.loads(value)
-            except JSONDecodeError as e:
-                return str(e)
+            stripped = value.strip()
+            if not stripped:
+                value = []
+            else:
+                try:
+                    value = json.loads(stripped)
+                except JSONDecodeError as e:
+                    return str(e)
         if isinstance(value, collections.Mapping):
             value = [value]
         if utils.is_list_type(value):
