@@ -25,6 +25,9 @@ def escape_name(name):
 
 def convert_tag(items):
     labels = {}
+    # 处理 None 或空值的情况（StringToList 转换器可能返回 None）
+    if items is None:
+        return labels
     for tag in items:
         labels[tag['name']] = tag['value']
     return labels
@@ -53,6 +56,9 @@ def convert_pod_ports(item):
 def convert_service_port(items):
     # convert service port
     rets = []
+    # 处理 None 或空值的情况
+    if items is None:
+        return rets
     fields = ['name', 'protocol', 'port', 'targetPort', 'nodePort']
     for item in items:
         ret = {}
@@ -68,6 +74,9 @@ def convert_service_port(items):
 def convert_env(items):
     # convert envs
     rets = []
+    # 处理 None 或空值的情况
+    if items is None:
+        return rets
     for idx, item in enumerate(items):
         if 'valueRef' not in item:
             item['valueRef'] = None
