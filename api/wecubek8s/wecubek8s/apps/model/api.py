@@ -49,8 +49,16 @@ class BaseEntity:
     def all(self, clusters):
         return []
 
+    def _ensure_api_server_protocol(self, api_server):
+        """确保 api_server 有正确的协议前缀"""
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            LOG.warning('api_server missing protocol prefix, auto-adding https://: %s', api_server)
+            return 'https://' + api_server
+        return api_server
+    
     def cluster_client(self, cluster):
-        k8s_auth = k8s.AuthToken(cluster['api_server'], cluster['token'])
+        api_server = self._ensure_api_server_protocol(cluster['api_server'])
+        k8s_auth = k8s.AuthToken(api_server, cluster['token'])
         k8s_client = k8s.Client(k8s_auth)
         return k8s_client
 
