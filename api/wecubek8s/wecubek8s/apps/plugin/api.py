@@ -622,7 +622,16 @@ class StatefulSet:
                             'protocol': port_info.get('protocol', 'TCP')
                         })
         
-        # 如果没有找到任何端口，创建一个没有端口的 Service（这是允许的）
+        # 如果没有找到任何端口，使用默认端口（Kubernetes 要求 Service 必须有 ports 字段）
+        if not service_ports:
+            LOG.warning('No ports specified for StatefulSet %s, using default port 80', data['name'])
+            service_ports = [{
+                'name': 'default',
+                'port': 80,
+                'targetPort': 80,
+                'protocol': 'TCP'
+            }]
+        
         # 创建 Headless Service
         service_resource_id = data.get('service_correlation_id', data['correlation_id'] + '-service')
         service_tags = api_utils.convert_tag(data.get('service_tags', data.get('tags', [])))
@@ -638,12 +647,10 @@ class StatefulSet:
             'spec': {
                 'type': 'ClusterIP',
                 'clusterIP': None,  # Headless Service
-                'selector': pod_spec_tags
+                'selector': pod_spec_tags,
+                'ports': service_ports
             }
         }
-        
-        if service_ports:
-            service_template['spec']['ports'] = service_ports
         
         # 创建 Headless Service
         k8s_client.create_service(namespace, service_template)
