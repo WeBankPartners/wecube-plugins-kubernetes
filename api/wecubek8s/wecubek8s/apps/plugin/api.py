@@ -771,7 +771,9 @@ class StatefulSet:
         
         # 查询实际运行的 Pod，获取真实的 Pod ID
         # 使用 label selector 查询该 StatefulSet 的 Pod
-        label_selector = f"wecube-pod-auto={data['name']}"
+        # 注意：label 值必须经过 escape 处理以符合 Kubernetes 规范
+        escaped_name = api_utils.escape_label_value(data['name'])
+        label_selector = f"{const.Tag.POD_AUTO_TAG}={escaped_name}"
         try:
             pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
             if pods and pods.items:
