@@ -20,6 +20,8 @@ NumberValidator = validator.NumberValidator
 class StringToDict(converter.NullConverter):
     def convert(self, value):
         if utils.is_string_type(value):
+            if not value.strip():
+                return None
             value = json.loads(value)
         return value
 
@@ -27,6 +29,8 @@ class StringToDict(converter.NullConverter):
 class StringToList(converter.NullConverter):
     def convert(self, value):
         if utils.is_string_type(value):
+            if not value.strip():
+                return None
             value = json.loads(value)
         if isinstance(value, collections.Mapping):
             value = [value]
