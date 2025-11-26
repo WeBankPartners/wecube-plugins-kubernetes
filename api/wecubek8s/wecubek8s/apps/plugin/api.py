@@ -35,7 +35,17 @@ class Cluster:
             cluster_info = cluster_info[0]
             # for token decryption
             data['id'] = cluster_info['id']
+            
+            # 记录哪些字段会被更新
+            update_fields = list(data.keys())
+            LOG.info('Fields to update for cluster %s: %s', cluster_name, update_fields)
+            if 'token' in data:
+                LOG.info('Token field will be updated and re-encrypted with guid: %s', data['id'])
+            else:
+                LOG.info('Token field not in update data, existing token will be kept')
+            
             result_before, result = db_resource.Cluster().update(cluster_info['id'], data)
+            LOG.info('Successfully updated cluster: %s', cluster_name)
         return result
 
     def remove(self, data):
