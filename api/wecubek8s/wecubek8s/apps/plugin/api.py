@@ -332,6 +332,11 @@ class Deployment:
                                              msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
         
+        # 确保 namespace 有值，默认使用 'default'
+        if not data.get('namespace') or data['namespace'].strip() == '':
+            data['namespace'] = 'default'
+            LOG.warning('namespace not provided or empty for Deployment %s, using default namespace', data.get('name'))
+        
         # 确保 api_server 有正确的协议前缀
         api_server = cluster_info['api_server']
         if not api_server.startswith('https://') and not api_server.startswith('http://'):
@@ -731,6 +736,11 @@ class StatefulSet:
                                              msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
         
+        # 确保 namespace 有值，默认使用 'default'
+        if not data.get('namespace') or data['namespace'].strip() == '':
+            data['namespace'] = 'default'
+            LOG.warning('namespace not provided or empty for StatefulSet %s, using default namespace', data.get('name'))
+        
         # 确保 api_server 有正确的协议前缀
         api_server = cluster_info['api_server']
         if not api_server.startswith('https://') and not api_server.startswith('http://'):
@@ -782,17 +792,21 @@ class StatefulSet:
                         'name': pod.metadata.name,
                         'id': pod.metadata.uid
                     })
-                LOG.info('Found %d running pods for StatefulSet %s', len(pod_list), resource_name)
+                LOG.info('Found %d running pods for StatefulSet %s in namespace %s', 
+                        len(pod_list), resource_name, data['namespace'])
             else:
                 # 如果还没有 Pod 运行，使用预期的 Pod 名称（ID 暂时为空）
-                LOG.warning('No running pods found for StatefulSet %s, using expected pod names', resource_name)
+                # 这是正常现象：StatefulSet 刚创建时，Pod 会异步创建
+                LOG.info('No running pods found yet for StatefulSet %s in namespace %s (pods may still be creating), using expected pod names', 
+                        resource_name, data['namespace'])
                 for i in range(replicas):
                     pod_list.append({
                         'name': f"{resource_name}-{i}",
                         'id': ''
                     })
         except Exception as e:
-            LOG.error('Failed to query pods: %s', str(e))
+            LOG.warning('Failed to query pods for StatefulSet %s in namespace %s: %s. Using expected pod names.', 
+                       resource_name, data['namespace'], str(e))
             # 使用预期的 Pod 名称
             for i in range(replicas):
                 pod_list.append({
@@ -873,6 +887,11 @@ class Service:
             raise exceptions.ValidationError(attribute='cluster',
                                              msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
+        
+        # 确保 namespace 有值，默认使用 'default'
+        if not data.get('namespace') or data['namespace'].strip() == '':
+            data['namespace'] = 'default'
+            LOG.warning('namespace not provided or empty for Service %s, using default namespace', data.get('name'))
         
         # 确保 api_server 有正确的协议前缀
         api_server = cluster_info['api_server']
