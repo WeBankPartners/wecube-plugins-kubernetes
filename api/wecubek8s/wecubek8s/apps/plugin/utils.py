@@ -23,6 +23,62 @@ def escape_name(name):
     return re.sub(rule, '-', name.lower())
 
 
+def escape_service_name(name):
+    '''
+    DNS-1035 label (for Service names) must consist of lower case alphanumeric characters or '-',
+    start with an alphabetic character, and end with an alphanumeric character.
+    More strict than DNS-1123: no dots allowed, must start with a letter.
+    (e.g. 'my-service', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')
+    '''
+    # 1. 转换为小写并替换所有非字母数字字符为 '-'
+    result = re.sub(r'[^a-z0-9]', '-', name.lower())
+    
+    # 2. 确保以字母开头（如果不是，添加 's-' 前缀）
+    if not result or not result[0].isalpha():
+        result = 's-' + result
+    
+    # 3. 确保以字母或数字结尾（删除尾部的 '-'）
+    result = result.rstrip('-')
+    
+    # 4. 合并连续的 '-' 为单个 '-'
+    result = re.sub(r'-+', '-', result)
+    
+    # 5. 确保长度限制（DNS 标签最大 63 字符）
+    if len(result) > 63:
+        result = result[:63].rstrip('-')
+    
+    return result
+
+
+def escape_label_value(value):
+    '''
+    Kubernetes label value must be an empty string or consist of alphanumeric characters, 
+    '-', '_' or '.', and must start and end with an alphanumeric character.
+    (e.g. 'MyValue', 'my_value', '12345', regex: '(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?')
+    '''
+    if not value:
+        return ''
+    
+    # 1. 替换所有不允许的字符为 '-'
+    result = re.sub(r'[^A-Za-z0-9._-]', '-', value)
+    
+    # 2. 确保以字母或数字开头（删除开头的非字母数字字符）
+    result = re.sub(r'^[^A-Za-z0-9]+', '', result)
+    
+    # 3. 确保以字母或数字结尾（删除尾部的非字母数字字符）
+    result = re.sub(r'[^A-Za-z0-9]+$', '', result)
+    
+    # 4. 如果结果为空，返回默认值
+    if not result:
+        return 'default'
+    
+    # 5. 确保长度限制（标签值最大 63 字符）
+    if len(result) > 63:
+        result = result[:63].rstrip('._-')
+    
+    return result
+
+
 def convert_tag(items):
     labels = {}
     # 处理 None 或空值的情况（StringToList 转换器可能返回 None）

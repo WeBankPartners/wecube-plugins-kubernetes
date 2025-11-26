@@ -68,14 +68,15 @@ class Deployment:
         replicas = data['replicas']
         pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, data['name'])
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
-        pod_spec_tags[const.Tag.POD_AUTO_TAG] = data['name']
-        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = data['name']
+        # 使用 escape_label_value 确保标签值符合 Kubernetes 规范
+        pod_spec_tags[const.Tag.POD_AUTO_TAG] = api_utils.escape_label_value(data['name'])
+        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = api_utils.escape_label_value(data['name'])
         
         # 添加 correlation_id 和 instanceId 作为 Pod 标签
         if data.get('correlation_id'):
-            pod_spec_tags['correlation_id'] = data['correlation_id']
+            pod_spec_tags['correlation_id'] = api_utils.escape_label_value(data['correlation_id'])
         if data.get('instanceId'):
-            pod_spec_tags['instanceId'] = data['instanceId']
+            pod_spec_tags['instanceId'] = api_utils.escape_label_value(data['instanceId'])
         
         pod_spec_envs = api_utils.convert_env(data.get('envs', []))
         
@@ -257,7 +258,8 @@ class Deployment:
             return
 
         namespace = data['namespace']
-        service_name = api_utils.escape_name(data.get('serviceName', data['name']))
+        # Service 名称必须符合 DNS-1035 规范
+        service_name = api_utils.escape_service_name(data.get('serviceName', data['name']))
 
         # 从入参中取 selectors：仅使用传入的 pod_tags（不自动追加内部标签）
         selectors = api_utils.convert_tag(data.get('pod_tags', []))
@@ -396,14 +398,15 @@ class StatefulSet:
         replicas = data['replicas']
         pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, data['name'])
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
-        pod_spec_tags[const.Tag.POD_AUTO_TAG] = data['name']
-        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = data['name']
+        # 使用 escape_label_value 确保标签值符合 Kubernetes 规范
+        pod_spec_tags[const.Tag.POD_AUTO_TAG] = api_utils.escape_label_value(data['name'])
+        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = api_utils.escape_label_value(data['name'])
         
         # 添加 correlation_id 和 instanceId 作为 Pod 标签
         if data.get('correlation_id'):
-            pod_spec_tags['correlation_id'] = data['correlation_id']
+            pod_spec_tags['correlation_id'] = api_utils.escape_label_value(data['correlation_id'])
         if data.get('instanceId'):
-            pod_spec_tags['instanceId'] = data['instanceId']
+            pod_spec_tags['instanceId'] = api_utils.escape_label_value(data['instanceId'])
         
         pod_spec_envs = api_utils.convert_env(data.get('envs', []))
         
@@ -583,7 +586,8 @@ class StatefulSet:
     def _ensure_headless_service(self, k8s_client, data, resource_template):
         """确保 StatefulSet 关联的 Headless Service 存在"""
         service_name = data.get('serviceName', data['name'])
-        service_name = api_utils.escape_name(service_name)
+        # Service 名称必须符合 DNS-1035 规范（比 DNS-1123 更严格）
+        service_name = api_utils.escape_service_name(service_name)
         namespace = data['namespace']
         
         # 检查 Service 是否已存在
@@ -593,9 +597,11 @@ class StatefulSet:
             return
         
         # 获取 Pod 标签作为 Service selector
+        # 注意：标签值也需要转义以符合 Kubernetes 标签规范
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
-        pod_spec_tags[const.Tag.POD_AUTO_TAG] = data['name']
-        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = data['name']
+        # 使用 escape_label_value 确保标签值符合 Kubernetes 规范
+        pod_spec_tags[const.Tag.POD_AUTO_TAG] = api_utils.escape_label_value(data['name'])
+        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = api_utils.escape_label_value(data['name'])
         
         # 获取 Service 端口
         # 优先级：1. 用户提供的 servicePorts 2. 从 image_port 推断
@@ -819,7 +825,8 @@ class StatefulSet:
 class Service:
     def to_resource(self, k8s_client, data):
         resource_id = data['correlation_id']
-        resource_name = api_utils.escape_name(data['name'])
+        # Service 名称必须符合 DNS-1035 规范
+        resource_name = api_utils.escape_service_name(data['name'])
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.SERVICE_ID_TAG] = resource_id
         resource_type = data['type']
@@ -868,7 +875,8 @@ class Service:
         k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
         k8s_client.ensure_namespace(data['namespace'])
-        resource_name = api_utils.escape_name(data['name'])
+        # Service 名称必须符合 DNS-1035 规范
+        resource_name = api_utils.escape_service_name(data['name'])
         exists_resource = k8s_client.get_service(resource_name, data['namespace'])
         if not exists_resource:
             exists_resource = k8s_client.create_service(data['namespace'], self.to_resource(k8s_client, data))
