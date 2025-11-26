@@ -18,12 +18,20 @@ LOG = logging.getLogger(__name__)
 
 class Cluster:
     def apply(self, data):
-        cluster_info = db_resource.Cluster().list({'name': data['name']})
+        cluster_name = data.get('name')
+        LOG.info('Applying cluster: %s', cluster_name)
+        
+        # 注意：如果客户端发送的 token 是加密格式 {cipher_a}xxx，
+        # controller 层已经解密处理过了，这里接收到的应该是明文
+        
+        cluster_info = db_resource.Cluster().list({'name': cluster_name})
         result = None
         if not cluster_info:
-            data['id'] = 'cluster-' + data['name']
+            LOG.info('Creating new cluster: %s', cluster_name)
+            data['id'] = 'cluster-' + cluster_name
             result = db_resource.Cluster().create(data)
         else:
+            LOG.info('Updating existing cluster: %s', cluster_name)
             cluster_info = cluster_info[0]
             # for token decryption
             data['id'] = cluster_info['id']

@@ -2,28 +2,76 @@
 
 from __future__ import absolute_import
 
+import logging
 from talos.db import crud
+from talos.core import config
 from talos.core.i18n import _
 
 from wecubek8s.common import controller
 from wecubek8s.common import exceptions
+from wecubek8s.common import utils as k8s_utils
 from wecubek8s.apps.plugin import rules
 from wecubek8s.apps.plugin import api as plugin_api
+
+CONF = config.CONF
+LOG = logging.getLogger(__name__)
 
 
 class Cluster(controller.Plugin):
     allow_methods = ('POST', )
     name = 'k8s.plugin.cluster'
+    
+    # 需要检查预解密的字段列表
+    # 注意：这里只列出可能以加密格式 {cipher_a}xxx 传入的字段
+    # 如果客户端传入的是明文，代码会自动跳过（通过 startswith 判断）
+    # 如果你确定 image_pull_password 总是明文，可以移除它
+    ENCRYPTED_FIELDS = ['token']  # image_pull_password 通常是明文，不需要预解密
 
     def set_item_default(self, item):
         defaults = {}
         for key, value in defaults.items():
             if not item.get(key):
                 item[key] = value
+    
+    def decrypt_incoming_fields(self, item):
+        """
+        解密客户端传入的已加密字段
+        如果客户端发送的是 {cipher_a}xxx 格式的加密数据，需要先解密
+        然后系统会在入库时重新加密
+        """
+        # 生成一个临时的 guid 用于解密客户端传入的加密数据
+        # 客户端加密时使用的 guid 通常是 correlation_id 或者固定值
+        decrypt_guid = item.get('correlation_id', item.get('name', ''))
+        
+        for field in self.ENCRYPTED_FIELDS:
+            if field in item and item[field]:
+                field_value = item[field]
+                # 检查是否是加密格式
+                if isinstance(field_value, str) and field_value.startswith('{cipher_a}'):
+                    try:
+                        # 使用 platform_encrypt_seed 解密
+                        decrypted_value = k8s_utils.platform_decrypt(
+                            field_value, 
+                            decrypt_guid, 
+                            CONF.platform_encrypt_seed
+                        )
+                        item[field] = decrypted_value
+                        LOG.info('Successfully decrypted incoming field %s for cluster %s', 
+                                field, item.get('name'))
+                    except Exception as e:
+                        LOG.error('Failed to decrypt incoming field %s for cluster %s: %s', 
+                                 field, item.get('name'), str(e))
+                        # 如果解密失败，尝试当作明文处理
+                        # 或者可以选择抛出异常
+                        LOG.warning('Will treat field %s as plaintext', field)
+        
+        return item
 
     def validate_item_apply(self, item_index, item):
         clean_item = crud.ColumnValidator.get_clean_data(rules.cluster_rules, item, 'check')
         self.set_item_default(clean_item)
+        # 在验证后、保存前解密客户端传入的加密字段
+        clean_item = self.decrypt_incoming_fields(clean_item)
         return clean_item
 
     def validate_item_destroy(self, item_index, item):

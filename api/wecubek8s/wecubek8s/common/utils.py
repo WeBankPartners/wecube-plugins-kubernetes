@@ -314,11 +314,20 @@ def platform_decrypt(text, guid, seed):
     result = text
     encrypted_prefix = '{cipher_a}'
     if text.startswith(encrypted_prefix):
-        encrypted_text = text[len(encrypted_prefix):]
-        encrypted_text = bytes.fromhex(encrypted_text)
-        key = md5(guid + seed)[:16]
-        cipher = AES.new(key, AES.MODE_CBC, key)
-        origin_text = cipher.decrypt(encrypted_text)
-        origin_text = origin_text[0:-origin_text[-1]]
-        result = origin_text.decode()
+        try:
+            encrypted_text = text[len(encrypted_prefix):]
+            encrypted_text = bytes.fromhex(encrypted_text)
+            key = md5(guid + seed)[:16]
+            cipher = AES.new(key, AES.MODE_CBC, key)
+            origin_text = cipher.decrypt(encrypted_text)
+            origin_text = origin_text[0:-origin_text[-1]]
+            result = origin_text.decode('utf-8')
+        except (ValueError, UnicodeDecodeError) as e:
+            import logging
+            LOG = logging.getLogger(__name__)
+            LOG.error('Failed to decrypt text for guid=%s: %s. Text prefix: %s', 
+                     guid, str(e), text[:50] if len(text) > 50 else text)
+            # 如果解密失败，返回原文本（可能是未加密的明文）
+            # 或者抛出异常，根据业务需求决定
+            raise ValueError(f'Failed to decrypt token: {str(e)}. Please check if the token is correctly encrypted or the seed is correct.')
     return result
