@@ -556,6 +556,9 @@ class StatefulSet:
                         registry_secrets.append(secret)
                         existing_secret_names.add(secret['name'])
         
+        # StatefulSet 的 serviceName 必须符合 DNS-1035 规范
+        service_name_for_sts = api_utils.escape_service_name(data.get('serviceName', resource_name))
+        
         template = {
             'apiVersion': 'apps/v1',
             'kind': 'StatefulSet',
@@ -565,7 +568,7 @@ class StatefulSet:
             },
             'spec': {
                 'replicas': int(replicas),
-                'serviceName': data.get('serviceName', resource_name),
+                'serviceName': service_name_for_sts,
                 'selector': {
                     'matchLabels': pod_spec_tags
                 },
@@ -722,7 +725,10 @@ class StatefulSet:
             from wecubek8s.common import wecmdb
             
             # 获取 CMDB 客户端（需要从配置中获取 CMDB 地址）
-            cmdb_server = CONF.wecube.gateway_url
+            cmdb_server = CONF.wecube.base_url
+            if not cmdb_server:
+                LOG.warning('CMDB base_url not configured, skipping CMDB sync')
+                return
             cmdb_client = wecmdb.EntityClient(cmdb_server)
             
             # 1. 查询 CMDB 中该 instanceId 下的所有 Pod
