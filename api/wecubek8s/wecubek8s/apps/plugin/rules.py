@@ -182,6 +182,10 @@ deployment_rules = [
                          rule=validator.LengthValidator(0, 512),
                          validate_on=['check:O'],
                          nullable=True),
+    crud.ColumnValidator(field='image_deploy_script',
+                         rule=validator.LengthValidator(0, 8192),
+                         validate_on=['check:O'],
+                         nullable=True),
 ]
 
 service_rules = [

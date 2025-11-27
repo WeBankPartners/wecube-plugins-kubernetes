@@ -158,7 +158,10 @@ class Deployment:
             'ports': data.get('image_port', '')
         }]
         
-        containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit)
+        # 获取部署脚本（如果提供）
+        deploy_script = data.get('image_deploy_script')
+        
+        containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit, deploy_script)
         
         # 自动添加存活探针（基于传入的 process_name 和 process_keyword 参数）
         process_name = data.get('process_name')
@@ -493,7 +496,10 @@ class StatefulSet:
             'ports': data.get('image_port', '')
         }]
         
-        containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit)
+        # 获取部署脚本（如果提供）
+        deploy_script = data.get('image_deploy_script')
+        
+        containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit, deploy_script)
         
         # 自动添加存活探针（基于传入的 process_name 和 process_keyword 参数）
         process_name = data.get('process_name')
@@ -661,6 +667,50 @@ class StatefulSet:
         k8s_client.create_service(namespace, service_template)
         LOG.info('Created Headless Service %s/%s for StatefulSet %s/%s',
                  namespace, service_name, namespace, data['name'])
+    
+    def _ensure_loadbalancer_service(self, k8s_client, data, service_ports, pod_spec_tags):
+        """
+        为 StatefulSet 创建额外的负载均衡 Service（有 ClusterIP）
+        这个 Service 用于提供 ClusterIP 给下游流程使用
+        """
+        # 负载均衡 Service 名称：原名称 + '-lb' 后缀
+        lb_service_name = data.get('serviceName', data['name']) + '-lb'
+        lb_service_name = api_utils.escape_service_name(lb_service_name)
+        namespace = data['namespace']
+        
+        # 检查负载均衡 Service 是否已存在
+        exists_lb_service = k8s_client.get_service(lb_service_name, namespace)
+        if exists_lb_service is not None:
+            # Service 已存在，返回其信息
+            return lb_service_name
+        
+        # 创建负载均衡 Service（普通 ClusterIP Service）
+        lb_service_resource_id = data['correlation_id'] + '-lb-service'
+        lb_service_tags = api_utils.convert_tag(data.get('service_tags', data.get('tags', [])))
+        lb_service_tags[const.Tag.SERVICE_ID_TAG] = lb_service_resource_id
+        lb_service_tags['service-type'] = 'loadbalancer'  # 标记为负载均衡 Service
+        
+        lb_service_template = {
+            'apiVersion': 'v1',
+            'kind': 'Service',
+            'metadata': {
+                'labels': lb_service_tags,
+                'name': lb_service_name
+            },
+            'spec': {
+                'type': 'ClusterIP',
+                # 不设置 clusterIP 字段，让 Kubernetes 自动分配
+                'selector': pod_spec_tags,
+                'ports': service_ports
+            }
+        }
+        
+        # 创建负载均衡 Service
+        k8s_client.create_service(namespace, lb_service_template)
+        LOG.info('Created LoadBalancer Service %s/%s for StatefulSet %s/%s',
+                 namespace, lb_service_name, namespace, data['name'])
+        
+        return lb_service_name
 
     def _sync_pods_to_cmdb(self, k8s_client, namespace, pod_list, instance_id):
         """同步 Pod 信息到 CMDB"""
@@ -765,15 +815,67 @@ class StatefulSet:
         else:
             exists_resource = k8s_client.update_statefulset(resource_name, data['namespace'], resource_template)
         
-        # 补充返回对应 Service 的 clusterIP 与 port（若存在端口）
-        service_name = api_utils.escape_name(data.get('serviceName', data['name']))
+        # 补充返回对应 Service 的 clusterIP 与 port
+        # 策略：优先返回负载均衡 Service 的 ClusterIP（如果存在），否则返回 Headless Service 信息
         cluster_ip = None
         port_str = ""
-        svc = k8s_client.get_service(service_name, data['namespace'])
-        if svc:
-            cluster_ip = svc.spec.cluster_ip if getattr(svc.spec, 'cluster_ip', None) else None
-            if getattr(svc.spec, 'ports', None) and len(svc.spec.ports) > 0:
-                port_str = str(svc.spec.ports[0].port)
+        
+        # 1. 尝试获取负载均衡 Service（带 -lb 后缀）
+        lb_service_name = api_utils.escape_service_name(data.get('serviceName', data['name']) + '-lb')
+        lb_svc = k8s_client.get_service(lb_service_name, data['namespace'])
+        
+        if lb_svc and lb_svc.spec.cluster_ip and lb_svc.spec.cluster_ip != 'None':
+            # 使用负载均衡 Service 的 ClusterIP
+            cluster_ip = lb_svc.spec.cluster_ip
+            if getattr(lb_svc.spec, 'ports', None) and len(lb_svc.spec.ports) > 0:
+                port_str = str(lb_svc.spec.ports[0].port)
+            LOG.info('Using LoadBalancer Service %s ClusterIP: %s', lb_service_name, cluster_ip)
+        else:
+            # 2. 如果没有负载均衡 Service，尝试创建一个
+            # 先获取 Pod 标签和端口信息
+            pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
+            pod_spec_tags[const.Tag.POD_AUTO_TAG] = api_utils.escape_label_value(data['name'])
+            pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = api_utils.escape_label_value(data['name'])
+            
+            # 获取 Service 端口
+            service_ports = []
+            if data.get('servicePorts'):
+                service_ports = api_utils.convert_service_port(data['servicePorts'])
+            elif data.get('image_port'):
+                container_ports = api_utils.convert_pod_ports(data.get('image_port', ''))
+                for port_info in container_ports:
+                    port = port_info.get('containerPort')
+                    if port:
+                        service_ports.append({
+                            'port': port,
+                            'targetPort': port,
+                            'protocol': port_info.get('protocol', 'TCP')
+                        })
+            
+            if not service_ports:
+                service_ports = [{
+                    'name': 'default',
+                    'port': 80,
+                    'targetPort': 80,
+                    'protocol': 'TCP'
+                }]
+            
+            # 创建负载均衡 Service
+            lb_service_name = self._ensure_loadbalancer_service(k8s_client, data, service_ports, pod_spec_tags)
+            
+            # 重新获取创建的 Service
+            lb_svc = k8s_client.get_service(lb_service_name, data['namespace'])
+            if lb_svc:
+                cluster_ip = lb_svc.spec.cluster_ip if lb_svc.spec.cluster_ip else None
+                if cluster_ip == 'None':
+                    cluster_ip = None
+                if getattr(lb_svc.spec, 'ports', None) and len(lb_svc.spec.ports) > 0:
+                    port_str = str(lb_svc.spec.ports[0].port)
+                LOG.info('Created and using LoadBalancer Service %s ClusterIP: %s', lb_service_name, cluster_ip)
+        
+        # 3. 如果仍然没有 ClusterIP，记录警告
+        if not cluster_ip:
+            LOG.warning('No ClusterIP available for StatefulSet %s/%s', data['namespace'], data['name'])
         
         # 获取实际的 Pod 列表（包含 name 和 id）
         replicas = int(data.get('replicas', 1))
@@ -814,10 +916,9 @@ class StatefulSet:
                     'id': ''
                 })
         
-        # 如果提供了 instanceId，同步 Pod 信息到 CMDB
-        instance_id = data.get('instanceId')
-        if instance_id and pod_list:
-            self._sync_pods_to_cmdb(k8s_client, data['namespace'], pod_list, instance_id)
+        # 使用 correlation_id（即 instanceId）同步 Pod 信息到 CMDB
+        if resource_id and pod_list:
+            self._sync_pods_to_cmdb(k8s_client, data['namespace'], pod_list, resource_id)
         
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return {

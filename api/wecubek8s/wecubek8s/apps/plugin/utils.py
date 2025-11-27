@@ -300,7 +300,17 @@ def parse_image_url(image_url):
     return None, None, None, None
 
 
-def convert_container(images, envs, vols, resource_limit):
+def convert_container(images, envs, vols, resource_limit, deploy_script=None):
+    """
+    转换容器配置
+    
+    参数:
+        images: 镜像列表
+        envs: 环境变量列表
+        vols: 挂载卷列表
+        resource_limit: 资源限制
+        deploy_script: 可选的部署脚本，在容器启动时执行
+    """
     containers = []
     container_template = {
         'name': '',
@@ -317,6 +327,16 @@ def convert_container(images, envs, vols, resource_limit):
         container['name'] = image_name
         container['image'] = image_info['name'].strip()
         container['ports'] = convert_pod_ports(image_info.get('ports', ''))
+        
+        # 如果提供了部署脚本，修改容器启动命令
+        if deploy_script:
+            # 使用 bash 执行脚本，脚本最后需要启动原始的容器进程
+            # 注意：这里假设脚本已经包含了启动原容器进程的逻辑（如 exec /docker-entrypoint.sh "$@"）
+            container['command'] = ['/bin/bash', '-c']
+            # 将脚本中的 \\n 替换为真正的换行符
+            script_content = deploy_script.replace('\\n', '\n')
+            container['args'] = [script_content]
+        
         containers.append(container)
 
     return containers
