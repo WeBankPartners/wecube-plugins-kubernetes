@@ -471,6 +471,7 @@ def setup_package_init_container(data, containers, volumes, cluster_info=None):
         
         # 创建 initContainer
         # 使用环境变量 PACKAGE_URL 传递下载地址
+        # 使用 PACKAGE_USERNAME 和 PACKAGE_PASSWORD 传递认证信息
         # 镜像的 ENTRYPOINT 会读取该环境变量并执行下载脚本
         init_container = {
             'name': 'package-downloader',
@@ -480,6 +481,14 @@ def setup_package_init_container(data, containers, volumes, cluster_info=None):
                 {
                     'name': 'PACKAGE_URL',
                     'value': package_url
+                },
+                {
+                    'name': 'PACKAGE_USERNAME',
+                    'value': const.Artifacts.USERNAME
+                },
+                {
+                    'name': 'PACKAGE_PASSWORD',
+                    'value': const.Artifacts.PASSWORD
                 }
             ],
             'volumeMounts': [
