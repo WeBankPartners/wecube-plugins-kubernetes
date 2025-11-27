@@ -399,7 +399,10 @@ class Deployment:
 class StatefulSet:
     def to_resource(self, k8s_client, data, cluster_info):
         resource_id = data['correlation_id']
-        resource_name = api_utils.escape_name(data['name'])
+        # StatefulSet 的 metadata.name 必须符合 DNS-1123 label 规范（不允许点号）
+        # 因为 Pod 的 hostname 会使用 <statefulset-name>-<ordinal> 格式
+        # 所以这里使用 escape_service_name 而不是 escape_name
+        resource_name = api_utils.escape_service_name(data['name'])
         resource_namespace = data['namespace']
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.STATEFULSET_ID_TAG] = resource_id
@@ -760,6 +763,11 @@ class StatefulSet:
                 pod_name = pod_info['name']
                 pod_id = pod_info['id']
                 
+                # 如果 Pod ID 为空，说明 Pod 还没有创建，跳过更新
+                if not pod_id:
+                    LOG.info('Pod %s has no ID yet (not created), skipping CMDB update', pod_name)
+                    continue
+                
                 if pod_name in cmdb_pods:
                     cmdb_pod = cmdb_pods[pod_name]
                     # 如果 Pod ID 发生变化，需要更新
@@ -926,6 +934,9 @@ class StatefulSet:
         if resource_id and pod_list:
             self._sync_pods_to_cmdb(k8s_client, data['namespace'], pod_list, resource_id)
         
+        # 将 Pod 列表转换为字符串格式（用分号拼接），方便页面显示
+        pods_str = ';'.join([pod['name'] for pod in pod_list]) if pod_list else ''
+        
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return {
             'id': exists_resource.metadata.uid,
@@ -933,7 +944,7 @@ class StatefulSet:
             'correlation_id': resource_id,
             'clusterIP': cluster_ip,
             'port': port_str,
-            'pods': pod_list  # 返回 Pod 对象数组，包含 name 和 id
+            'pods': pods_str  # 返回 Pod 名称字符串，用分号拼接
         }
 
     def remove(self, data):
