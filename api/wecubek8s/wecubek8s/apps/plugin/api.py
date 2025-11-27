@@ -66,11 +66,12 @@ class Deployment:
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.DEPLOYMENT_ID_TAG] = resource_id
         replicas = data['replicas']
-        pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, data['name'])
-        pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
         # 使用 escape_label_value 确保标签值符合 Kubernetes 规范
-        pod_spec_tags[const.Tag.POD_AUTO_TAG] = api_utils.escape_label_value(data['name'])
-        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = api_utils.escape_label_value(data['name'])
+        escaped_name = api_utils.escape_label_value(data['name'])
+        pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, escaped_name)
+        pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
+        pod_spec_tags[const.Tag.POD_AUTO_TAG] = escaped_name
+        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = escaped_name
         
         # 添加 correlation_id 和 instanceId 作为 Pod 标签
         if data.get('correlation_id'):
@@ -407,11 +408,12 @@ class StatefulSet:
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.STATEFULSET_ID_TAG] = resource_id
         replicas = data['replicas']
-        pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, data['name'])
-        pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
         # 使用 escape_label_value 确保标签值符合 Kubernetes 规范
-        pod_spec_tags[const.Tag.POD_AUTO_TAG] = api_utils.escape_label_value(data['name'])
-        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = api_utils.escape_label_value(data['name'])
+        escaped_name = api_utils.escape_label_value(data['name'])
+        pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, escaped_name)
+        pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
+        pod_spec_tags[const.Tag.POD_AUTO_TAG] = escaped_name
+        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = escaped_name
         
         # 添加 correlation_id 和 instanceId 作为 Pod 标签
         if data.get('correlation_id'):
