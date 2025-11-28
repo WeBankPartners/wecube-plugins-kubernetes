@@ -294,10 +294,56 @@ echo "Package file size: ${file_size} bytes"
 
 # 解压 tar 包
 echo "Step 3: Extracting package..."
-tar -xf package.tar || {
+
+# 先解压到临时目录，检查结构
+TEMP_EXTRACT_DIR="/tmp/package-extract-$$"
+mkdir -p "$TEMP_EXTRACT_DIR"
+
+if ! tar -xf package.tar -C "$TEMP_EXTRACT_DIR"; then
     echo "Error: Failed to extract package"
+    rm -rf "$TEMP_EXTRACT_DIR"
     exit 1
-}
+fi
+
+# 检查解压后的目录结构
+echo "Checking extracted package structure..."
+EXTRACTED_STRUCTURE=$(ls -A "$TEMP_EXTRACT_DIR" | wc -l)
+
+if [ "$EXTRACTED_STRUCTURE" -eq 0 ]; then
+    echo "Error: Extracted package is empty"
+    rm -rf "$TEMP_EXTRACT_DIR"
+    exit 1
+fi
+
+# 检查是否有唯一的顶层目录（有些 tar 包会包含一个顶层目录）
+TOPLEVEL_ITEMS=$(find "$TEMP_EXTRACT_DIR" -mindepth 1 -maxdepth 1)
+TOPLEVEL_COUNT=$(echo "$TOPLEVEL_ITEMS" | wc -l)
+
+echo "Found $TOPLEVEL_COUNT top-level items after extraction"
+
+# 如果只有一个顶层目录，将其内容上移
+if [ "$TOPLEVEL_COUNT" -eq 1 ]; then
+    TOPLEVEL_ITEM=$(echo "$TOPLEVEL_ITEMS" | head -n 1)
+    if [ -d "$TOPLEVEL_ITEM" ]; then
+        echo "Detected single top-level directory: $(basename "$TOPLEVEL_ITEM")"
+        echo "Moving contents up to /shared-data/diff-var-files/..."
+        
+        # 移动内容到目标目录
+        mv "$TOPLEVEL_ITEM"/* /shared-data/diff-var-files/ 2>/dev/null || true
+        mv "$TOPLEVEL_ITEM"/.[!.]* /shared-data/diff-var-files/ 2>/dev/null || true
+    else
+        echo "Single item is not a directory, copying directly..."
+        mv "$TEMP_EXTRACT_DIR"/* /shared-data/diff-var-files/ 2>/dev/null || true
+    fi
+else
+    # 多个顶层项目，直接移动
+    echo "Multiple top-level items found, moving all to /shared-data/diff-var-files/..."
+    mv "$TEMP_EXTRACT_DIR"/* /shared-data/diff-var-files/ 2>/dev/null || true
+    mv "$TEMP_EXTRACT_DIR"/.[!.]* /shared-data/diff-var-files/ 2>/dev/null || true
+fi
+
+# 清理临时目录
+rm -rf "$TEMP_EXTRACT_DIR"
 
 # 清理 tar 文件
 echo "Step 4: Cleaning up..."
@@ -305,9 +351,58 @@ rm -f package.tar
 
 # 列出解压后的文件（用于调试）
 echo "Step 5: Listing extracted files..."
+echo "Contents of /shared-data/diff-var-files/:"
 ls -lah /shared-data/diff-var-files/ || true
+
+echo ""
+echo "File tree structure:"
+find /shared-data/diff-var-files/ -type f 2>/dev/null | head -20 || true
+
+# 设置正确的权限，确保主容器可以读取
+echo ""
+echo "Step 6: Setting file permissions..."
+echo "Ensuring all files are readable by the main container..."
+
+# 设置目录权限为 755，文件权限为 644
+find /shared-data/diff-var-files/ -type d -exec chmod 755 {} \; 2>/dev/null || true
+find /shared-data/diff-var-files/ -type f -exec chmod 644 {} \; 2>/dev/null || true
+
+echo "✓ Permissions set successfully"
+
+# 验证关键文件是否存在
+echo ""
+echo "Step 7: Verifying extracted content..."
+CRITICAL_PATHS=(
+    "/shared-data/diff-var-files/conf"
+    "/shared-data/diff-var-files/html"
+)
+
+for path in "${CRITICAL_PATHS[@]}"; do
+    if [ -e "$path" ]; then
+        echo "✓ Found: $path"
+        if [ -d "$path" ]; then
+            FILE_COUNT=$(find "$path" -type f | wc -l)
+            echo "  └─ Contains $FILE_COUNT file(s)"
+        fi
+    else
+        echo "⚠ Not found: $path (may not be required)"
+    fi
+done
+
+# 输出最终的目录结构摘要
+echo ""
+echo "Final directory structure:"
+tree -L 2 /shared-data/diff-var-files/ 2>/dev/null || \
+    find /shared-data/diff-var-files/ -maxdepth 2 -type d -exec echo "DIR: {}" \; 2>/dev/null || \
+    echo "Structure verified"
 
 echo "=========================================="
 echo "Package downloaded and extracted successfully!"
+echo "=========================================="
+echo ""
+echo "Summary:"
+echo "  - Target directory: /shared-data/diff-var-files/"
+echo "  - Files extracted: $(find /shared-data/diff-var-files/ -type f 2>/dev/null | wc -l)"
+echo "  - Directories created: $(find /shared-data/diff-var-files/ -type d 2>/dev/null | wc -l)"
 echo "=========================================="
 
