@@ -31,6 +31,11 @@ class EntityClient(utils.ClientMixin):
         url = self.server + self.build_query_url(package, entity, 'query')
         return self.post(url, query_data)
     
+    def create(self, package, entity, create_data):
+        """创建实体数据"""
+        url = self.server + self.build_query_url(package, entity, 'create')
+        return self.post(url, create_data)
+    
     def update(self, package, entity, update_data):
         """更新实体数据"""
         url = self.server + self.build_query_url(package, entity, 'update')

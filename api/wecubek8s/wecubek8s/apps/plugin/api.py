@@ -983,7 +983,7 @@ class StatefulSet:
             # 1. 查询 CMDB 中该 instanceId 下的所有 Pod
             query_data = {
                 "criteria": {
-                    "attrName": "instance",  # CMDB 字段名：instance
+                    "attrName": "app_instance",  # CMDB 字段名：app_instance
                     "op": "eq",
                     "condition": instance_id
                 }
@@ -992,47 +992,92 @@ class StatefulSet:
             LOG.info('Querying CMDB for pods with instanceId: %s', instance_id)
             cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
             
+            # 记录 CMDB 响应（用于调试）
+            if cmdb_response:
+                LOG.info('CMDB response status: %s', cmdb_response.get('status', 'unknown'))
+                if cmdb_response.get('data'):
+                    LOG.info('CMDB query returned %d pod records', len(cmdb_response['data']))
+                else:
+                    LOG.warning('CMDB query returned empty data for instanceId: %s', instance_id)
+            else:
+                LOG.warning('CMDB query returned None for instanceId: %s', instance_id)
+            
             # 解析 CMDB 返回的 Pod 列表
             cmdb_pods = {}
             if cmdb_response and cmdb_response.get('data'):
-                for pod_data in cmdb_response['data']:
+                for idx, pod_data in enumerate(cmdb_response['data']):
+                    # 记录第一个 pod 的所有字段（用于调试字段名问题）
+                    if idx == 0:
+                        LOG.info('CMDB pod record fields: %s', ', '.join(pod_data.keys()) if pod_data else 'empty')
+                    
                     pod_code = pod_data.get('code')  # CMDB 字段名：code（Pod 名称）
                     if pod_code:
                         cmdb_pods[pod_code] = {
                             'guid': pod_data.get('guid'),  # CMDB 字段名：guid（记录标识符）
                             'asset_id': pod_data.get('asset_id')  # CMDB 字段名：asset_id（K8s Pod UID）
                         }
+                        LOG.info('Found CMDB pod [%d]: code=%s, guid=%s, asset_id=%s', 
+                                idx + 1, pod_code, pod_data.get('guid'), pod_data.get('asset_id'))
+                    else:
+                        LOG.warning('CMDB pod record [%d] has no "code" field: %s', idx + 1, list(pod_data.keys()))
+                LOG.info('Total CMDB pod names found: [%s]', ', '.join(cmdb_pods.keys()) if cmdb_pods else 'None')
             
-            # 2. 对比 K8s 实际的 Pod 列表，找出需要更新的 Pod
-            updates = []
+            # 2. 对比 K8s 实际的 Pod 列表，找出需要创建和更新的 Pod
+            LOG.info('K8s running pods: %s', ', '.join([p['name'] for p in pod_list]) if pod_list else 'None')
+            
+            creates = []  # 需要创建的 Pod
+            updates = []  # 需要更新的 Pod
+            
             for pod_info in pod_list:
                 pod_name = pod_info['name']
                 pod_id = pod_info['id']
                 
-                # 如果 Pod ID 为空，说明 Pod 还没有创建，跳过更新
+                # 如果 Pod ID 为空，说明 Pod 还没有创建，跳过
                 if not pod_id:
-                    LOG.info('Pod %s has no ID yet (not created), skipping CMDB update', pod_name)
+                    LOG.info('Pod %s has no ID yet (not created), skipping CMDB sync', pod_name)
                     continue
                 
                 if pod_name in cmdb_pods:
+                    # Pod 已存在于 CMDB，检查是否需要更新
                     cmdb_pod = cmdb_pods[pod_name]
-                    # 如果 Pod ID 发生变化，需要更新
                     if cmdb_pod['asset_id'] != pod_id:
+                        # Pod ID 发生变化（可能是 Pod 被重建），需要更新
                         updates.append({
                             'guid': cmdb_pod['guid'],  # CMDB 字段名：guid（记录标识符）
                             'asset_id': pod_id  # CMDB 字段名：asset_id（新的 K8s Pod UID）
                         })
-                        LOG.info('Pod %s ID changed: %s -> %s', pod_name, cmdb_pod['asset_id'], pod_id)
+                        LOG.info('Pod %s ID changed: %s -> %s, will update', 
+                                pod_name, cmdb_pod['asset_id'], pod_id)
+                    else:
+                        LOG.debug('Pod %s ID unchanged: %s', pod_name, pod_id)
                 else:
-                    LOG.warning('Pod %s not found in CMDB, skipping update', pod_name)
+                    # Pod 不存在于 CMDB，需要创建
+                    creates.append({
+                        'code': pod_name,  # CMDB 字段名：code（Pod 名称）
+                        'asset_id': pod_id,  # CMDB 字段名：asset_id（K8s Pod UID）
+                        'app_instance': instance_id  # CMDB 字段名：app_instance（关联的 StatefulSet）
+                    })
+                    LOG.info('Pod %s (ID: %s) not found in CMDB, will create', pod_name, pod_id)
             
-            # 3. 批量更新 CMDB
+            # 3. 批量创建和更新 CMDB
+            if creates:
+                LOG.info('Creating %d new pods in CMDB', len(creates))
+                try:
+                    cmdb_client.create('wecmdb', 'pod', creates)
+                    LOG.info('Successfully created %d pods in CMDB', len(creates))
+                except Exception as e:
+                    LOG.error('Failed to create pods in CMDB: %s', str(e))
+            
             if updates:
-                LOG.info('Updating %d pods in CMDB', len(updates))
-                cmdb_client.update('wecmdb', 'pod', updates)
-                LOG.info('Successfully updated pods in CMDB')
-            else:
-                LOG.info('No pod ID changes detected, CMDB sync skipped')
+                LOG.info('Updating %d existing pods in CMDB', len(updates))
+                try:
+                    cmdb_client.update('wecmdb', 'pod', updates)
+                    LOG.info('Successfully updated %d pods in CMDB', len(updates))
+                except Exception as e:
+                    LOG.error('Failed to update pods in CMDB: %s', str(e))
+            
+            if not creates and not updates:
+                LOG.info('All pods in sync with CMDB, no changes needed')
                 
         except Exception as e:
             LOG.error('Failed to sync pods to CMDB: %s', str(e))
@@ -1183,8 +1228,8 @@ class StatefulSet:
         # 将 Pod 列表转换为字符串格式（用分号拼接），方便页面显示
         pods_str = ';'.join([pod['name'] for pod in pod_list]) if pod_list else ''
         
-        # TODO: k8s为异步接口，是否需要等待真正执行完毕
-        return {
+        # 构建返回结果
+        result = {
             'id': exists_resource.metadata.uid,
             'name': exists_resource.metadata.name,
             'correlation_id': resource_id,
@@ -1192,6 +1237,14 @@ class StatefulSet:
             'port': port_str,
             'pods': pods_str  # 返回 Pod 名称字符串，用分号拼接
         }
+        
+        # 记录返回信息到日志（方便使用 docker logs 查看）
+        LOG.info('StatefulSet apply result: id=%s, name=%s, correlation_id=%s, clusterIP=%s, port=%s, pods=%s',
+                result['id'], result['name'], result['correlation_id'], 
+                result['clusterIP'], result['port'], result['pods'])
+        
+        # TODO: k8s为异步接口，是否需要等待真正执行完毕
+        return result
 
     def remove(self, data):
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
