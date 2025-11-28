@@ -137,11 +137,11 @@ def _generate_http_probe(ports, image=None):
             'port': port,
             'scheme': 'HTTP'
         },
-        'initialDelaySeconds': 30,
-        'periodSeconds': 10,
-        'timeoutSeconds': 5,
-        'successThreshold': 1,
-        'failureThreshold': 3
+        'initialDelaySeconds': 60,      # 增加到60秒，给足启动时间
+        'periodSeconds': 10,             # 每10秒检查一次
+        'timeoutSeconds': 5,             # 5秒超时
+        'successThreshold': 1,           # 成功1次即认为健康
+        'failureThreshold': 6            # 失败6次才重启（60秒容错窗口）
     }
 
 
@@ -202,11 +202,11 @@ def _generate_tcp_probe(ports):
         'tcpSocket': {
             'port': port
         },
-        'initialDelaySeconds': 30,
-        'periodSeconds': 10,
-        'timeoutSeconds': 5,
-        'successThreshold': 1,
-        'failureThreshold': 3
+        'initialDelaySeconds': 60,      # 增加到60秒，给足启动时间
+        'periodSeconds': 10,             # 每10秒检查一次
+        'timeoutSeconds': 5,             # 5秒超时
+        'successThreshold': 1,           # 成功1次即认为健康
+        'failureThreshold': 6            # 失败6次才重启（60秒容错窗口）
     }
 
 
@@ -237,11 +237,11 @@ def _generate_pidof_probe(process_name, process_keyword):
                 command
             ]
         },
-        'initialDelaySeconds': 30,
-        'periodSeconds': 10,
-        'timeoutSeconds': 5,
-        'successThreshold': 1,
-        'failureThreshold': 3
+        'initialDelaySeconds': 60,      # 增加到60秒，给足启动时间
+        'periodSeconds': 10,             # 每10秒检查一次
+        'timeoutSeconds': 5,             # 5秒超时
+        'successThreshold': 1,           # 成功1次即认为健康
+        'failureThreshold': 6            # 失败6次才重启（60秒容错窗口）
     }
 
 
@@ -262,11 +262,11 @@ def _generate_ps_probe(process_name, process_keyword):
                 f"ps -eo 'pid,comm,pcpu,rsz,args' | awk '($2 == \"{process_name}\" || $0 ~ /{process_keyword}/) && NR > 1 {{exit 0}} END {{if (NR <= 1) exit 1; exit 1}}'"
             ]
         },
-        'initialDelaySeconds': 30,
-        'periodSeconds': 10,
-        'timeoutSeconds': 5,
-        'successThreshold': 1,
-        'failureThreshold': 3
+        'initialDelaySeconds': 60,      # 增加到60秒，给足启动时间
+        'periodSeconds': 10,             # 每10秒检查一次
+        'timeoutSeconds': 5,             # 5秒超时
+        'successThreshold': 1,           # 成功1次即认为健康
+        'failureThreshold': 6            # 失败6次才重启（60秒容错窗口）
     }
 
 # ==================== End of 健康检查探针辅助函数 ====================
