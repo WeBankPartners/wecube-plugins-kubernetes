@@ -23,7 +23,7 @@ def _generate_liveness_probe(container, process_name=None, process_keyword=None,
     智能生成 Liveness Probe 配置
     
     Args:
-        container: 容器配置字典（包含 name、ports 等信息）
+        container: 容器配置字典（包含 name、ports、image 等信息）
         process_name: 进程名称
         process_keyword: 进程关键字
         probe_type: 探针类型 ('auto', 'http', 'tcp', 'exec', 'pidof', 'none')
@@ -38,14 +38,15 @@ def _generate_liveness_probe(container, process_name=None, process_keyword=None,
     
     container_name = container.get('name', '')
     ports = container.get('ports', [])
+    image = container.get('image', '')
     
     # 自动模式：智能选择最合适的探针类型
     if probe_type == 'auto':
-        probe_type = _auto_detect_probe_type(container_name, ports, process_name)
+        probe_type = _auto_detect_probe_type(container_name, ports, process_name, image)
     
     # 根据探针类型生成配置
     if probe_type == 'http':
-        return _generate_http_probe(ports)
+        return _generate_http_probe(ports, image)
     elif probe_type == 'tcp':
         return _generate_tcp_probe(ports)
     elif probe_type == 'pidof':
@@ -57,15 +58,16 @@ def _generate_liveness_probe(container, process_name=None, process_keyword=None,
         return _generate_pidof_probe(process_name, process_keyword)
 
 
-def _auto_detect_probe_type(container_name, ports, process_name):
+def _auto_detect_probe_type(container_name, ports, process_name, image=None):
     """
     自动检测最合适的探针类型
     
     优先级：
     1. 如果有 HTTP 服务端口 (80, 8080, 3000 等) → HTTP 探针
     2. 如果有任意端口 → TCP 探针
-    3. 如果只有进程名 → pidof 探针（兼容性好）
-    4. 其他情况 → TCP 探针（最通用）
+    3. 如果镜像是已知的 Web 服务器（nginx、apache、tomcat 等）→ HTTP 探针 + 推断默认端口
+    4. 如果只有进程名 → pidof 探针（兼容性好）
+    5. 其他情况 → TCP 探针（最通用）
     """
     
     # 常见的 HTTP 服务端口
@@ -82,6 +84,21 @@ def _auto_detect_probe_type(container_name, ports, process_name):
         LOG.info('Detected service ports, using TCP probe')
         return 'tcp'
     
+    # 没有端口配置，尝试从镜像名称推断服务类型
+    if image:
+        image_lower = image.lower()
+        
+        # 检测常见的 Web 服务器镜像
+        WEB_SERVER_PATTERNS = [
+            'nginx', 'httpd', 'apache', 'tomcat', 'jetty',
+            'caddy', 'traefik', 'haproxy', 'lighttpd'
+        ]
+        
+        for pattern in WEB_SERVER_PATTERNS:
+            if pattern in image_lower:
+                LOG.info('Detected web server image (%s), using HTTP probe with inferred port', pattern)
+                return 'http'
+    
     # 没有端口配置，但有进程名
     if process_name:
         LOG.info('No ports configured, using pidof probe for process: %s', process_name)
@@ -91,13 +108,28 @@ def _auto_detect_probe_type(container_name, ports, process_name):
     return 'tcp'
 
 
-def _generate_http_probe(ports):
-    """生成 HTTP 探针（最可靠，适用于 Web 服务）"""
-    if not ports:
-        return None
+def _generate_http_probe(ports, image=None):
+    """
+    生成 HTTP 探针（最可靠，适用于 Web 服务）
     
-    # 使用第一个端口
-    port = ports[0].get('containerPort')
+    如果没有配置端口，会尝试从镜像名推断默认端口
+    """
+    port = None
+    
+    # 1. 优先使用配置的端口
+    if ports and len(ports) > 0:
+        port = ports[0].get('containerPort')
+    
+    # 2. 如果没有配置端口，从镜像名推断
+    if not port and image:
+        port = _infer_default_port_from_image(image)
+    
+    # 3. 仍然没有端口，使用默认的 80
+    if not port:
+        LOG.warning('No port configured for HTTP probe, using default port 80')
+        port = 80
+    
+    LOG.info('Using HTTP probe on port %s (image: %s)', port, image or 'unknown')
     
     return {
         'httpGet': {
@@ -111,6 +143,51 @@ def _generate_http_probe(ports):
         'successThreshold': 1,
         'failureThreshold': 3
     }
+
+
+def _infer_default_port_from_image(image):
+    """
+    从镜像名称推断默认端口
+    
+    Args:
+        image: 镜像名称（例如：nginx, tomcat:9.0, registry.io/apache:latest）
+    
+    Returns:
+        int: 推断的端口号，如果无法推断则返回 None
+    """
+    if not image:
+        return None
+    
+    image_lower = image.lower()
+    
+    # 常见服务的默认端口映射
+    PORT_MAPPINGS = {
+        'nginx': 80,
+        'httpd': 80,
+        'apache': 80,
+        'tomcat': 8080,
+        'jetty': 8080,
+        'wildfly': 8080,
+        'jboss': 8080,
+        'caddy': 80,
+        'traefik': 80,
+        'haproxy': 80,
+        'lighttpd': 80,
+        'redis': 6379,
+        'mysql': 3306,
+        'mariadb': 3306,
+        'postgres': 5432,
+        'postgresql': 5432,
+        'mongodb': 27017,
+        'mongo': 27017
+    }
+    
+    for service_name, default_port in PORT_MAPPINGS.items():
+        if service_name in image_lower:
+            LOG.info('Inferred port %d for image containing "%s"', default_port, service_name)
+            return default_port
+    
+    return None
 
 
 def _generate_tcp_probe(ports):
