@@ -22,11 +22,27 @@ RUN apk add --no-cache --timeout 30 \
     && rm -rf /var/cache/apk/*
 
 # 安装 AWS CLI（用于 MinIO/S3 下载）
-RUN pip3 install --no-cache-dir awscli
+# 优先使用腾讯云镜像加速安装
+RUN pip3 install --no-cache-dir -i https://mirrors.cloud.tencent.com/pypi/simple/ awscli && \
+    aws --version
 
 # 安装 MinIO Client（mc）作为备用方案
-RUN wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc && \
-    chmod +x /usr/local/bin/mc
+# 优先使用国内源，设置更短的超时时间避免卡死
+# 注意：如果网络环境无法下载 mc，会跳过此步骤，仅使用 AWS CLI
+RUN set -e; \
+    echo "Downloading MinIO Client..."; \
+    MC_DOWNLOADED=false; \
+    # 尝试 1: 国内 CDN 镜像（最快）
+    (wget --timeout=5 --tries=1 -q http://dl.minio.org.cn/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc 2>/dev/null && MC_DOWNLOADED=true && echo "Downloaded from dl.minio.org.cn") || \
+    # 尝试 2: MinIO 官方源
+    (wget --timeout=5 --tries=1 -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc 2>/dev/null && MC_DOWNLOADED=true && echo "Downloaded from dl.min.io") || \
+    # 如果都失败，创建占位符
+    (echo "Warning: Failed to download MinIO Client, will rely on AWS CLI only" && \
+     echo '#!/bin/bash' > /usr/local/bin/mc && \
+     echo 'echo "MinIO Client not available"' >> /usr/local/bin/mc && \
+     echo 'exit 1' >> /usr/local/bin/mc); \
+    chmod +x /usr/local/bin/mc || true; \
+    /usr/local/bin/mc --version 2>/dev/null || echo "MC not installed, AWS CLI will be used"
 
 # 创建目标目录
 RUN mkdir -p /shared-data/diff-var-files

@@ -247,13 +247,42 @@ def convert_volume(items):
 
 
 def convert_resource_limit(cpu, memory):
+    """
+    转换资源限制配置
+    
+    Args:
+        cpu: CPU 限制，支持格式：'1', '0.5', '500m' 等
+        memory: 内存限制，支持格式：'2Gi', '512Mi', '2' (自动添加 Gi 单位)
+    
+    Returns:
+        资源限制字典，包含 limits 和 requests
+    """
     ret = {'limits': {}, 'requests': {}}
+    
     if cpu:
         ret['limits'].setdefault('cpu', cpu)
         ret['requests'].setdefault('cpu', cpu)
+    
     if memory:
-        ret['limits'].setdefault('memory', memory)
-        ret['requests'].setdefault('memory', memory)
+        # 修复：如果 memory 是纯数字，自动添加 Gi 单位
+        # 避免出现 memory="2" 被当作 2 字节的问题
+        memory_str = str(memory).strip()
+        
+        # 检查是否已经包含单位（Ki, Mi, Gi, Ti, K, M, G, T, m）
+        has_unit = False
+        for unit in ['Ki', 'Mi', 'Gi', 'Ti', 'K', 'M', 'G', 'T', 'm']:
+            if memory_str.endswith(unit):
+                has_unit = True
+                break
+        
+        # 如果是纯数字，自动添加 Gi 单位（假设用户输入的是 GB）
+        if not has_unit and memory_str.replace('.', '', 1).isdigit():
+            memory_str = memory_str + 'Gi'
+            LOG.info(f'Auto-added unit to memory limit: {memory} -> {memory_str}')
+        
+        ret['limits'].setdefault('memory', memory_str)
+        ret['requests'].setdefault('memory', memory_str)
+    
     return ret
 
 
