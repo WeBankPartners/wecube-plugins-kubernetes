@@ -1,26 +1,32 @@
 # 基于 Alpine Linux，轻量级且包含必要的工具
-# 支持通过构建参数指定基础镜像，解决镜像源访问问题
-# 使用方法：docker build --build-arg BASE_IMAGE=alpine:3.18 .
-# 可选镜像源：
-# - 网易: hub-mirror.c.163.com/library/alpine:3.18
-# - 阿里云: registry.cn-hangzhou.aliyuncs.com/library/alpine:3.18
-# - 官方镜像: alpine:3.18
-# 注意：如果本地已有镜像，直接使用镜像名（不带 registry 前缀）可以避免镜像加速器自动转换
-ARG BASE_IMAGE=alpine:3.18
-FROM ${BASE_IMAGE}
+# 直接使用 alpine:3.18，兼容老版本 Docker
+# 如果需要使用其他镜像源，可以先手动 tag：
+# docker tag <mirror-image> alpine:3.18
+FROM alpine:3.18
 
-# 配置 Alpine 使用国内镜像源（加速 apk 包下载）
-# 优先使用阿里云镜像源
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+# 配置 Alpine 使用腾讯云镜像源（内网可访问）
+RUN echo "https://mirrors.tencent.com/alpine/v3.18/main" > /etc/apk/repositories && \
+    echo "https://mirrors.tencent.com/alpine/v3.18/community" >> /etc/apk/repositories
 
-# 安装必要的工具：wget, curl, tar
+# 安装必要的工具：wget, curl, tar, aws-cli, mc (MinIO Client)
 # 这些工具用于下载和解压 package 文件
-RUN apk add --no-cache \
+# aws-cli 和 mc 用于从 MinIO/S3 下载文件
+# 使用 --timeout 参数避免长时间卡住
+RUN apk add --no-cache --timeout 30 \
     wget \
     curl \
     tar \
     bash \
+    python3 \
+    py3-pip \
     && rm -rf /var/cache/apk/*
+
+# 安装 AWS CLI（用于 MinIO/S3 下载）
+RUN pip3 install --no-cache-dir awscli
+
+# 安装 MinIO Client（mc）作为备用方案
+RUN wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /usr/local/bin/mc && \
+    chmod +x /usr/local/bin/mc
 
 # 创建目标目录
 RUN mkdir -p /shared-data/diff-var-files

@@ -273,10 +273,23 @@ if [ "$PUSH_TO_REGISTRY" = "true" ]; then
         echo "✓ Login successful!"
     else
         echo "✗ Failed to login to registry!"
-        echo "You can manually push the image later with:"
+        echo ""
+        echo "常见原因："
+        echo "1. HTTP 仓库问题 - 如果错误包含 'http: server gave HTTP response to HTTPS client'"
+        echo "   解决方法：运行修复脚本"
+        echo "   sudo ./fix-docker-http-registry.sh $PRIVATE_REGISTRY"
+        echo ""
+        echo "2. 网络连接问题 - 检查仓库是否可访问："
+        echo "   curl -I http://$PRIVATE_REGISTRY/v2/"
+        echo ""
+        echo "3. 凭证错误 - 检查用户名和密码是否正确"
+        echo ""
+        echo "手动推送镜像："
         echo "  docker login $PRIVATE_REGISTRY -u $REGISTRY_USERNAME"
         echo "  docker tag $FULL_IMAGE_NAME $PRIVATE_IMAGE_NAME"
         echo "  docker push $PRIVATE_IMAGE_NAME"
+        echo ""
+        echo "详细故障排查请查看：FIX_PUSH_ERROR.md"
         exit 1
     fi
     
