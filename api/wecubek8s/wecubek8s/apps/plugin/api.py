@@ -3,6 +3,7 @@
 from __future__ import absolute_import
 
 import logging
+import time
 
 from talos.core import config
 from talos.core.i18n import _
@@ -1223,6 +1224,48 @@ class StatefulSet:
         
         # 使用 correlation_id（即 instanceId）同步 Pod 信息到 CMDB
         if resource_id and pod_list:
+            # 如果 Pod 还没有 ID，等待一段时间让 Pod 创建完成
+            max_wait_time = 30  # 最多等待 30 秒
+            wait_interval = 2   # 每 2 秒检查一次
+            waited_time = 0
+            
+            # 检查是否有 Pod 没有 ID
+            pods_without_id = [p for p in pod_list if not p.get('id')]
+            if pods_without_id:
+                LOG.info('Waiting for %d pod(s) to be created: %s', 
+                        len(pods_without_id), ', '.join([p['name'] for p in pods_without_id]))
+                
+                while waited_time < max_wait_time and pods_without_id:
+                    time.sleep(wait_interval)
+                    waited_time += wait_interval
+                    
+                    # 重新查询 Pod 状态
+                    try:
+                        pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
+                        if pods and pods.items:
+                            # 更新 pod_list 中的 ID
+                            pod_dict = {pod.metadata.name: pod.metadata.uid for pod in pods.items}
+                            for pod_info in pod_list:
+                                if pod_info['name'] in pod_dict:
+                                    pod_info['id'] = pod_dict[pod_info['name']]
+                            
+                            # 重新检查还有哪些 Pod 没有 ID
+                            pods_without_id = [p for p in pod_list if not p.get('id')]
+                            if not pods_without_id:
+                                LOG.info('All pods created successfully after waiting %d seconds', waited_time)
+                                break
+                            else:
+                                LOG.info('Still waiting for %d pod(s) after %d seconds: %s', 
+                                        len(pods_without_id), waited_time, 
+                                        ', '.join([p['name'] for p in pods_without_id]))
+                    except Exception as e:
+                        LOG.warning('Failed to query pod status during wait: %s', str(e))
+                
+                if pods_without_id:
+                    LOG.warning('Timeout waiting for pods to be created after %d seconds, will sync available pods only', 
+                               max_wait_time)
+            
+            # 同步 Pod 信息到 CMDB（只同步有 ID 的 Pod）
             self._sync_pods_to_cmdb(k8s_client, data['namespace'], pod_list, resource_id)
         
         # 将 Pod 列表转换为字符串格式（用分号拼接），方便页面显示
