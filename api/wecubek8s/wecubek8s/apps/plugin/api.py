@@ -1225,7 +1225,14 @@ class StatefulSet:
         # 使用 correlation_id（即 instanceId）同步 Pod 信息到 CMDB
         if resource_id and pod_list:
             # 如果 Pod 还没有 ID，等待一段时间让 Pod 创建完成
-            max_wait_time = 30  # 最多等待 30 秒
+            # 注意：如果有 packageUrl，Pod 需要先运行 init container 下载部署包，会比较慢
+            has_package = bool(data.get('packageUrl'))
+            if has_package:
+                max_wait_time = 120  # 有部署包时等待 120 秒（init container 下载需要时间）
+                LOG.info('Deployment has packageUrl, extending wait time to %d seconds', max_wait_time)
+            else:
+                max_wait_time = 30   # 无部署包时等待 30 秒
+            
             wait_interval = 2   # 每 2 秒检查一次
             waited_time = 0
             
@@ -1245,6 +1252,26 @@ class StatefulSet:
                         if pods and pods.items:
                             # 更新 pod_list 中的 ID
                             pod_dict = {pod.metadata.name: pod.metadata.uid for pod in pods.items}
+                            
+                            # 同时记录 Pod 的状态信息（用于调试）
+                            for pod in pods.items:
+                                phase = pod.status.phase if pod.status else 'Unknown'
+                                # 检查 init container 状态
+                                init_status = ''
+                                if pod.status and pod.status.init_container_statuses:
+                                    for init_container in pod.status.init_container_statuses:
+                                        if init_container.state:
+                                            if init_container.state.running:
+                                                init_status = f' [Init: {init_container.name} running]'
+                                            elif init_container.state.waiting:
+                                                reason = init_container.state.waiting.reason or 'Unknown'
+                                                init_status = f' [Init: {init_container.name} waiting - {reason}]'
+                                            elif init_container.state.terminated:
+                                                init_status = f' [Init: {init_container.name} completed]'
+                                
+                                if pod.metadata.name in [p['name'] for p in pods_without_id]:
+                                    LOG.debug('Pod %s status: %s%s', pod.metadata.name, phase, init_status)
+                            
                             for pod_info in pod_list:
                                 if pod_info['name'] in pod_dict:
                                     pod_info['id'] = pod_dict[pod_info['name']]
@@ -1289,6 +1316,88 @@ class StatefulSet:
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return result
 
+    def sync_pods_to_cmdb(self, data):
+        """
+        独立的 CMDB 同步接口，用于补偿同步
+        
+        参数:
+            data: {
+                'cluster': 集群名称,
+                'namespace': 命名空间,
+                'name': StatefulSet 名称,
+                'correlation_id': instanceId（用于关联 CMDB）
+            }
+        """
+        cluster_info = db_resource.Cluster().list({'name': data['cluster']})
+        if not cluster_info:
+            raise exceptions.ValidationError(attribute='cluster',
+                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+        cluster_info = cluster_info[0]
+        
+        # 确保 namespace 有值
+        if not data.get('namespace') or data['namespace'].strip() == '':
+            data['namespace'] = 'default'
+        
+        # 确保 api_server 有正确的协议前缀
+        api_server = cluster_info['api_server']
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            api_server = 'https://' + api_server
+        
+        k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
+        k8s_client = k8s.Client(k8s_auth)
+        resource_name = api_utils.escape_name(data['name'])
+        correlation_id = data['correlation_id']
+        
+        # 查询 Pod 列表
+        escaped_name = api_utils.escape_label_value(data['name'])
+        label_selector = f"{const.Tag.POD_AUTO_TAG}={escaped_name}"
+        
+        pod_list = []
+        try:
+            pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
+            if pods and pods.items:
+                for pod in pods.items:
+                    pod_list.append({
+                        'name': pod.metadata.name,
+                        'id': pod.metadata.uid
+                    })
+                LOG.info('Found %d pods for StatefulSet %s in namespace %s', 
+                        len(pod_list), resource_name, data['namespace'])
+            else:
+                LOG.warning('No pods found for StatefulSet %s in namespace %s', 
+                           resource_name, data['namespace'])
+                return {
+                    'result': 'success',
+                    'message': f'No pods found for StatefulSet {resource_name}',
+                    'synced_count': 0
+                }
+        except Exception as e:
+            LOG.error('Failed to query pods for StatefulSet %s: %s', resource_name, str(e))
+            raise exceptions.PluginError(message=f'Failed to query pods: {str(e)}')
+        
+        # 同步到 CMDB
+        if correlation_id and pod_list:
+            try:
+                self._sync_pods_to_cmdb(k8s_client, data['namespace'], pod_list, correlation_id)
+                synced_count = len([p for p in pod_list if p.get('id')])
+                LOG.info('Successfully synced %d pods to CMDB for instanceId: %s', 
+                        synced_count, correlation_id)
+                return {
+                    'result': 'success',
+                    'message': f'Synced {synced_count} pods to CMDB',
+                    'synced_count': synced_count,
+                    'correlation_id': correlation_id
+                }
+            except Exception as e:
+                LOG.error('Failed to sync pods to CMDB: %s', str(e))
+                raise exceptions.PluginError(message=f'Failed to sync pods to CMDB: {str(e)}')
+        else:
+            return {
+                'result': 'success',
+                'message': 'No correlation_id or pods to sync',
+                'synced_count': 0
+            }
+    
     def remove(self, data):
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
