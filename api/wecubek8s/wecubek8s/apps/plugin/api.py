@@ -11,10 +11,188 @@ from wecubek8s.common import exceptions
 from wecubek8s.common import const
 from wecubek8s.db import resource as db_resource
 from wecubek8s.apps.plugin import utils as api_utils
-from wecubek8s.apps.plugin import probe_helper
 
 CONF = config.CONF
 LOG = logging.getLogger(__name__)
+
+
+# ==================== 健康检查探针辅助函数 ====================
+
+def _generate_liveness_probe(container, process_name=None, process_keyword=None, probe_type='auto'):
+    """
+    智能生成 Liveness Probe 配置
+    
+    Args:
+        container: 容器配置字典（包含 name、ports 等信息）
+        process_name: 进程名称
+        process_keyword: 进程关键字
+        probe_type: 探针类型 ('auto', 'http', 'tcp', 'exec', 'pidof', 'none')
+    
+    Returns:
+        dict: Liveness Probe 配置，如果返回 None 则不添加探针
+    """
+    
+    # 如果明确指定不使用探针
+    if probe_type == 'none':
+        return None
+    
+    container_name = container.get('name', '')
+    ports = container.get('ports', [])
+    
+    # 自动模式：智能选择最合适的探针类型
+    if probe_type == 'auto':
+        probe_type = _auto_detect_probe_type(container_name, ports, process_name)
+    
+    # 根据探针类型生成配置
+    if probe_type == 'http':
+        return _generate_http_probe(ports)
+    elif probe_type == 'tcp':
+        return _generate_tcp_probe(ports)
+    elif probe_type == 'pidof':
+        return _generate_pidof_probe(process_name, process_keyword)
+    elif probe_type == 'exec':
+        return _generate_ps_probe(process_name, process_keyword)
+    else:
+        LOG.warning('Unknown probe type: %s, fallback to pidof', probe_type)
+        return _generate_pidof_probe(process_name, process_keyword)
+
+
+def _auto_detect_probe_type(container_name, ports, process_name):
+    """
+    自动检测最合适的探针类型
+    
+    优先级：
+    1. 如果有 HTTP 服务端口 (80, 8080, 3000 等) → HTTP 探针
+    2. 如果有任意端口 → TCP 探针
+    3. 如果只有进程名 → pidof 探针（兼容性好）
+    4. 其他情况 → TCP 探针（最通用）
+    """
+    
+    # 常见的 HTTP 服务端口
+    HTTP_PORTS = {80, 443, 8080, 8000, 8008, 3000, 5000, 9000}
+    
+    if ports:
+        for port_config in ports:
+            port = port_config.get('containerPort')
+            if port in HTTP_PORTS:
+                LOG.info('Auto-detected HTTP service on port %s, using HTTP probe', port)
+                return 'http'
+        
+        # 有端口但不是常见 HTTP 端口，使用 TCP 探针
+        LOG.info('Detected service ports, using TCP probe')
+        return 'tcp'
+    
+    # 没有端口配置，但有进程名
+    if process_name:
+        LOG.info('No ports configured, using pidof probe for process: %s', process_name)
+        return 'pidof'
+    
+    # 默认使用 TCP 探针（如果有端口）
+    return 'tcp'
+
+
+def _generate_http_probe(ports):
+    """生成 HTTP 探针（最可靠，适用于 Web 服务）"""
+    if not ports:
+        return None
+    
+    # 使用第一个端口
+    port = ports[0].get('containerPort')
+    
+    return {
+        'httpGet': {
+            'path': '/',
+            'port': port,
+            'scheme': 'HTTP'
+        },
+        'initialDelaySeconds': 30,
+        'periodSeconds': 10,
+        'timeoutSeconds': 5,
+        'successThreshold': 1,
+        'failureThreshold': 3
+    }
+
+
+def _generate_tcp_probe(ports):
+    """生成 TCP 探针（通用，只检查端口是否开放）"""
+    if not ports:
+        return None
+    
+    # 使用第一个端口
+    port = ports[0].get('containerPort')
+    
+    return {
+        'tcpSocket': {
+            'port': port
+        },
+        'initialDelaySeconds': 30,
+        'periodSeconds': 10,
+        'timeoutSeconds': 5,
+        'successThreshold': 1,
+        'failureThreshold': 3
+    }
+
+
+def _generate_pidof_probe(process_name, process_keyword):
+    """
+    生成 pidof 探针（轻量级，大多数镜像都支持）
+    
+    pidof 命令比 ps 更轻量，几乎所有 Linux 发行版都内置
+    """
+    if not process_name:
+        return None
+    
+    # pidof 在大多数镜像中都可用（busybox、alpine 等）
+    # 如果 pidof 不可用，尝试使用 pgrep（也很常见）
+    # 最后备用方案：检查 /proc 目录（最兼容）
+    
+    command = (
+        f"pidof {process_name} || "
+        f"pgrep -f '{process_keyword}' || "
+        f"ps aux | grep '{process_keyword}' | grep -v grep"
+    )
+    
+    return {
+        'exec': {
+            'command': [
+                '/bin/sh',
+                '-c',
+                command
+            ]
+        },
+        'initialDelaySeconds': 30,
+        'periodSeconds': 10,
+        'timeoutSeconds': 5,
+        'successThreshold': 1,
+        'failureThreshold': 3
+    }
+
+
+def _generate_ps_probe(process_name, process_keyword):
+    """
+    生成 ps 探针（原有逻辑，仅用于明确指定的场景）
+    
+    注意：很多轻量级镜像没有 ps 命令，不推荐使用
+    """
+    if not process_name or not process_keyword:
+        return None
+    
+    return {
+        'exec': {
+            'command': [
+                '/bin/sh',
+                '-c',
+                f"ps -eo 'pid,comm,pcpu,rsz,args' | awk '($2 == \"{process_name}\" || $0 ~ /{process_keyword}/) && NR > 1 {{exit 0}} END {{if (NR <= 1) exit 1; exit 1}}'"
+            ]
+        },
+        'initialDelaySeconds': 30,
+        'periodSeconds': 10,
+        'timeoutSeconds': 5,
+        'successThreshold': 1,
+        'failureThreshold': 3
+    }
+
+# ==================== End of 健康检查探针辅助函数 ====================
 
 
 class Cluster:
@@ -172,7 +350,7 @@ class Deployment:
         
         for container in containers:
             # 使用智能探针生成器
-            liveness_probe = probe_helper.generate_liveness_probe(
+            liveness_probe = _generate_liveness_probe(
                 container=container,
                 process_name=process_name,
                 process_keyword=process_keyword,
@@ -508,7 +686,7 @@ class StatefulSet:
         
         for container in containers:
             # 使用智能探针生成器
-            liveness_probe = probe_helper.generate_liveness_probe(
+            liveness_probe = _generate_liveness_probe(
                 container=container,
                 process_name=process_name,
                 process_keyword=process_keyword,
