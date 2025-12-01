@@ -1198,9 +1198,9 @@ class StatefulSet:
                 for pod in pods.items:
                     pod_list.append({
                         'name': pod.metadata.name,
-                        'id': pod.metadata.uid
+                        'id': pod.metadata.uid if pod.metadata.uid else ''  # 即使 UID 为空也记录 Pod
                     })
-                LOG.info('Found %d running pods for StatefulSet %s in namespace %s', 
+                LOG.info('Found %d pods for StatefulSet %s in namespace %s (some may not have UID yet)', 
                         len(pod_list), resource_name, data['namespace'])
             else:
                 # 如果还没有 Pod 运行，使用预期的 Pod 名称（ID 暂时为空）
@@ -1228,7 +1228,7 @@ class StatefulSet:
             # 注意：如果有 packageUrl，Pod 需要先运行 init container 下载部署包，会比较慢
             has_package = bool(data.get('packageUrl'))
             if has_package:
-                max_wait_time = 120  # 有部署包时等待 120 秒（init container 下载需要时间）
+                max_wait_time = 240  # 有部署包时等待 240 秒（4分钟，init container 下载需要时间）
                 LOG.info('Deployment has packageUrl, extending wait time to %d seconds', max_wait_time)
             else:
                 max_wait_time = 30   # 无部署包时等待 30 秒
@@ -1250,12 +1250,14 @@ class StatefulSet:
                     try:
                         pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
                         if pods and pods.items:
-                            # 更新 pod_list 中的 ID
-                            pod_dict = {pod.metadata.name: pod.metadata.uid for pod in pods.items}
+                            # 更新 pod_list 中的 ID（只记录有 UID 的 Pod）
+                            pod_dict = {pod.metadata.name: pod.metadata.uid 
+                                       for pod in pods.items if pod.metadata.uid}
                             
                             # 同时记录 Pod 的状态信息（用于调试）
                             for pod in pods.items:
                                 phase = pod.status.phase if pod.status else 'Unknown'
+                                uid_status = f'UID: {pod.metadata.uid[:8]}...' if pod.metadata.uid else 'UID: None'
                                 # 检查 init container 状态
                                 init_status = ''
                                 if pod.status and pod.status.init_container_statuses:
@@ -1270,7 +1272,7 @@ class StatefulSet:
                                                 init_status = f' [Init: {init_container.name} completed]'
                                 
                                 if pod.metadata.name in [p['name'] for p in pods_without_id]:
-                                    LOG.debug('Pod %s status: %s%s', pod.metadata.name, phase, init_status)
+                                    LOG.debug('Pod %s status: %s, %s%s', pod.metadata.name, phase, uid_status, init_status)
                             
                             for pod_info in pod_list:
                                 if pod_info['name'] in pod_dict:
@@ -1289,8 +1291,34 @@ class StatefulSet:
                         LOG.warning('Failed to query pod status during wait: %s', str(e))
                 
                 if pods_without_id:
-                    LOG.warning('Timeout waiting for pods to be created after %d seconds, will sync available pods only', 
+                    LOG.warning('Timeout waiting for pods to be created after %d seconds, will do final check', 
                                max_wait_time)
+            
+            # 在等待循环结束后，做最后一次强制查询，确保获取到所有 Pod 的 UID
+            # 即使超时，Pod 也可能已经被创建，只是还没获取到 UID
+            try:
+                LOG.info('Performing final pod status check...')
+                pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
+                if pods and pods.items:
+                    pod_dict = {pod.metadata.name: pod.metadata.uid for pod in pods.items if pod.metadata.uid}
+                    updated_count = 0
+                    for pod_info in pod_list:
+                        if not pod_info.get('id') and pod_info['name'] in pod_dict:
+                            pod_info['id'] = pod_dict[pod_info['name']]
+                            updated_count += 1
+                    if updated_count > 0:
+                        LOG.info('Final check found %d additional pod(s) with UID', updated_count)
+                    
+                    # 记录最终状态
+                    pods_with_id = [p for p in pod_list if p.get('id')]
+                    pods_without_id = [p for p in pod_list if not p.get('id')]
+                    LOG.info('Final status: %d pod(s) with UID, %d pod(s) without UID', 
+                            len(pods_with_id), len(pods_without_id))
+                    if pods_without_id:
+                        LOG.warning('Pods without UID will not be synced to CMDB: %s', 
+                                   ', '.join([p['name'] for p in pods_without_id]))
+            except Exception as e:
+                LOG.warning('Final pod status check failed: %s', str(e))
             
             # 同步 Pod 信息到 CMDB（只同步有 ID 的 Pod）
             self._sync_pods_to_cmdb(k8s_client, data['namespace'], pod_list, resource_id)
