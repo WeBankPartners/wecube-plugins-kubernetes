@@ -1,21 +1,14 @@
-FROM python:3.7-slim
+FROM ccr.ccs.tencentyun.com/webankpartners/python:3.8.20-slim-bullseye
 LABEL maintainer = "Webank CTB Team"
-# Install logrotate
 # 使用腾讯云镜像源
-RUN if [ -f /etc/apt/sources.list ]; then \
-        sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list && \
-        sed -i 's/security.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list; \
-    fi && \
-    if [ -d /etc/apt/sources.list.d ]; then \
-        find /etc/apt/sources.list.d -name "*.sources" -exec sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' {} \; && \
-        find /etc/apt/sources.list.d -name "*.sources" -exec sed -i 's/security.debian.org/mirrors.cloud.tencent.com/g' {} \; ; \
-    fi
+RUN sed -i 's/deb.debian.org/mirrors.tencentyun.com/g' /etc/apt/sources.list && \
+    sed -i 's/security.debian.org/mirrors.tencentyun.com/g' /etc/apt/sources.list
 COPY api/wecubek8s/requirements.txt /tmp/requirements.txt
 COPY api/wecubek8s/dist/* /tmp/
 # Install && Clean up
 RUN apt update && apt-get -y install gcc python3-dev swig libssl-dev && \
-    pip3 install -i http://mirrors.cloud.tencent.com/pypi/simple/ --trusted-host mirrors.cloud.tencent.com setuptools wheel && \
-    pip3 install -i http://mirrors.cloud.tencent.com/pypi/simple/ --trusted-host mirrors.cloud.tencent.com --no-build-isolation -r /tmp/requirements.txt && \
+    pip3 install -i http://mirrors.tencentyun.com/pypi/simple/ --trusted-host mirrors.tencentyun.com setuptools wheel && \
+    pip3 install -i http://mirrors.tencentyun.com/pypi/simple/ --trusted-host mirrors.tencentyun.com --no-build-isolation -r /tmp/requirements.txt && \
     pip3 install /tmp/*.whl && \
     rm -rf /root/.cache && apt autoclean && \
     rm -rf /tmp/* /var/lib/apt/* /var/cache/* && \
