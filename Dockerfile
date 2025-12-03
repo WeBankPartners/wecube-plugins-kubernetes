@@ -6,7 +6,7 @@ RUN sed -i 's/deb.debian.org/mirrors.tencentyun.com/g' /etc/apt/sources.list && 
 COPY api/wecubek8s/requirements.txt /tmp/requirements.txt
 COPY api/wecubek8s/dist/* /tmp/
 # Install && Clean up
-RUN apt update && apt-get -y install gcc python3-dev swig libssl-dev && \
+RUN apt update && apt-get -y install gcc python3-dev swig libssl-dev libev-dev libc-ares-dev make && \
     pip3 install -i http://mirrors.tencentyun.com/pypi/simple/ --trusted-host mirrors.tencentyun.com setuptools wheel && \
     pip3 install -i http://mirrors.tencentyun.com/pypi/simple/ --trusted-host mirrors.tencentyun.com --no-build-isolation -r /tmp/requirements.txt && \
     pip3 install /tmp/*.whl && \
