@@ -8,7 +8,7 @@ COPY api/wecubek8s/dist/* /tmp/
 # Install && Clean up
 RUN apt update && apt-get -y install gcc python3-dev swig libssl-dev libev-dev libc-ares-dev make && \
     pip3 install -i http://mirrors.tencentyun.com/pypi/simple/ --trusted-host mirrors.tencentyun.com setuptools wheel && \
-    pip3 install -i http://mirrors.tencentyun.com/pypi/simple/ --trusted-host mirrors.tencentyun.com --no-build-isolation -r /tmp/requirements.txt && \
+    pip3 install -i http://mirrors.tencentyun.com/pypi/simple/ --trusted-host mirrors.tencentyun.com --no-binary gevent --no-build-isolation -r /tmp/requirements.txt && \
     pip3 install /tmp/*.whl && \
     rm -rf /root/.cache && apt autoclean && \
     rm -rf /tmp/* /var/lib/apt/* /var/cache/* && \
