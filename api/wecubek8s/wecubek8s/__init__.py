@@ -6,8 +6,8 @@ from __future__ import absolute_import
 import sys
 import os
 
-# 强制使用 ares 解析器，避免 DNS 解析消耗线程
-os.environ.setdefault('GEVENT_RESOLVER', 'ares')
+# 使用 thread 解析器（稳定可靠）
+os.environ.setdefault('GEVENT_RESOLVER', 'thread')
 
 import gevent.monkey
 gevent.monkey.patch_all()

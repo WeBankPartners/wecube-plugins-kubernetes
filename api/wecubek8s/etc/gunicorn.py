@@ -8,8 +8,8 @@ from __future__ import absolute_import
 import sys
 import os
 
-# 强制使用 ares 或 dnspython 解析器，避免使用线程池解析 DNS
-os.environ['GEVENT_RESOLVER'] = 'ares'
+# 使用 thread 解析器（稳定可靠）
+os.environ['GEVENT_RESOLVER'] = 'thread'
 
 import gevent.monkey
 gevent.monkey.patch_all()
