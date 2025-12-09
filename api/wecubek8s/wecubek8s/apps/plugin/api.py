@@ -323,12 +323,12 @@ class Deployment:
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.DEPLOYMENT_ID_TAG] = resource_id
         replicas = data['replicas']
-        # 使用 escape_label_value 确保标签值符合 Kubernetes 规范
-        escaped_name = api_utils.escape_label_value(data['name'])
-        pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, escaped_name)
+        # 使用 resource_name 作为标签值，确保标签值与资源名称保持一致（都是小写转换后的值）
+        # 这样可以避免因原始名称大小写不一致导致的标签选择器查询失败
+        pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, resource_name)
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
-        pod_spec_tags[const.Tag.POD_AUTO_TAG] = escaped_name
-        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = escaped_name
+        pod_spec_tags[const.Tag.POD_AUTO_TAG] = resource_name
+        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = resource_name
         
         # 添加 correlation_id 和 instanceId 作为 Pod 标签
         if data.get('correlation_id'):
@@ -659,12 +659,12 @@ class StatefulSet:
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.STATEFULSET_ID_TAG] = resource_id
         replicas = data['replicas']
-        # 使用 escape_label_value 确保标签值符合 Kubernetes 规范
-        escaped_name = api_utils.escape_label_value(data['name'])
-        pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, escaped_name)
+        # 使用 resource_name 作为标签值，确保标签值与资源名称保持一致（都是小写转换后的值）
+        # 这样可以避免因原始名称大小写不一致导致的标签选择器查询失败
+        pod_spec_affinity = api_utils.convert_affinity(data['affinity'], const.Tag.POD_AFFINITY_TAG, resource_name)
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
-        pod_spec_tags[const.Tag.POD_AUTO_TAG] = escaped_name
-        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = escaped_name
+        pod_spec_tags[const.Tag.POD_AUTO_TAG] = resource_name
+        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = resource_name
         
         # 添加 correlation_id 和 instanceId 作为 Pod 标签
         if data.get('correlation_id'):
@@ -861,11 +861,13 @@ class StatefulSet:
             return
         
         # 获取 Pod 标签作为 Service selector
-        # 注意：标签值也需要转义以符合 Kubernetes 标签规范
+        # 注意：标签值必须与创建 StatefulSet 时使用的值保持一致
+        # StatefulSet 的 resource_name 是通过 escape_service_name(data['name']) 生成的
+        resource_name = api_utils.escape_service_name(data['name'])
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
-        # 使用 escape_label_value 确保标签值符合 Kubernetes 规范
-        pod_spec_tags[const.Tag.POD_AUTO_TAG] = api_utils.escape_label_value(data['name'])
-        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = api_utils.escape_label_value(data['name'])
+        # 使用 resource_name 作为标签值，与创建 StatefulSet 时保持一致
+        pod_spec_tags[const.Tag.POD_AUTO_TAG] = resource_name
+        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = resource_name
         
         # 获取 Service 端口
         # 优先级：1. 用户提供的 servicePorts 2. 从 image_port 推断
@@ -1107,7 +1109,8 @@ class StatefulSet:
         k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
         k8s_client.ensure_namespace(data['namespace'])
-        resource_name = api_utils.escape_name(data['name'])
+        # StatefulSet 的名称使用 escape_service_name（不允许点号），与 to_resource 方法保持一致
+        resource_name = api_utils.escape_service_name(data['name'])
         
         # 生成 StatefulSet 资源模板
         resource_template = self.to_resource(k8s_client, data, cluster_info)
@@ -1140,8 +1143,9 @@ class StatefulSet:
             # 2. 如果没有负载均衡 Service，尝试创建一个
             # 先获取 Pod 标签和端口信息
             pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
-            pod_spec_tags[const.Tag.POD_AUTO_TAG] = api_utils.escape_label_value(data['name'])
-            pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = api_utils.escape_label_value(data['name'])
+            # 使用 resource_name（转换后的小写名称）作为标签值，与创建 StatefulSet 时保持一致
+            pod_spec_tags[const.Tag.POD_AUTO_TAG] = resource_name
+            pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = resource_name
             
             # 获取 Service 端口
             service_ports = []
@@ -1189,9 +1193,8 @@ class StatefulSet:
         
         # 查询实际运行的 Pod，获取真实的 Pod ID
         # 使用 label selector 查询该 StatefulSet 的 Pod
-        # 注意：label 值必须经过 escape 处理以符合 Kubernetes 规范
-        escaped_name = api_utils.escape_label_value(data['name'])
-        label_selector = f"{const.Tag.POD_AUTO_TAG}={escaped_name}"
+        # 注意：标签值使用 resource_name（转换后的小写名称），与创建时保持一致
+        label_selector = f"{const.Tag.POD_AUTO_TAG}={resource_name}"
         try:
             pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
             if pods and pods.items:
@@ -1373,12 +1376,12 @@ class StatefulSet:
         
         k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
-        resource_name = api_utils.escape_name(data['name'])
+        # StatefulSet 的名称使用 escape_service_name（与创建时保持一致）
+        resource_name = api_utils.escape_service_name(data['name'])
         correlation_id = data['correlation_id']
         
-        # 查询 Pod 列表
-        escaped_name = api_utils.escape_label_value(data['name'])
-        label_selector = f"{const.Tag.POD_AUTO_TAG}={escaped_name}"
+        # 查询 Pod 列表，使用 resource_name 作为标签值（与创建时保持一致）
+        label_selector = f"{const.Tag.POD_AUTO_TAG}={resource_name}"
         
         pod_list = []
         try:
