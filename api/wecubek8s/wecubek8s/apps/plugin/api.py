@@ -640,10 +640,32 @@ class Deployment:
         cluster_info = cluster_info[0]
         k8s_auth = k8s.AuthToken(cluster_info['api_server'], cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
+        
+        # 确保 namespace 有默认值
+        namespace = data.get('namespace', 'default')
+        
         resource_name = api_utils.escape_name(data['name'])
-        exists_resource = k8s_client.get_deployment(resource_name, data['namespace'])
+        
+        # 删除 Deployment（Pod 会被 Kubernetes 自动删除，因为有 OwnerReference）
+        exists_resource = k8s_client.get_deployment(resource_name, namespace)
         if exists_resource is not None:
-            k8s_client.delete_deployment(resource_name, data['namespace'])
+            LOG.info('Deleting Deployment: %s in namespace: %s', resource_name, namespace)
+            k8s_client.delete_deployment(resource_name, namespace)
+        else:
+            LOG.warning('Deployment %s not found in namespace: %s', resource_name, namespace)
+        
+        # 删除关联的 Service（如果存在）
+        service_name = api_utils.escape_name(data.get('serviceName', data['name']))
+        exists_service = k8s_client.get_service(service_name, namespace)
+        if exists_service is not None:
+            LOG.info('Deleting Service: %s in namespace: %s', service_name, namespace)
+            k8s_client.delete_service(service_name, namespace)
+        else:
+            LOG.debug('Service %s not found in namespace: %s', service_name, namespace)
+        
+        # Pod 会被 Kubernetes 自动删除（通过 OwnerReference）
+        LOG.info('Pods managed by Deployment %s will be automatically deleted by Kubernetes', resource_name)
+        
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return {'id': '', 'name': '', 'correlation_id': ''}
 
@@ -967,6 +989,48 @@ class StatefulSet:
         
         return lb_service_name
 
+    def _query_host_resource_guid(self, cmdb_client, pod_host_ip):
+        """根据 IP 地址查询 CMDB 中对应的 host_resource 的 GUID
+        
+        Args:
+            cmdb_client: CMDB 客户端
+            pod_host_ip: Pod 所在 Node 的 IP 地址
+        
+        Returns:
+            str: host_resource 的 GUID，如果查询失败或未找到则返回 None
+        """
+        if not pod_host_ip:
+            return None
+        
+        try:
+            query_data = {
+                "criteria": {
+                    "attrName": "ip_address",
+                    "op": "eq",
+                    "condition": pod_host_ip
+                }
+            }
+            
+            LOG.debug('Querying CMDB for host_resource with ip_address: %s', pod_host_ip)
+            response = cmdb_client.query('wecmdb', 'host_resource', query_data)
+            
+            if response and response.get('data'):
+                if len(response['data']) > 0:
+                    host_resource_guid = response['data'][0].get('guid')
+                    if host_resource_guid:
+                        LOG.info('Found host_resource GUID: %s for IP: %s', host_resource_guid, pod_host_ip)
+                        return host_resource_guid
+                    else:
+                        LOG.warning('host_resource record found but no guid field for IP: %s', pod_host_ip)
+                else:
+                    LOG.warning('No host_resource found in CMDB for IP: %s', pod_host_ip)
+            else:
+                LOG.warning('CMDB query for host_resource returned no data for IP: %s', pod_host_ip)
+        except Exception as e:
+            LOG.error('Failed to query host_resource from CMDB for IP %s: %s', pod_host_ip, str(e))
+        
+        return None
+    
     def _sync_pods_to_cmdb(self, k8s_client, namespace, pod_list, instance_id):
         """同步 Pod 信息到 CMDB"""
         if not instance_id:
@@ -1050,8 +1114,16 @@ class StatefulSet:
                             'guid': cmdb_pod['guid'],  # CMDB 字段名：guid（记录标识符）
                             'asset_id': pod_id  # CMDB 字段名：asset_id（新的 K8s Pod UID）
                         }
+                        # 如果有 host_ip，查询对应的 host_resource GUID
                         if pod_host_ip:
-                            update_data['host_resource'] = pod_host_ip  # CMDB 字段名：host_resource（Pod 所在 Node 的 IP）
+                            host_resource_guid = self._query_host_resource_guid(cmdb_client, pod_host_ip)
+                            if host_resource_guid:
+                                update_data['host_resource'] = host_resource_guid  # CMDB 字段名：host_resource（关联的 host_resource GUID）
+                                LOG.info('Pod %s will update with host_resource GUID: %s (IP: %s)', 
+                                        pod_name, host_resource_guid, pod_host_ip)
+                            else:
+                                LOG.warning('Pod %s has host_ip %s but no matching host_resource found in CMDB', 
+                                           pod_name, pod_host_ip)
                         updates.append(update_data)
                         LOG.info('Pod %s ID changed: %s -> %s, will update (host_ip: %s)', 
                                 pod_name, cmdb_pod['asset_id'], pod_id, pod_host_ip or 'N/A')
@@ -1064,8 +1136,16 @@ class StatefulSet:
                         'asset_id': pod_id,  # CMDB 字段名：asset_id（K8s Pod UID）
                         'app_instance': instance_id  # CMDB 字段名：app_instance（关联的 StatefulSet）
                     }
+                    # 如果有 host_ip，查询对应的 host_resource GUID
                     if pod_host_ip:
-                        create_data['host_resource'] = pod_host_ip  # CMDB 字段名：host_resource（Pod 所在 Node 的 IP）
+                        host_resource_guid = self._query_host_resource_guid(cmdb_client, pod_host_ip)
+                        if host_resource_guid:
+                            create_data['host_resource'] = host_resource_guid  # CMDB 字段名：host_resource（关联的 host_resource GUID）
+                            LOG.info('Pod %s will create with host_resource GUID: %s (IP: %s)', 
+                                    pod_name, host_resource_guid, pod_host_ip)
+                        else:
+                            LOG.warning('Pod %s has host_ip %s but no matching host_resource found in CMDB', 
+                                       pod_name, pod_host_ip)
                     creates.append(create_data)
                     LOG.info('Pod %s (ID: %s, host_ip: %s) not found in CMDB, will create', 
                             pod_name, pod_id, pod_host_ip or 'N/A')
@@ -1477,10 +1557,42 @@ class StatefulSet:
         cluster_info = cluster_info[0]
         k8s_auth = k8s.AuthToken(cluster_info['api_server'], cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
-        resource_name = api_utils.escape_name(data['name'])
-        exists_resource = k8s_client.get_statefulset(resource_name, data['namespace'])
+        
+        # 确保 namespace 有默认值
+        namespace = data.get('namespace', 'default')
+        
+        # 使用与 apply 时一致的名称转换方式（escape_service_name）
+        resource_name = api_utils.escape_service_name(data['name'])
+        
+        # 删除 StatefulSet（Pod 会被 Kubernetes 自动删除，因为有 OwnerReference）
+        exists_resource = k8s_client.get_statefulset(resource_name, namespace)
         if exists_resource is not None:
-            k8s_client.delete_statefulset(resource_name, data['namespace'])
+            LOG.info('Deleting StatefulSet: %s in namespace: %s', resource_name, namespace)
+            k8s_client.delete_statefulset(resource_name, namespace)
+        else:
+            LOG.warning('StatefulSet %s not found in namespace: %s', resource_name, namespace)
+        
+        # 删除关联的 Headless Service（如果存在）
+        service_name = api_utils.escape_service_name(data.get('serviceName', data['name']))
+        exists_service = k8s_client.get_service(service_name, namespace)
+        if exists_service is not None:
+            LOG.info('Deleting Headless Service: %s in namespace: %s', service_name, namespace)
+            k8s_client.delete_service(service_name, namespace)
+        else:
+            LOG.debug('Headless Service %s not found in namespace: %s', service_name, namespace)
+        
+        # 删除关联的负载均衡 Service（带 -lb 后缀，如果存在）
+        lb_service_name = api_utils.escape_service_name(data.get('serviceName', data['name']) + '-lb')
+        exists_lb_service = k8s_client.get_service(lb_service_name, namespace)
+        if exists_lb_service is not None:
+            LOG.info('Deleting Load Balancer Service: %s in namespace: %s', lb_service_name, namespace)
+            k8s_client.delete_service(lb_service_name, namespace)
+        else:
+            LOG.debug('Load Balancer Service %s not found in namespace: %s', lb_service_name, namespace)
+        
+        # Pod 会被 Kubernetes 自动删除（通过 OwnerReference）
+        LOG.info('Pods managed by StatefulSet %s will be automatically deleted by Kubernetes', resource_name)
+        
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return {'id': '', 'name': '', 'correlation_id': ''}
 
