@@ -1250,13 +1250,19 @@ class StatefulSet:
             wait_interval = 2   # 每 2 秒检查一次
             waited_time = 0
             
-            # 检查是否有 Pod 没有 ID
-            pods_without_id = [p for p in pod_list if not p.get('id')]
-            if pods_without_id:
-                LOG.info('Waiting for %d pod(s) to be created: %s', 
-                        len(pods_without_id), ', '.join([p['name'] for p in pods_without_id]))
+            # 检查是否有 Pod 没有 ID 或 host_ip
+            pods_incomplete = [p for p in pod_list if not p.get('id') or not p.get('host_ip')]
+            if pods_incomplete:
+                pods_without_id = [p for p in pods_incomplete if not p.get('id')]
+                pods_without_host = [p for p in pods_incomplete if (p.get('id') and not p.get('host_ip'))]
+                LOG.info('Waiting for pods: %d without UID, %d without host_ip', 
+                        len(pods_without_id), len(pods_without_host))
+                if pods_without_id:
+                    LOG.info('Pods without UID: %s', ', '.join([p['name'] for p in pods_without_id]))
+                if pods_without_host:
+                    LOG.info('Pods without host_ip (not scheduled yet): %s', ', '.join([p['name'] for p in pods_without_host]))
                 
-                while waited_time < max_wait_time and pods_without_id:
+                while waited_time < max_wait_time and pods_incomplete:
                     time.sleep(wait_interval)
                     waited_time += wait_interval
                     
@@ -1275,6 +1281,7 @@ class StatefulSet:
                             for pod in pods.items:
                                 phase = pod.status.phase if pod.status else 'Unknown'
                                 uid_status = f'UID: {pod.metadata.uid[:8]}...' if pod.metadata.uid else 'UID: None'
+                                host_ip_status = f'host_ip: {pod.status.host_ip}' if pod.status and pod.status.host_ip else 'host_ip: None'
                                 # 检查 init container 状态
                                 init_status = ''
                                 if pod.status and pod.status.init_container_statuses:
@@ -1288,32 +1295,35 @@ class StatefulSet:
                                             elif init_container.state.terminated:
                                                 init_status = f' [Init: {init_container.name} completed]'
                                 
-                                if pod.metadata.name in [p['name'] for p in pods_without_id]:
-                                    LOG.debug('Pod %s status: %s, %s%s', pod.metadata.name, phase, uid_status, init_status)
+                                if pod.metadata.name in [p['name'] for p in pods_incomplete]:
+                                    LOG.debug('Pod %s status: %s, %s, %s%s', pod.metadata.name, phase, uid_status, host_ip_status, init_status)
                             
                             for pod_info in pod_list:
                                 if pod_info['name'] in pod_dict:
                                     pod_info['id'] = pod_dict[pod_info['name']]['uid']
                                     pod_info['host_ip'] = pod_dict[pod_info['name']]['host_ip']
                             
-                            # 重新检查还有哪些 Pod 没有 ID
-                            pods_without_id = [p for p in pod_list if not p.get('id')]
-                            if not pods_without_id:
-                                LOG.info('All pods created successfully after waiting %d seconds', waited_time)
+                            # 重新检查还有哪些 Pod 不完整（没有 ID 或 host_ip）
+                            pods_incomplete = [p for p in pod_list if not p.get('id') or not p.get('host_ip')]
+                            if not pods_incomplete:
+                                LOG.info('All pods created and scheduled successfully after waiting %d seconds', waited_time)
                                 break
                             else:
-                                LOG.info('Still waiting for %d pod(s) after %d seconds: %s', 
-                                        len(pods_without_id), waited_time, 
-                                        ', '.join([p['name'] for p in pods_without_id]))
+                                pods_without_id = [p for p in pods_incomplete if not p.get('id')]
+                                pods_without_host = [p for p in pods_incomplete if (p.get('id') and not p.get('host_ip'))]
+                                LOG.info('Still waiting after %d seconds: %d without UID, %d without host_ip', 
+                                        waited_time, len(pods_without_id), len(pods_without_host))
                     except Exception as e:
                         LOG.warning('Failed to query pod status during wait: %s', str(e))
                 
-                if pods_without_id:
-                    LOG.warning('Timeout waiting for pods to be created after %d seconds, will do final check', 
-                               max_wait_time)
+                if pods_incomplete:
+                    pods_without_id = [p for p in pods_incomplete if not p.get('id')]
+                    pods_without_host = [p for p in pods_incomplete if (p.get('id') and not p.get('host_ip'))]
+                    LOG.warning('Timeout after %d seconds: %d pod(s) without UID, %d pod(s) without host_ip, will do final check', 
+                               max_wait_time, len(pods_without_id), len(pods_without_host))
             
-            # 在等待循环结束后，做最后一次强制查询，确保获取到所有 Pod 的 UID
-            # 即使超时，Pod 也可能已经被创建，只是还没获取到 UID
+            # 在等待循环结束后，做最后一次强制查询，确保获取到所有 Pod 的 UID 和 host_ip
+            # 即使超时，Pod 也可能已经被创建和调度，只是还没获取到
             try:
                 LOG.info('Performing final pod status check...')
                 pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
@@ -1325,21 +1335,30 @@ class StatefulSet:
                                for pod in pods.items if pod.metadata.uid}
                     updated_count = 0
                     for pod_info in pod_list:
-                        if not pod_info.get('id') and pod_info['name'] in pod_dict:
-                            pod_info['id'] = pod_dict[pod_info['name']]['uid']
-                            pod_info['host_ip'] = pod_dict[pod_info['name']]['host_ip']
-                            updated_count += 1
+                        if pod_info['name'] in pod_dict:
+                            # 更新缺失的信息
+                            if not pod_info.get('id'):
+                                pod_info['id'] = pod_dict[pod_info['name']]['uid']
+                                updated_count += 1
+                            if not pod_info.get('host_ip') and pod_dict[pod_info['name']]['host_ip']:
+                                pod_info['host_ip'] = pod_dict[pod_info['name']]['host_ip']
+                                updated_count += 1
                     if updated_count > 0:
-                        LOG.info('Final check found %d additional pod(s) with UID', updated_count)
+                        LOG.info('Final check updated %d pod field(s)', updated_count)
                     
                     # 记录最终状态
                     pods_with_id = [p for p in pod_list if p.get('id')]
                     pods_without_id = [p for p in pod_list if not p.get('id')]
-                    LOG.info('Final status: %d pod(s) with UID, %d pod(s) without UID', 
-                            len(pods_with_id), len(pods_without_id))
+                    pods_with_host = [p for p in pod_list if p.get('id') and p.get('host_ip')]
+                    pods_without_host = [p for p in pod_list if p.get('id') and not p.get('host_ip')]
+                    LOG.info('Final status: %d pod(s) with UID, %d pod(s) without UID, %d scheduled, %d not scheduled', 
+                            len(pods_with_id), len(pods_without_id), len(pods_with_host), len(pods_without_host))
                     if pods_without_id:
                         LOG.warning('Pods without UID will not be synced to CMDB: %s', 
                                    ', '.join([p['name'] for p in pods_without_id]))
+                    if pods_without_host:
+                        LOG.warning('Pods not scheduled yet (no host_ip), CMDB will be created without host_resource: %s', 
+                                   ', '.join([p['name'] for p in pods_without_host]))
             except Exception as e:
                 LOG.warning('Final pod status check failed: %s', str(e))
             
