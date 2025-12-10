@@ -1034,6 +1034,7 @@ class StatefulSet:
             for pod_info in pod_list:
                 pod_name = pod_info['name']
                 pod_id = pod_info['id']
+                pod_host_ip = pod_info.get('host_ip', '')  # Pod 所在 Node 的 IP
                 
                 # 如果 Pod ID 为空，说明 Pod 还没有创建，跳过
                 if not pod_id:
@@ -1045,22 +1046,29 @@ class StatefulSet:
                     cmdb_pod = cmdb_pods[pod_name]
                     if cmdb_pod['asset_id'] != pod_id:
                         # Pod ID 发生变化（可能是 Pod 被重建），需要更新
-                        updates.append({
+                        update_data = {
                             'guid': cmdb_pod['guid'],  # CMDB 字段名：guid（记录标识符）
                             'asset_id': pod_id  # CMDB 字段名：asset_id（新的 K8s Pod UID）
-                        })
-                        LOG.info('Pod %s ID changed: %s -> %s, will update', 
-                                pod_name, cmdb_pod['asset_id'], pod_id)
+                        }
+                        if pod_host_ip:
+                            update_data['host_resource'] = pod_host_ip  # CMDB 字段名：host_resource（Pod 所在 Node 的 IP）
+                        updates.append(update_data)
+                        LOG.info('Pod %s ID changed: %s -> %s, will update (host_ip: %s)', 
+                                pod_name, cmdb_pod['asset_id'], pod_id, pod_host_ip or 'N/A')
                     else:
                         LOG.debug('Pod %s ID unchanged: %s', pod_name, pod_id)
                 else:
                     # Pod 不存在于 CMDB，需要创建
-                    creates.append({
+                    create_data = {
                         'code': pod_name,  # CMDB 字段名：code（Pod 名称）
                         'asset_id': pod_id,  # CMDB 字段名：asset_id（K8s Pod UID）
                         'app_instance': instance_id  # CMDB 字段名：app_instance（关联的 StatefulSet）
-                    })
-                    LOG.info('Pod %s (ID: %s) not found in CMDB, will create', pod_name, pod_id)
+                    }
+                    if pod_host_ip:
+                        create_data['host_resource'] = pod_host_ip  # CMDB 字段名：host_resource（Pod 所在 Node 的 IP）
+                    creates.append(create_data)
+                    LOG.info('Pod %s (ID: %s, host_ip: %s) not found in CMDB, will create', 
+                            pod_name, pod_id, pod_host_ip or 'N/A')
             
             # 3. 批量创建和更新 CMDB
             if creates:
@@ -1201,7 +1209,8 @@ class StatefulSet:
                 for pod in pods.items:
                     pod_list.append({
                         'name': pod.metadata.name,
-                        'id': pod.metadata.uid if pod.metadata.uid else ''  # 即使 UID 为空也记录 Pod
+                        'id': pod.metadata.uid if pod.metadata.uid else '',  # 即使 UID 为空也记录 Pod
+                        'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else ''  # Pod 所在 Node 的 IP
                     })
                 LOG.info('Found %d pods for StatefulSet %s in namespace %s (some may not have UID yet)', 
                         len(pod_list), resource_name, data['namespace'])
@@ -1213,7 +1222,8 @@ class StatefulSet:
                 for i in range(replicas):
                     pod_list.append({
                         'name': f"{resource_name}-{i}",
-                        'id': ''
+                        'id': '',
+                        'host_ip': ''
                     })
         except Exception as e:
             LOG.warning('Failed to query pods for StatefulSet %s in namespace %s: %s. Using expected pod names.', 
@@ -1222,7 +1232,8 @@ class StatefulSet:
             for i in range(replicas):
                 pod_list.append({
                     'name': f"{resource_name}-{i}",
-                    'id': ''
+                    'id': '',
+                    'host_ip': ''
                 })
         
         # 使用 correlation_id（即 instanceId）同步 Pod 信息到 CMDB
@@ -1253,8 +1264,11 @@ class StatefulSet:
                     try:
                         pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
                         if pods and pods.items:
-                            # 更新 pod_list 中的 ID（只记录有 UID 的 Pod）
-                            pod_dict = {pod.metadata.name: pod.metadata.uid 
+                            # 更新 pod_list 中的 ID 和 host_ip（只记录有 UID 的 Pod）
+                            pod_dict = {pod.metadata.name: {
+                                            'uid': pod.metadata.uid,
+                                            'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else ''
+                                        }
                                        for pod in pods.items if pod.metadata.uid}
                             
                             # 同时记录 Pod 的状态信息（用于调试）
@@ -1279,7 +1293,8 @@ class StatefulSet:
                             
                             for pod_info in pod_list:
                                 if pod_info['name'] in pod_dict:
-                                    pod_info['id'] = pod_dict[pod_info['name']]
+                                    pod_info['id'] = pod_dict[pod_info['name']]['uid']
+                                    pod_info['host_ip'] = pod_dict[pod_info['name']]['host_ip']
                             
                             # 重新检查还有哪些 Pod 没有 ID
                             pods_without_id = [p for p in pod_list if not p.get('id')]
@@ -1303,11 +1318,16 @@ class StatefulSet:
                 LOG.info('Performing final pod status check...')
                 pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
                 if pods and pods.items:
-                    pod_dict = {pod.metadata.name: pod.metadata.uid for pod in pods.items if pod.metadata.uid}
+                    pod_dict = {pod.metadata.name: {
+                                    'uid': pod.metadata.uid,
+                                    'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else ''
+                                }
+                               for pod in pods.items if pod.metadata.uid}
                     updated_count = 0
                     for pod_info in pod_list:
                         if not pod_info.get('id') and pod_info['name'] in pod_dict:
-                            pod_info['id'] = pod_dict[pod_info['name']]
+                            pod_info['id'] = pod_dict[pod_info['name']]['uid']
+                            pod_info['host_ip'] = pod_dict[pod_info['name']]['host_ip']
                             updated_count += 1
                     if updated_count > 0:
                         LOG.info('Final check found %d additional pod(s) with UID', updated_count)
@@ -1390,7 +1410,8 @@ class StatefulSet:
                 for pod in pods.items:
                     pod_list.append({
                         'name': pod.metadata.name,
-                        'id': pod.metadata.uid
+                        'id': pod.metadata.uid,
+                        'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else ''  # Pod 所在 Node 的 IP
                     })
                 LOG.info('Found %d pods for StatefulSet %s in namespace %s', 
                         len(pod_list), resource_name, data['namespace'])
