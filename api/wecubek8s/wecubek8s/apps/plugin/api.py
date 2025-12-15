@@ -654,11 +654,22 @@ class Deployment:
         
         resource_name = api_utils.escape_name(data['name'])
         
+        # 收集要返回的信息
+        result = {
+            'id': '',
+            'name': resource_name,
+            'namespace': namespace,
+            'deleted_resources': []
+        }
+        
         # 删除 Deployment（Pod 会被 Kubernetes 自动删除，因为有 OwnerReference）
         exists_resource = k8s_client.get_deployment(resource_name, namespace)
         if exists_resource is not None:
-            LOG.info('Deleting Deployment: %s in namespace: %s', resource_name, namespace)
+            result['id'] = exists_resource.metadata.uid
+            LOG.info('Deleting Deployment: %s (uid=%s) in namespace: %s', 
+                    resource_name, result['id'], namespace)
             k8s_client.delete_deployment(resource_name, namespace)
+            result['deleted_resources'].append(f"Deployment/{resource_name}")
         else:
             LOG.warning('Deployment %s not found in namespace: %s', resource_name, namespace)
         
@@ -668,14 +679,22 @@ class Deployment:
         if exists_service is not None:
             LOG.info('Deleting Service: %s in namespace: %s', service_name, namespace)
             k8s_client.delete_service(service_name, namespace)
+            result['deleted_resources'].append(f"Service/{service_name}")
         else:
             LOG.debug('Service %s not found in namespace: %s', service_name, namespace)
         
         # Pod 会被 Kubernetes 自动删除（通过 OwnerReference）
         LOG.info('Pods managed by Deployment %s will be automatically deleted by Kubernetes', resource_name)
         
+        # 将已删除资源列表转换为字符串
+        result['deleted_resources'] = ';'.join(result['deleted_resources']) if result['deleted_resources'] else ''
+        
+        # 记录删除结果到日志
+        LOG.info('Deployment destroy result: id=%s, name=%s, namespace=%s, deleted_resources=%s',
+                result['id'], result['name'], result['namespace'], result['deleted_resources'])
+        
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
-        return {'id': '', 'name': '', 'correlation_id': ''}
+        return result
 
 
 class StatefulSet:
@@ -1580,11 +1599,38 @@ class StatefulSet:
         # 使用与 apply 时一致的名称转换方式（escape_service_name）
         resource_name = api_utils.escape_service_name(data['name'])
         
+        # 收集要返回的信息
+        result = {
+            'id': '',
+            'name': resource_name,
+            'namespace': namespace,
+            'deleted_resources': [],
+            'pods': ''
+        }
+        
+        # 在删除前，查询 Pod 列表
+        label_selector = f"{const.Tag.POD_AUTO_TAG}={resource_name}"
+        pod_list = []
+        try:
+            pods = k8s_client.list_pod(namespace, label_selector=label_selector)
+            if pods and pods.items:
+                for pod in pods.items:
+                    pod_list.append(pod.metadata.name)
+                LOG.info('Found %d pods for StatefulSet %s in namespace %s', 
+                        len(pod_list), resource_name, namespace)
+        except Exception as e:
+            LOG.warning('Failed to query pods for StatefulSet %s: %s', resource_name, str(e))
+        
+        result['pods'] = ';'.join(pod_list) if pod_list else ''
+        
         # 删除 StatefulSet（Pod 会被 Kubernetes 自动删除，因为有 OwnerReference）
         exists_resource = k8s_client.get_statefulset(resource_name, namespace)
         if exists_resource is not None:
-            LOG.info('Deleting StatefulSet: %s in namespace: %s', resource_name, namespace)
+            result['id'] = exists_resource.metadata.uid
+            LOG.info('Deleting StatefulSet: %s (uid=%s) in namespace: %s', 
+                    resource_name, result['id'], namespace)
             k8s_client.delete_statefulset(resource_name, namespace)
+            result['deleted_resources'].append(f"StatefulSet/{resource_name}")
         else:
             LOG.warning('StatefulSet %s not found in namespace: %s', resource_name, namespace)
         
@@ -1594,6 +1640,7 @@ class StatefulSet:
         if exists_service is not None:
             LOG.info('Deleting Headless Service: %s in namespace: %s', service_name, namespace)
             k8s_client.delete_service(service_name, namespace)
+            result['deleted_resources'].append(f"Service/{service_name}")
         else:
             LOG.debug('Headless Service %s not found in namespace: %s', service_name, namespace)
         
@@ -1603,14 +1650,23 @@ class StatefulSet:
         if exists_lb_service is not None:
             LOG.info('Deleting Load Balancer Service: %s in namespace: %s', lb_service_name, namespace)
             k8s_client.delete_service(lb_service_name, namespace)
+            result['deleted_resources'].append(f"Service/{lb_service_name}")
         else:
             LOG.debug('Load Balancer Service %s not found in namespace: %s', lb_service_name, namespace)
         
         # Pod 会被 Kubernetes 自动删除（通过 OwnerReference）
         LOG.info('Pods managed by StatefulSet %s will be automatically deleted by Kubernetes', resource_name)
         
+        # 将已删除资源列表转换为字符串
+        result['deleted_resources'] = ';'.join(result['deleted_resources']) if result['deleted_resources'] else ''
+        
+        # 记录删除结果到日志
+        LOG.info('StatefulSet destroy result: id=%s, name=%s, namespace=%s, deleted_resources=%s, pods=%s',
+                result['id'], result['name'], result['namespace'], 
+                result['deleted_resources'], result['pods'])
+        
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
-        return {'id': '', 'name': '', 'correlation_id': ''}
+        return result
 
 
 class Service:
@@ -1724,11 +1780,47 @@ class Service:
         k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
         resource_name = api_utils.escape_name(data['name'])
+        
+        # 收集要返回的信息
+        result = {
+            'id': '',
+            'name': resource_name,
+            'namespace': data.get('namespace', 'default'),
+            'deleted_resources': []
+        }
+        
         exists_resource = k8s_client.get_service(resource_name, data['namespace'])
         if exists_resource is not None:
+            result['id'] = exists_resource.metadata.uid
+            # 收集 Service 的详细信息
+            cluster_ip = exists_resource.spec.cluster_ip if exists_resource.spec.cluster_ip else None
+            ports = []
+            if exists_resource.spec.ports:
+                for port in exists_resource.spec.ports:
+                    port_str = f"{port.port}"
+                    if port.node_port:
+                        port_str += f":{port.node_port}"
+                    ports.append(port_str)
+            
+            result['clusterIP'] = cluster_ip
+            result['ports'] = ';'.join(ports) if ports else ''
+            
+            LOG.info('Deleting Service: %s (uid=%s, clusterIP=%s) in namespace: %s', 
+                    resource_name, result['id'], cluster_ip, data['namespace'])
             k8s_client.delete_service(resource_name, data['namespace'])
+            result['deleted_resources'].append(f"Service/{resource_name}")
+        else:
+            LOG.warning('Service %s not found in namespace: %s', resource_name, data['namespace'])
+        
+        # 将已删除资源列表转换为字符串
+        result['deleted_resources'] = ';'.join(result['deleted_resources']) if result['deleted_resources'] else ''
+        
+        # 记录删除结果到日志
+        LOG.info('Service destroy result: id=%s, name=%s, namespace=%s, deleted_resources=%s',
+                result['id'], result['name'], result['namespace'], result['deleted_resources'])
+        
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
-        return {'id': '', 'name': '', 'correlation_id': ''}
+        return result
 
 
 class Node:
