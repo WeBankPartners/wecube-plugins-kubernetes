@@ -266,8 +266,8 @@ destroy_rules = [
                          rule=validator.LengthValidator(0, 255),
                          validate_on=['check:O'],
                          nullable=True),
-    # callbackParameter from WeCube platform, used as correlation_id
-    crud.ColumnValidator(field='callbackParameter',
+    # correlation_id from WeCube platform
+    crud.ColumnValidator(field='correlation_id',
                          rule=validator.LengthValidator(0, 255),
                          validate_on=['check:O'],
                          nullable=True),

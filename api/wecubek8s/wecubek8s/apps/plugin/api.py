@@ -654,8 +654,8 @@ class Deployment:
         
         resource_name = api_utils.escape_name(data['name'])
         
-        # 获取 correlation_id（来自 callbackParameter 或 correlation_id 字段）
-        correlation_id = data.get('callbackParameter') or data.get('correlation_id', '')
+        # 获取 correlation_id
+        correlation_id = data.get('correlation_id', '')
         
         # 收集要返回的信息
         result = {
@@ -1603,8 +1603,8 @@ class StatefulSet:
         # 使用与 apply 时一致的名称转换方式（escape_service_name）
         resource_name = api_utils.escape_service_name(data['name'])
         
-        # 获取 correlation_id（来自 callbackParameter 或 correlation_id 字段）
-        correlation_id = data.get('callbackParameter') or data.get('correlation_id', '')
+        # 获取 correlation_id
+        correlation_id = data.get('correlation_id', '')
         
         # 收集要返回的信息
         result = {
@@ -1789,8 +1789,8 @@ class Service:
         k8s_client = k8s.Client(k8s_auth)
         resource_name = api_utils.escape_name(data['name'])
         
-        # 获取 correlation_id（来自 callbackParameter 或 correlation_id 字段）
-        correlation_id = data.get('callbackParameter') or data.get('correlation_id', '')
+        # 获取 correlation_id
+        correlation_id = data.get('correlation_id', '')
         
         # 收集要返回的信息
         result = {
