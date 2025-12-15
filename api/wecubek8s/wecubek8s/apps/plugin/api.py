@@ -654,11 +654,15 @@ class Deployment:
         
         resource_name = api_utils.escape_name(data['name'])
         
+        # 获取 correlation_id（来自 callbackParameter 或 correlation_id 字段）
+        correlation_id = data.get('callbackParameter') or data.get('correlation_id', '')
+        
         # 收集要返回的信息
         result = {
             'id': '',
             'name': resource_name,
             'namespace': namespace,
+            'correlation_id': correlation_id,
             'deleted_resources': []
         }
         
@@ -690,8 +694,8 @@ class Deployment:
         result['deleted_resources'] = ';'.join(result['deleted_resources']) if result['deleted_resources'] else ''
         
         # 记录删除结果到日志
-        LOG.info('Deployment destroy result: id=%s, name=%s, namespace=%s, deleted_resources=%s',
-                result['id'], result['name'], result['namespace'], result['deleted_resources'])
+        LOG.info('Deployment destroy result: id=%s, name=%s, namespace=%s, correlation_id=%s, deleted_resources=%s',
+                result['id'], result['name'], result['namespace'], result['correlation_id'], result['deleted_resources'])
         
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return result
@@ -1599,11 +1603,15 @@ class StatefulSet:
         # 使用与 apply 时一致的名称转换方式（escape_service_name）
         resource_name = api_utils.escape_service_name(data['name'])
         
+        # 获取 correlation_id（来自 callbackParameter 或 correlation_id 字段）
+        correlation_id = data.get('callbackParameter') or data.get('correlation_id', '')
+        
         # 收集要返回的信息
         result = {
             'id': '',
             'name': resource_name,
             'namespace': namespace,
+            'correlation_id': correlation_id,
             'deleted_resources': [],
             'pods': ''
         }
@@ -1661,8 +1669,8 @@ class StatefulSet:
         result['deleted_resources'] = ';'.join(result['deleted_resources']) if result['deleted_resources'] else ''
         
         # 记录删除结果到日志
-        LOG.info('StatefulSet destroy result: id=%s, name=%s, namespace=%s, deleted_resources=%s, pods=%s',
-                result['id'], result['name'], result['namespace'], 
+        LOG.info('StatefulSet destroy result: id=%s, name=%s, namespace=%s, correlation_id=%s, deleted_resources=%s, pods=%s',
+                result['id'], result['name'], result['namespace'], result['correlation_id'],
                 result['deleted_resources'], result['pods'])
         
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
@@ -1781,11 +1789,15 @@ class Service:
         k8s_client = k8s.Client(k8s_auth)
         resource_name = api_utils.escape_name(data['name'])
         
+        # 获取 correlation_id（来自 callbackParameter 或 correlation_id 字段）
+        correlation_id = data.get('callbackParameter') or data.get('correlation_id', '')
+        
         # 收集要返回的信息
         result = {
             'id': '',
             'name': resource_name,
             'namespace': data.get('namespace', 'default'),
+            'correlation_id': correlation_id,
             'deleted_resources': []
         }
         
@@ -1816,8 +1828,8 @@ class Service:
         result['deleted_resources'] = ';'.join(result['deleted_resources']) if result['deleted_resources'] else ''
         
         # 记录删除结果到日志
-        LOG.info('Service destroy result: id=%s, name=%s, namespace=%s, deleted_resources=%s',
-                result['id'], result['name'], result['namespace'], result['deleted_resources'])
+        LOG.info('Service destroy result: id=%s, name=%s, namespace=%s, correlation_id=%s, deleted_resources=%s',
+                result['id'], result['name'], result['namespace'], result['correlation_id'], result['deleted_resources'])
         
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return result

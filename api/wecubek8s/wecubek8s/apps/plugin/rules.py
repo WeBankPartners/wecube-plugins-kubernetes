@@ -266,6 +266,11 @@ destroy_rules = [
                          rule=validator.LengthValidator(0, 255),
                          validate_on=['check:O'],
                          nullable=True),
+    # callbackParameter from WeCube platform, used as correlation_id
+    crud.ColumnValidator(field='callbackParameter',
+                         rule=validator.LengthValidator(0, 255),
+                         validate_on=['check:O'],
+                         nullable=True),
 ]
 
 node_label_rules = [
