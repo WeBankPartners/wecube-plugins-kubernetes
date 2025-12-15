@@ -638,7 +638,15 @@ class Deployment:
             raise exceptions.ValidationError(attribute='cluster',
                                              msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
-        k8s_auth = k8s.AuthToken(cluster_info['api_server'], cluster_info['token'])
+        
+        # 确保 api_server 有正确的协议前缀
+        api_server = cluster_info['api_server']
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            api_server = 'https://' + api_server
+            LOG.warning('api_server for cluster %s missing protocol, auto-adding https:// prefix: %s', 
+                       cluster_info['name'], api_server)
+        
+        k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
         
         # 确保 namespace 有默认值
@@ -1555,7 +1563,15 @@ class StatefulSet:
             raise exceptions.ValidationError(attribute='cluster',
                                              msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
-        k8s_auth = k8s.AuthToken(cluster_info['api_server'], cluster_info['token'])
+        
+        # 确保 api_server 有正确的协议前缀
+        api_server = cluster_info['api_server']
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            api_server = 'https://' + api_server
+            LOG.warning('api_server for cluster %s missing protocol, auto-adding https:// prefix: %s', 
+                       cluster_info['name'], api_server)
+        
+        k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
         
         # 确保 namespace 有默认值
@@ -1697,7 +1713,15 @@ class Service:
             raise exceptions.ValidationError(attribute='cluster',
                                              msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
-        k8s_auth = k8s.AuthToken(cluster_info['api_server'], cluster_info['token'])
+        
+        # 确保 api_server 有正确的协议前缀
+        api_server = cluster_info['api_server']
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            api_server = 'https://' + api_server
+            LOG.warning('api_server for cluster %s missing protocol, auto-adding https:// prefix: %s', 
+                       cluster_info['name'], api_server)
+        
+        k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
         resource_name = api_utils.escape_name(data['name'])
         exists_resource = k8s_client.get_service(resource_name, data['namespace'])
