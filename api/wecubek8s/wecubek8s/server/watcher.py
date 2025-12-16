@@ -10,27 +10,26 @@ from concurrent.futures import ThreadPoolExecutor as PoolExecutor
 from talos.core import config
 from talos.core import utils
 
-# 初始化配置（必须在使用 CONF 之前）
-config.setup(os.environ.get('WECUBEK8S_CONF', '/etc/wecubek8s/wecubek8s.conf'),
-             dir_path=os.environ.get('WECUBEK8S_CONF_DIR', '/etc/wecubek8s/wecubek8s.conf.d'))
-
-# 初始化数据库连接池（必须在使用数据库之前）
-from talos.db import crud, pool
-print("[WATCHER] Initializing database pool...", flush=True)
+# 初始化配置和数据库（必须在使用 CONF 和数据库之前）
+# 使用 talos.server.base.initialize_server 确保数据库池正确初始化
+from talos.server import base as talos_base
+print("[WATCHER] Initializing server components...", flush=True)
 try:
-    # 方法1: 显式初始化数据库池
-    _db_pool = pool.get_pool()
-    print(f"[WATCHER] Database pool object created: {_db_pool}", flush=True)
-    
-    # 方法2: 创建一个测试连接确保池被完全初始化
-    test_engine = crud.get_engine()
-    conn = test_engine.connect()
-    conn.close()
-    print("[WATCHER] Database connection test successful", flush=True)
+    # 调用 talos 的初始化逻辑（虽然不使用返回的 application 对象）
+    # 这会正确初始化配置、数据库池等核心组件
+    _ = talos_base.initialize_server(
+        'wecubek8s',
+        os.environ.get('WECUBEK8S_CONF', '/etc/wecubek8s/wecubek8s.conf'),
+        conf_dir=os.environ.get('WECUBEK8S_CONF_DIR', '/etc/wecubek8s/wecubek8s.conf.d')
+    )
+    print("[WATCHER] Server components initialized successfully", flush=True)
 except Exception as e:
-    print(f"[WATCHER] Database pool initialization warning: {e}", flush=True)
+    print(f"[WATCHER] Server initialization warning: {e}", flush=True)
     import traceback
     traceback.print_exc()
+    # 如果 initialize_server 失败，至少尝试初始化配置
+    config.setup(os.environ.get('WECUBEK8S_CONF', '/etc/wecubek8s/wecubek8s.conf'),
+                 dir_path=os.environ.get('WECUBEK8S_CONF_DIR', '/etc/wecubek8s/wecubek8s.conf.d'))
 
 from wecubek8s.apps.model import api
 from wecubek8s.common import wecube
