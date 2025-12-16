@@ -1,6 +1,7 @@
 # coding=utf-8
 from __future__ import absolute_import
 import logging
+import os
 import time
 import signal
 import threading
@@ -9,8 +10,13 @@ from concurrent.futures import ThreadPoolExecutor as PoolExecutor
 from talos.core import config
 from talos.core import utils
 
+# 初始化配置（必须在使用 CONF 之前）
+config.setup(os.environ.get('WECUBEK8S_CONF', '/etc/wecubek8s/wecubek8s.conf'),
+             dir_path=os.environ.get('WECUBEK8S_CONF_DIR', '/etc/wecubek8s/wecubek8s.conf.d'))
+
 from wecubek8s.apps.model import api
 from wecubek8s.common import wecube
+from wecubek8s.server import base as wecubek8s_base
 
 LOG = logging.getLogger(__name__)
 CONF = config.CONF
