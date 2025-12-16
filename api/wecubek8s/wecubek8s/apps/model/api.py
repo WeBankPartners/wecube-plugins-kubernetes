@@ -261,19 +261,46 @@ class Pod(BaseEntity):
 
     def watch(self, cluster, event_stop, notify):
         k8s_client = self.cluster_client(cluster)
-        current_time = datetime.datetime.now(datetime.timezone.utc)
         w = watch.Watch()
+        
+        LOG.info('Starting watch for cluster %s', cluster.get('name', cluster['id']))
+        
         try:
             for event in w.stream(k8s_client.core_client.list_pod_for_all_namespaces):
-                if event['type'] == 'ADDED':
-                    # new -> alert
-                    if event['object'].metadata.creation_timestamp >= current_time:
-                        notify('POD.ADDED', cluster['id'], self.to_dict(cluster, event['object']))
-                elif event['type'] == 'DELETED':
-                    # delete -> alert
-                    notify('POD.DELETED', cluster['id'], self.to_dict(cluster, event['object']))
+                event_type = event.get('type')
+                pod_obj = event.get('object')
+                
+                if not pod_obj:
+                    LOG.warning('Received watch event without object: %s', event)
+                    continue
+                
+                pod_name = pod_obj.metadata.name if pod_obj.metadata else 'unknown'
+                pod_uid = pod_obj.metadata.uid if pod_obj.metadata else 'unknown'
+                
+                LOG.debug('Watch event: type=%s, pod=%s, uid=%s', event_type, pod_name, pod_uid)
+                
+                if event_type == 'ADDED':
+                    # 触发 POD.ADDED 通知（移除时间过滤以避免丢失重连期间的事件）
+                    # CMDB 同步函数内部会处理去重（通过 code 字段查询已存在的 Pod）
+                    LOG.info('Pod ADDED event detected: %s (uid: %s)', pod_name, pod_uid)
+                    notify('POD.ADDED', cluster['id'], self.to_dict(cluster, pod_obj))
+                elif event_type == 'DELETED':
+                    # 触发 POD.DELETED 通知
+                    LOG.info('Pod DELETED event detected: %s (uid: %s)', pod_name, pod_uid)
+                    notify('POD.DELETED', cluster['id'], self.to_dict(cluster, pod_obj))
+                elif event_type == 'MODIFIED':
+                    # MODIFIED 事件不触发通知，避免噪音
+                    LOG.debug('Pod MODIFIED event (not notifying): %s', pod_name)
+                else:
+                    LOG.warning('Unknown watch event type: %s for pod %s', event_type, pod_name)
+                
                 if event_stop.is_set():
+                    LOG.info('Watch stop requested for cluster %s', cluster.get('name', cluster['id']))
                     w.stop()
                     break
+        except Exception as e:
+            LOG.error('Error in watch stream for cluster %s: %s', cluster.get('name', cluster['id']), str(e))
+            raise
         finally:
             w.stop()
+            LOG.info('Watch stopped for cluster %s', cluster.get('name', cluster['id']))
