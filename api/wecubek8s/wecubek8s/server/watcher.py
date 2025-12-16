@@ -14,6 +14,17 @@ from talos.core import utils
 config.setup(os.environ.get('WECUBEK8S_CONF', '/etc/wecubek8s/wecubek8s.conf'),
              dir_path=os.environ.get('WECUBEK8S_CONF_DIR', '/etc/wecubek8s/wecubek8s.conf.d'))
 
+# 初始化数据库连接池（必须在使用数据库之前）
+from talos.db import crud
+try:
+    # 预热数据库连接，触发连接池初始化
+    test_engine = crud.get_engine()
+    conn = test_engine.connect()
+    conn.close()
+    print("数据库连接池初始化成功", flush=True)
+except Exception as e:
+    print(f"数据库连接池初始化警告: {e}", flush=True)
+
 from wecubek8s.apps.model import api
 from wecubek8s.common import wecube
 from wecubek8s.server import base as wecubek8s_base
