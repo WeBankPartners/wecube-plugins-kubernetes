@@ -366,23 +366,28 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 if 'Unique validate fail' in error_msg or 'key_name' in error_msg or 'unique' in error_msg.lower():
                     LOG.warning('[Step 4] Detected uniqueness conflict (likely pre-created by API)')
                     LOG.warning('   This is expected when deploying StatefulSet/Deployment via API')
+                    LOG.warning('   Will retry query by code (pod name) with small delay to handle race condition')
                     
-                    # 尝试 1: 按 key_name 查询（key_name 通常就是 Pod 名称）
-                    LOG.info('[Step 4-Retry-1] Trying to query by key_name: %s', pod_name)
-                    retry_query_keyname = {
+                    # 等待一小段时间（并发情况下，另一个线程可能刚创建完，数据库事务还没提交）
+                    import time
+                    time.sleep(0.1)
+                    
+                    # 尝试 1: 再次按 code 查询（可能是并发创建）
+                    LOG.info('[Step 4-Retry-1] Retrying query by code (pod name): %s', pod_name)
+                    retry_query_code = {
                         "criteria": {
-                            "attrName": "key_name",
+                            "attrName": "code",
                             "op": "eq",
                             "condition": pod_name
                         }
                     }
-                    retry_response = cmdb_client.query('wecmdb', 'pod', retry_query_keyname)
+                    retry_response = cmdb_client.query('wecmdb', 'pod', retry_query_code)
                     
                     if retry_response and retry_response.get('data') and len(retry_response['data']) > 0:
                         existing_pod = retry_response['data'][0]
                         pod_guid = existing_pod.get('guid')
                         existing_asset_id = existing_pod.get('asset_id')
-                        LOG.info('[Step 4-Retry-1] ✅ Found pre-created pod by key_name!')
+                        LOG.info('[Step 4-Retry-1] ✅ Found pre-created pod by code (pod name)!')
                         LOG.info('   guid=%s, asset_id=%s (empty means pre-created)', 
                                 pod_guid, existing_asset_id or 'EMPTY')
                         
@@ -400,6 +405,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                             host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
                             if host_resource_guid:
                                 update_data['host_resource'] = host_resource_guid
+                                LOG.info('   Will update host_resource to: %s (IP: %s)', host_resource_guid, pod_host_ip)
                         
                         cmdb_client.update('wecmdb', 'pod', [update_data])
                         LOG.info('[Step 4-Retry-1] ✅ Successfully UPDATED pre-created pod: %s (guid=%s)', 
@@ -407,8 +413,8 @@ def sync_pod_to_cmdb_on_added(pod_data):
                         LOG.info('='*60)
                         return pod_guid
                     
-                    # 尝试 2: 按 asset_id 查询（可能是并发导致的）
-                    LOG.info('[Step 4-Retry-2] key_name query failed, trying asset_id: %s', pod_id)
+                    # 尝试 2: 按 asset_id 查询（极少数情况：code 不同但 asset_id 相同）
+                    LOG.info('[Step 4-Retry-2] Code query still failed, trying asset_id: %s', pod_id)
                     retry_query_asset = {
                         "criteria": {
                             "attrName": "asset_id",
@@ -421,13 +427,15 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     if retry_response and retry_response.get('data') and len(retry_response['data']) > 0:
                         existing_pod = retry_response['data'][0]
                         pod_guid = existing_pod.get('guid')
-                        LOG.info('[Step 4-Retry-2] Found existing pod by asset_id: %s (guid=%s), updating...', 
-                                pod_id, pod_guid)
+                        existing_code = existing_pod.get('code')
+                        LOG.warning('[Step 4-Retry-2] ⚠️  Found pod by asset_id with different code!')
+                        LOG.warning('   Expected code: %s, Existing code: %s', pod_name, existing_code)
+                        LOG.info('[Step 4-Retry-2] Updating to correct code: %s (guid=%s)', pod_name, pod_guid)
                         
                         # 更新记录
                         update_data = {
                             'guid': pod_guid,
-                            'code': pod_name,
+                            'code': pod_name,  # 更正 code
                             'asset_id': pod_id
                         }
                         
@@ -440,14 +448,15 @@ def sync_pod_to_cmdb_on_added(pod_data):
                                 update_data['host_resource'] = host_resource_guid
                         
                         cmdb_client.update('wecmdb', 'pod', [update_data])
-                        LOG.info('[Step 4-Retry-2] ✅ Successfully UPDATED pod after create failure: %s (guid=%s)', 
+                        LOG.info('[Step 4-Retry-2] ✅ Successfully UPDATED pod with correct code: %s (guid=%s)', 
                                 pod_name, pod_guid)
                         LOG.info('='*60)
                         return pod_guid
                     else:
-                        LOG.error('[Step 4-Retry] ❌ Cannot find existing pod by key_name or asset_id')
-                        LOG.error('   Pod name: %s, asset_id: %s', pod_name, pod_id)
-                        LOG.error('   This should not happen - uniqueness error but record not found!')
+                        LOG.error('[Step 4-Retry] ❌ Cannot find existing pod by code or asset_id after retry')
+                        LOG.error('   Pod name (code): %s, asset_id: %s', pod_name, pod_id)
+                        LOG.error('   This suggests a race condition or database inconsistency')
+                        LOG.error('   Recommendation: manually check CMDB pod table for orphan records')
                         LOG.info('='*60)
                         raise  # Re-raise original exception
                 else:
