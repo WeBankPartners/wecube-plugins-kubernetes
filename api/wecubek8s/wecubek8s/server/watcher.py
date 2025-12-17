@@ -145,6 +145,105 @@ def query_host_resource_guid(cmdb_client, pod_host_ip):
     return None
 
 
+def test_query_all_pods_from_cmdb(cmdb_client):
+    """测试函数：查询 CMDB 中所有 Pod 数据（不加过滤条件）
+    
+    用途：验证 watcher 的 CMDB 客户端是否能正常访问数据
+    """
+    LOG.info('='*80)
+    LOG.info('🧪 TEST: Querying ALL pods from CMDB (no filter)')
+    LOG.info('='*80)
+    
+    if not cmdb_client:
+        LOG.error('❌ TEST FAILED: CMDB client is None')
+        return
+    
+    try:
+        # 方法1：不带任何条件，查询所有 pod
+        LOG.info('[TEST-Query-1] Attempting to query all pods without any filter...')
+        try:
+            # 空查询或者使用一个总是为真的条件
+            all_pods_response = cmdb_client.query('wecmdb', 'pod', {})
+            
+            if all_pods_response:
+                LOG.info('[TEST-Query-1] ✅ Query successful!')
+                LOG.info('[TEST-Query-1] Response status: %s', all_pods_response.get('status', 'N/A'))
+                LOG.info('[TEST-Query-1] Response message: %s', all_pods_response.get('message', 'N/A'))
+                
+                pods_data = all_pods_response.get('data', [])
+                pod_count = len(pods_data) if pods_data else 0
+                
+                LOG.info('[TEST-Query-1] 📊 Total pods found: %d', pod_count)
+                
+                if pod_count > 0:
+                    LOG.info('[TEST-Query-1] 📋 Listing all pods:')
+                    for idx, pod in enumerate(pods_data, 1):
+                        LOG.info('[TEST-Query-1]   [%d] guid=%s, code=%s, key_name=%s, asset_id=%s, state=%s, app_instance=%s',
+                                idx,
+                                pod.get('guid', 'N/A'),
+                                pod.get('code', 'N/A'),
+                                pod.get('key_name', 'N/A'),
+                                pod.get('asset_id', 'N/A'),
+                                pod.get('state', 'N/A'),
+                                pod.get('app_instance', 'N/A'))
+                else:
+                    LOG.warning('[TEST-Query-1] ⚠️  No pods found in CMDB')
+            else:
+                LOG.error('[TEST-Query-1] ❌ Query returned None or empty response')
+        except Exception as e1:
+            LOG.error('[TEST-Query-1] ❌ Query failed with exception: %s', str(e1))
+            LOG.exception(e1)
+        
+        # 方法2：使用 state 字段查询（查询所有 created 状态的 pod）
+        LOG.info('')
+        LOG.info('[TEST-Query-2] Attempting to query pods with state filter...')
+        try:
+            state_query = {
+                "criteria": {
+                    "attrName": "state",
+                    "op": "eq",
+                    "condition": "created_0"
+                }
+            }
+            LOG.info('[TEST-Query-2] Query data: %s', state_query)
+            
+            state_pods_response = cmdb_client.query('wecmdb', 'pod', state_query)
+            
+            if state_pods_response:
+                LOG.info('[TEST-Query-2] ✅ Query successful!')
+                pods_data = state_pods_response.get('data', [])
+                pod_count = len(pods_data) if pods_data else 0
+                
+                LOG.info('[TEST-Query-2] 📊 Pods in created_0 state: %d', pod_count)
+                
+                if pod_count > 0:
+                    LOG.info('[TEST-Query-2] 📋 Listing pods in created_0 state:')
+                    for idx, pod in enumerate(pods_data, 1):
+                        LOG.info('[TEST-Query-2]   [%d] guid=%s, code=%s, key_name=%s, asset_id=%s, app_instance=%s',
+                                idx,
+                                pod.get('guid', 'N/A'),
+                                pod.get('code', 'N/A'),
+                                pod.get('key_name', 'N/A'),
+                                pod.get('asset_id', 'N/A'),
+                                pod.get('app_instance', 'N/A'))
+                else:
+                    LOG.warning('[TEST-Query-2] ⚠️  No pods in created_0 state')
+            else:
+                LOG.error('[TEST-Query-2] ❌ Query returned None')
+        except Exception as e2:
+            LOG.error('[TEST-Query-2] ❌ Query failed with exception: %s', str(e2))
+            LOG.exception(e2)
+        
+        LOG.info('='*80)
+        LOG.info('🧪 TEST COMPLETED')
+        LOG.info('='*80)
+    
+    except Exception as e:
+        LOG.error('❌ TEST FATAL ERROR: %s', str(e))
+        LOG.exception(e)
+        LOG.info('='*80)
+
+
 def sync_pod_to_cmdb_on_added(pod_data):
     """Pod 新增时同步到 CMDB（仅更新模式 + 重试机制）
     
@@ -173,6 +272,12 @@ def sync_pod_to_cmdb_on_added(pod_data):
     # 总等待时间：最多 30 * 8 = 240 秒（与 apply API 最大等待时间一致）
     
     cmdb_client = get_cmdb_client()
+    
+    # 🧪 测试：首次调用时查询所有 pod 数据
+    if cmdb_client and not hasattr(sync_pod_to_cmdb_on_added, '_test_executed'):
+        test_query_all_pods_from_cmdb(cmdb_client)
+        sync_pod_to_cmdb_on_added._test_executed = True  # 标记已执行，避免重复测试
+    
     if not cmdb_client:
         LOG.warning('CMDB client not available, skipping pod add sync')
         return None
