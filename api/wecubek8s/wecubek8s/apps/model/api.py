@@ -220,18 +220,25 @@ class Pod(BaseEntity):
                     correlation_id = tag_value
                     break
         controll_by = None
+        statefulset_id = None
         if item.metadata.owner_references:
             for owner in item.metadata.owner_references:
-                if owner.controller and owner.kind == 'ReplicaSet':
-                    controll_by = owner.uid
-                    break
+                if owner.controller:
+                    if owner.kind == 'ReplicaSet':
+                        controll_by = owner.uid
+                    elif owner.kind == 'StatefulSet':
+                        statefulset_id = owner.uid
+                    # 可以继续添加其他控制器类型（如 DaemonSet、Job 等）
+        
         result = {
             'id': item.metadata.uid,
             'name': item.metadata.name,
             'displayName': f'{cluster["name"]}-{item.metadata.namespace}-{item.metadata.name}',
             'namespace': item.metadata.namespace,
             'ip_address': item.status.pod_ip,
+            'host_ip': item.status.host_ip,  # ⭐ 新增：Pod 所在节点的 IP 地址（用于关联 host_resource）
             'replicaset_id': controll_by,
+            'statefulset_id': statefulset_id,  # ⭐ 新增：StatefulSet UID（用于关联 app_instance）
             'deployment_id': None,
             'correlation_id': correlation_id,
             'node_id': item.spec.node_name,

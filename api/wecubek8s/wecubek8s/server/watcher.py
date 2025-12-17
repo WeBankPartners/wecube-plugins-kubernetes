@@ -194,8 +194,9 @@ def sync_pod_to_cmdb_on_added(pod_data):
             # 如果 asset_id 不同，说明 Pod 重建了（UID 变化）
             is_pod_rebuilt = (existing_asset_id != pod_id)
             if is_pod_rebuilt:
-                LOG.info('Pod %s rebuilt: old UID=%s, new UID=%s, updating...', 
+                LOG.info('🔄 Pod %s REBUILT detected: old UID=%s, new UID=%s, updating...', 
                         pod_name, existing_asset_id, pod_id)
+                LOG.info('   This could be due to: pod restart, node eviction (taint), or manual deletion')
                 
                 # 检查新的 asset_id 是否已被其他记录使用（防止重复）
                 check_query = {
@@ -233,8 +234,10 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     
                     # 检测 host_resource 是否发生变化
                     if existing_host_resource != host_resource_guid:
-                        LOG.info('Pod %s drifted to different host: old_host=%s, new_host=%s (IP: %s)', 
-                                pod_name, existing_host_resource or 'None', host_resource_guid, pod_host_ip)
+                        LOG.info('🚀 POD DRIFT DETECTED! Pod %s moved to different host:', pod_name)
+                        LOG.info('   Old host_resource: %s', existing_host_resource or 'None')
+                        LOG.info('   New host_resource: %s (IP: %s)', host_resource_guid, pod_host_ip)
+                        LOG.info('   Reason: likely node eviction/taint or manual rescheduling')
                     else:
                         LOG.info('Pod %s host unchanged: host_resource=%s (IP: %s)', 
                                 pod_name, host_resource_guid, pod_host_ip)
@@ -395,7 +398,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
         
         LOG.info('Syncing POD.DELETED to CMDB: pod=%s, id=%s', pod_name, pod_id)
         
-        # 查询 CMDB 中的 Pod 记录（通过 code 字段查询）
+        # ===== 方式1：通过 code 字段查询 =====
         query_data = {
             "criteria": {
                 "attrName": "code",
@@ -404,28 +407,64 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             }
         }
         
+        LOG.info('Querying CMDB by code: %s', pod_name)
         cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
+        LOG.info('Query response: %s', cmdb_response)
+        
+        pod_guid = None
+        existing_asset_id = None
         
         if cmdb_response and cmdb_response.get('data') and len(cmdb_response['data']) > 0:
+            LOG.info('Found %d pod(s) in CMDB by code', len(cmdb_response['data']))
             existing_pod = cmdb_response['data'][0]
             pod_guid = existing_pod.get('guid')
             existing_asset_id = existing_pod.get('asset_id')
-            
-            if not pod_guid:
-                LOG.warning('CMDB pod record has no guid, cannot update: %s', pod_name)
-                return
-            
-            # 只有当 asset_id 匹配时才更新（避免误删新建的 Pod）
-            if existing_asset_id != pod_id:
-                LOG.warning('Pod %s asset_id mismatch (CMDB: %s, K8s: %s), skipping delete sync', 
-                           pod_name, existing_asset_id, pod_id)
-                return
-            
-            # 直接删除 CMDB 中的 Pod 记录
-            cmdb_client.delete('wecmdb', 'pod', [pod_guid])
-            LOG.info('Successfully deleted pod from CMDB: %s (guid: %s)', pod_name, pod_guid)
+            LOG.info('Found pod in CMDB: guid=%s, asset_id=%s, code=%s', 
+                    pod_guid, existing_asset_id, existing_pod.get('code'))
         else:
-            LOG.warning('Pod %s not found in CMDB, no action needed for deletion', pod_name)
+            LOG.warning('Pod not found by code, trying to query by asset_id: %s', pod_id)
+            
+            # ===== 方式2：通过 asset_id 查询（备用） =====
+            if pod_id:
+                query_by_asset_id = {
+                    "criteria": {
+                        "attrName": "asset_id",
+                        "op": "eq",
+                        "condition": pod_id
+                    }
+                }
+                
+                LOG.info('Querying CMDB by asset_id: %s', pod_id)
+                cmdb_response_by_id = cmdb_client.query('wecmdb', 'pod', query_by_asset_id)
+                LOG.info('Query by asset_id response: %s', cmdb_response_by_id)
+                
+                if cmdb_response_by_id and cmdb_response_by_id.get('data') and len(cmdb_response_by_id['data']) > 0:
+                    LOG.info('Found %d pod(s) in CMDB by asset_id', len(cmdb_response_by_id['data']))
+                    existing_pod = cmdb_response_by_id['data'][0]
+                    pod_guid = existing_pod.get('guid')
+                    existing_asset_id = existing_pod.get('asset_id')
+                    LOG.info('Found pod in CMDB by asset_id: guid=%s, asset_id=%s, code=%s', 
+                            pod_guid, existing_asset_id, existing_pod.get('code'))
+                else:
+                    LOG.warning('Pod not found by asset_id either')
+        
+        # ===== 执行删除操作 =====
+        if not pod_guid:
+            LOG.warning('Pod %s not found in CMDB (tried both code and asset_id), no action needed for deletion', pod_name)
+            return
+        
+        # 验证 asset_id 是否匹配（如果提供了 pod_id）
+        if pod_id and existing_asset_id and existing_asset_id != pod_id:
+            LOG.warning('Pod %s asset_id mismatch (CMDB: %s, K8s: %s), skipping delete sync', 
+                       pod_name, existing_asset_id, pod_id)
+            LOG.warning('This might be a different pod instance with the same name')
+            return
+        
+        # 直接删除 CMDB 中的 Pod 记录
+        LOG.info('Deleting pod from CMDB: guid=%s, code=%s, asset_id=%s', 
+                pod_guid, pod_name, existing_asset_id)
+        cmdb_client.delete('wecmdb', 'pod', [pod_guid])
+        LOG.info('✅ Successfully deleted pod from CMDB: %s (guid: %s)', pod_name, pod_guid)
     
     except Exception as e:
         LOG.error('Failed to sync POD.DELETED to CMDB for pod %s: %s', 
@@ -439,6 +478,10 @@ def notify_pod(event, cluster_id, data):
     LOG.info('notify_pod started - event: %s, cluster: %s', event, cluster_id)
     LOG.info('Pod details - name: %s, namespace: %s, id: %s', 
              data.get('name', 'N/A'), data.get('namespace', 'N/A'), data.get('id', 'N/A'))
+    LOG.info('Pod location - node: %s, host_ip: %s', 
+             data.get('node_id', 'N/A'), data.get('host_ip', 'N/A'))
+    LOG.info('Pod controller - deployment: %s, statefulset: %s, replicaset: %s',
+             data.get('deployment_id', 'N/A'), data.get('statefulset_id', 'N/A'), data.get('replicaset_id', 'N/A'))
     LOG.info('Full pod data: %s', data)
     
     try:
