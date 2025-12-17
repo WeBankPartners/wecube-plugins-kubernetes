@@ -31,6 +31,22 @@ except Exception as e:
     config.setup(os.environ.get('WECUBEK8S_CONF', '/etc/wecubek8s/wecubek8s.conf'),
                  dir_path=os.environ.get('WECUBEK8S_CONF_DIR', '/etc/wecubek8s/wecubek8s.conf.d'))
 
+# 预热数据库连接（与 wsgi_server.py 保持一致）
+# 这一步非常关键：避免在多线程环境下首次创建连接导致的线程安全问题
+print("[WATCHER] Warming up database connection...", flush=True)
+try:
+    from talos.db import crud
+    # 创建一个测试查询触发连接池初始化
+    test_engine = crud.get_engine()
+    conn = test_engine.connect()
+    conn.close()
+    print("[WATCHER] Database connection warm-up completed successfully", flush=True)
+except Exception as e:
+    # 预热失败记录日志，但不影响启动（让后续代码尝试连接）
+    print(f"[WATCHER] Database connection warm-up failed (will retry later): {e}", flush=True)
+    import traceback
+    traceback.print_exc()
+
 from wecubek8s.apps.model import api
 from wecubek8s.common import wecube
 from wecubek8s.server import base as wecubek8s_base
