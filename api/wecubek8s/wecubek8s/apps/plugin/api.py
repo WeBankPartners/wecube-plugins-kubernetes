@@ -862,6 +862,16 @@ class StatefulSet:
         # StatefulSet 的 serviceName 必须符合 DNS-1035 规范
         service_name_for_sts = api_utils.escape_service_name(data.get('serviceName', resource_name))
         
+        # 获取当前请求的用户 token，保存到 Pod annotations 中
+        # 这样 watcher 可以从 Pod 读取 token 来访问 CMDB
+        from wecubek8s.common import utils
+        user_token = utils.get_token()
+        pod_annotations = {}
+        if user_token:
+            pod_annotations['wecube.io/creator-token'] = user_token
+            LOG.info('Adding creator token to Pod annotations for CMDB access (token prefix: %s...)', 
+                    user_token[:20])
+        
         template = {
             'apiVersion': 'apps/v1',
             'kind': 'StatefulSet',
@@ -877,7 +887,8 @@ class StatefulSet:
                 },
                 'template': {
                     'metadata': {
-                        'labels': pod_spec_tags
+                        'labels': pod_spec_tags,
+                        'annotations': pod_annotations
                     },
                     'spec': {
                         'affinity': pod_spec_affinity,
@@ -1078,18 +1089,13 @@ class StatefulSet:
                 LOG.warning('CMDB base_url not configured, skipping CMDB sync')
                 return
             
-            # 【关键修复】使用 WeCube 系统 token 而不是请求上下文的 token
-            # 这样可以确保 watcher 和 apply API 使用相同的 token 访问 CMDB
-            # 避免数据隔离导致 watcher 查询不到 apply API 创建的记录
-            try:
-                wecube_client = wecube.WeCubeClient(CONF.wecube.base_url, None)
-                wecube_client.login_subsystem()
-                LOG.info('Successfully logged in to WeCube, using system token for CMDB (token prefix: %s...)', 
-                        wecube_client.token[:20] if wecube_client.token else 'None')
-                cmdb_client = wecmdb.EntityClient(cmdb_server, wecube_client.token)
-            except Exception as e:
-                LOG.error('Failed to get WeCube system token for CMDB: %s, using request context token as fallback', str(e))
-                cmdb_client = wecmdb.EntityClient(cmdb_server)
+            # 使用请求上下文中的用户 token（从 HTTP 请求头传入）
+            # 这样创建的 Pod 记录会关联到该用户，watcher 也需要使用相同的 token 才能访问
+            from wecubek8s.common import utils
+            user_token = utils.get_token()
+            cmdb_client = wecmdb.EntityClient(cmdb_server, user_token)
+            LOG.info('Using user token for CMDB operations (token prefix: %s...)', 
+                    user_token[:20] if user_token else 'None')
             
             # 1. 查询 CMDB 中该 instanceId 下的所有 Pod
             query_data = {

@@ -235,6 +235,43 @@ class Pod(BaseEntity):
                         statefulset_id = owner.uid
                     # 可以继续添加其他控制器类型（如 DaemonSet、Job 等）
         
+        # 从 annotations 中提取创建者的 token（用于 watcher 访问 CMDB）
+        # 优先级1：从 Pod 自己的 annotations 中读取（直接通过 apply API 创建的 Pod）
+        creator_token = None
+        if item.metadata.annotations:
+            creator_token = item.metadata.annotations.get('wecube.io/creator-token')
+            if creator_token:
+                LOG.debug('Extracted creator token from Pod annotations (prefix: %s...)', 
+                         creator_token[:20])
+        
+        # 优先级2：如果 Pod 没有 creator_token，从父资源的 annotations 中继承
+        # 这适用于"漂移"场景：Pod 通过 StatefulSet 扩缩容、重启等自动创建
+        if not creator_token and item.metadata.owner_references:
+            try:
+                k8s_client = cls.cluster_client(cluster)
+                for owner in item.metadata.owner_references:
+                    if owner.controller:  # 只从控制器（controller）继承
+                        owner_obj = None
+                        if owner.kind == 'StatefulSet':
+                            owner_obj = k8s_client.read_namespaced_stateful_set(
+                                owner.name, item.metadata.namespace)
+                        elif owner.kind == 'Deployment':
+                            owner_obj = k8s_client.read_namespaced_deployment(
+                                owner.name, item.metadata.namespace)
+                        elif owner.kind == 'ReplicaSet':
+                            owner_obj = k8s_client.read_namespaced_replica_set(
+                                owner.name, item.metadata.namespace)
+                        # 可以继续添加其他控制器类型
+                        
+                        if owner_obj and owner_obj.metadata.annotations:
+                            creator_token = owner_obj.metadata.annotations.get('wecube.io/creator-token')
+                            if creator_token:
+                                LOG.info('Inherited creator token from %s %s (prefix: %s...)',
+                                        owner.kind, owner.name, creator_token[:20])
+                                break  # 找到 token 就停止
+            except Exception as e:
+                LOG.warning('Failed to inherit creator token from owner: %s', str(e))
+        
         # 使用 cluster_id + pod_uid 作为全局唯一标识，防止重复集群配置导致的重复创建
         asset_id = f"{cluster['id']}_{item.metadata.uid}" if item.metadata.uid else None
         
@@ -252,6 +289,7 @@ class Pod(BaseEntity):
             'correlation_id': correlation_id,
             'node_id': item.spec.node_name,
             'cluster_id': cluster["id"],
+            'creator_token': creator_token,  # 新增：创建者的 token
         }
         # patch node_id
         node_mapping = {}

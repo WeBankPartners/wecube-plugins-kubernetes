@@ -250,13 +250,15 @@ def sync_pod_to_cmdb_on_added(pod_data):
     核心原则：Watcher 只负责更新已存在的 CMDB 记录，不创建新记录
     
     工作流程：
-    1. 使用重试机制等待 apply API 完成 CMDB 预创建（避免时序竞态）
-    2. 通过 pod name（code 字段）查询 CMDB
-    3. 如果记录存在：
+    1. 从 Pod annotations 中获取创建者的 token（避免数据隔离问题）
+    2. 使用该 token 创建 CMDB 客户端（与 API 使用相同的用户 token）
+    3. 使用重试机制等待 apply API 完成 CMDB 预创建（避免时序竞态）
+    4. 通过 pod name（code 字段）查询 CMDB
+    5. 如果记录存在：
        - 更新 asset_id（填充 K8s UID）
        - 复用已有的 app_instance（不修改）
        - 更新 host_resource（如果节点变化）
-    4. 如果记录不存在：
+    6. 如果记录不存在：
        - 记录日志后直接返回，不执行任何操作
        - 说明该 Pod 不是通过 apply API 创建的（如手动 kubectl create）
     
@@ -271,7 +273,24 @@ def sync_pod_to_cmdb_on_added(pod_data):
     RETRY_INTERVAL = 8    # 每次间隔 8 秒
     # 总等待时间：最多 30 * 8 = 240 秒（与 apply API 最大等待时间一致）
     
-    cmdb_client = get_cmdb_client()
+    # 【关键修复】从 pod_data 中读取创建者的 token
+    # 这个 token 是 API 在创建 Pod 时保存到 annotations 中的
+    # 使用相同的 token 可以避免 CMDB 数据隔离问题
+    creator_token = pod_data.get('creator_token')
+    
+    if creator_token:
+        LOG.info('Using creator token from Pod annotations for CMDB access (prefix: %s...)', 
+                creator_token[:20])
+        cmdb_server = CONF.wecube.base_url
+        if not cmdb_server:
+            LOG.warning('CMDB base_url not configured, skipping pod add sync')
+            return None
+        from wecubek8s.common import wecmdb
+        cmdb_client = wecmdb.EntityClient(cmdb_server, creator_token)
+    else:
+        LOG.warning('No creator token found in Pod annotations, falling back to system token')
+        LOG.warning('This may cause CMDB data isolation issues')
+        cmdb_client = get_cmdb_client()
     
     # 🧪 测试：首次调用时查询所有 pod 数据
     if cmdb_client and not hasattr(sync_pod_to_cmdb_on_added, '_test_executed'):
@@ -477,7 +496,22 @@ def sync_pod_to_cmdb_on_added(pod_data):
 
 def sync_pod_to_cmdb_on_deleted(pod_data):
     """Pod 删除时同步到 CMDB（更新状态或删除记录）"""
-    cmdb_client = get_cmdb_client()
+    # 【关键修复】从 pod_data 中读取创建者的 token
+    creator_token = pod_data.get('creator_token')
+    
+    if creator_token:
+        LOG.info('Using creator token from Pod annotations for CMDB access (prefix: %s...)', 
+                creator_token[:20])
+        cmdb_server = CONF.wecube.base_url
+        if not cmdb_server:
+            LOG.warning('CMDB base_url not configured, skipping pod delete sync')
+            return
+        from wecubek8s.common import wecmdb
+        cmdb_client = wecmdb.EntityClient(cmdb_server, creator_token)
+    else:
+        LOG.warning('No creator token found in Pod annotations, falling back to system token')
+        cmdb_client = get_cmdb_client()
+    
     if not cmdb_client:
         LOG.warning('CMDB client not available, skipping pod delete sync')
         return
