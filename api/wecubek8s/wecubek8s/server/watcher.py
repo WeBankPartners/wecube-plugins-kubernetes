@@ -168,7 +168,8 @@ def sync_pod_to_cmdb_on_added(pod_data):
         LOG.info('Syncing POD.ADDED to CMDB: pod=%s, id=%s, host_ip=%s', 
                  pod_name, pod_id, pod_host_ip or 'N/A')
         
-        # 1. 查询 CMDB 中是否已存在该 Pod（通过 code 字段查询）
+        # 1. 先通过 code（Pod name）查询，因为 StatefulSet Pod name 是稳定的
+        #    Pod 重建时 name 不变但 UID 会变，通过 name 查询可以找到旧记录并更新
         query_data = {
             "criteria": {
                 "attrName": "code",
@@ -179,35 +180,117 @@ def sync_pod_to_cmdb_on_added(pod_data):
         
         cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
         
-        # 2. 如果存在则更新，不存在则创建
+        # 2. 如果存在则更新（StatefulSet Pod 重建时会进入这里）
         if cmdb_response and cmdb_response.get('data') and len(cmdb_response['data']) > 0:
-            # Pod 已存在，更新 asset_id 和 host_resource
             existing_pod = cmdb_response['data'][0]
             pod_guid = existing_pod.get('guid')
+            existing_asset_id = existing_pod.get('asset_id')
+            existing_host_resource = existing_pod.get('host_resource')
             
             if not pod_guid:
                 LOG.warning('CMDB pod record has no guid, cannot update: %s', pod_name)
                 return None
             
+            # 如果 asset_id 不同，说明 Pod 重建了（UID 变化）
+            is_pod_rebuilt = (existing_asset_id != pod_id)
+            if is_pod_rebuilt:
+                LOG.info('Pod %s rebuilt: old UID=%s, new UID=%s, updating...', 
+                        pod_name, existing_asset_id, pod_id)
+                
+                # 检查新的 asset_id 是否已被其他记录使用（防止重复）
+                check_query = {
+                    "criteria": {
+                        "attrName": "asset_id",
+                        "op": "eq",
+                        "condition": pod_id
+                    }
+                }
+                check_response = cmdb_client.query('wecmdb', 'pod', check_query)
+                
+                # 如果新 asset_id 已存在且不是当前记录，删除重复记录
+                if check_response and check_response.get('data'):
+                    for duplicate_pod in check_response['data']:
+                        dup_guid = duplicate_pod.get('guid')
+                        if dup_guid and dup_guid != pod_guid:
+                            LOG.warning('Found duplicate pod with same asset_id %s (guid=%s), deleting...', 
+                                       pod_id, dup_guid)
+                            try:
+                                cmdb_client.delete('wecmdb', 'pod', [dup_guid])
+                                LOG.info('Deleted duplicate pod record: guid=%s', dup_guid)
+                            except Exception as del_err:
+                                LOG.error('Failed to delete duplicate pod: %s', str(del_err))
+            
             update_data = {
                 'guid': pod_guid,
-                'asset_id': pod_id
+                'asset_id': pod_id  # 更新为新的 UID（StatefulSet Pod 重建时必须）
             }
             
-            # 查询并关联 host_resource
+            # 查询并关联 host_resource（Pod 漂移时宿主机可能会变化）
             if pod_host_ip:
                 host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
                 if host_resource_guid:
                     update_data['host_resource'] = host_resource_guid
-                    LOG.info('Updating pod %s with host_resource GUID: %s (IP: %s)', 
-                            pod_name, host_resource_guid, pod_host_ip)
+                    
+                    # 检测 host_resource 是否发生变化
+                    if existing_host_resource != host_resource_guid:
+                        LOG.info('Pod %s drifted to different host: old_host=%s, new_host=%s (IP: %s)', 
+                                pod_name, existing_host_resource or 'None', host_resource_guid, pod_host_ip)
+                    else:
+                        LOG.info('Pod %s host unchanged: host_resource=%s (IP: %s)', 
+                                pod_name, host_resource_guid, pod_host_ip)
+                else:
+                    LOG.warning('Failed to query host_resource for pod %s (IP: %s)', pod_name, pod_host_ip)
+            else:
+                LOG.warning('Pod %s has no host IP, cannot update host_resource', pod_name)
+            
+            # 关联 app_instance（如果有）
+            if app_instance_id:
+                update_data['app_instance'] = app_instance_id
             
             update_response = cmdb_client.update('wecmdb', 'pod', [update_data])
-            LOG.info('Successfully updated pod in CMDB: %s (asset_id: %s, guid: %s)', 
-                    pod_name, pod_id, pod_guid)
+            LOG.info('Successfully updated existing pod in CMDB: %s (guid: %s, asset_id: %s)', 
+                    pod_name, pod_guid, pod_id)
             return pod_guid
         else:
-            # Pod 不存在，创建新记录
+            # Pod 不存在（通过 code 查询），但需要检查 asset_id 是否已存在
+            # 防止 CMDB 中有孤儿记录（code 不同但 asset_id 相同）
+            check_query = {
+                "criteria": {
+                    "attrName": "asset_id",
+                    "op": "eq",
+                    "condition": pod_id
+                }
+            }
+            check_response = cmdb_client.query('wecmdb', 'pod', check_query)
+            
+            if check_response and check_response.get('data') and len(check_response['data']) > 0:
+                # 发现有相同 asset_id 的记录，可能是数据不一致，更新它
+                existing_pod = check_response['data'][0]
+                pod_guid = existing_pod.get('guid')
+                LOG.warning('Found existing pod with same asset_id %s but different code (guid=%s), updating...', 
+                           pod_id, pod_guid)
+                
+                update_data = {
+                    'guid': pod_guid,
+                    'code': pod_name,  # 更新 code 为正确的名称
+                    'asset_id': pod_id
+                }
+                
+                # 关联 app_instance
+                if app_instance_id:
+                    update_data['app_instance'] = app_instance_id
+                
+                # 查询并关联 host_resource
+                if pod_host_ip:
+                    host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
+                    if host_resource_guid:
+                        update_data['host_resource'] = host_resource_guid
+                
+                cmdb_client.update('wecmdb', 'pod', [update_data])
+                LOG.info('Updated existing pod record with correct code: %s (guid: %s)', pod_name, pod_guid)
+                return pod_guid
+            
+            # 确实不存在，创建新记录
             create_data = {
                 'code': pod_name,
                 'asset_id': pod_id
