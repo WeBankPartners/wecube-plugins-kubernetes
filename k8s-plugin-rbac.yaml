@@ -33,6 +33,11 @@ rules:
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   
+  # ReplicaSet 权限（Pod 监控需要）
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  
   # Pod 权限
   - apiGroups: [""]
     resources: ["pods"]

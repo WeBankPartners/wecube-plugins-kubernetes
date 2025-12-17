@@ -83,24 +83,31 @@ def get_wecube_client():
 
 
 def get_cmdb_client():
-    """获取 CMDB 客户端（复用客户端）"""
+    """获取 CMDB 客户端（复用客户端，使用 WeCube 登录后的 token）"""
     global _cmdb_client
     
     with _cmdb_client_lock:
-        if _cmdb_client is None:
-            try:
-                from wecubek8s.common import wecmdb
-                
-                cmdb_server = CONF.wecube.base_url
-                if not cmdb_server:
-                    LOG.warning('CMDB base_url not configured')
-                    return None
-                
-                LOG.info('Creating CMDB client for server: %s', cmdb_server)
-                _cmdb_client = wecmdb.EntityClient(cmdb_server)
-            except Exception as e:
-                LOG.error('Failed to create CMDB client: %s', str(e))
+        # 每次都重新创建，使用最新的 WeCube token
+        # 因为 WeCube token 可能会更新（定期重新登录）
+        try:
+            from wecubek8s.common import wecmdb
+            
+            cmdb_server = CONF.wecube.base_url
+            if not cmdb_server:
+                LOG.warning('CMDB base_url not configured')
                 return None
+            
+            # 获取 WeCube 客户端（会自动登录并刷新 token）
+            wecube_client = get_wecube_client()
+            if not wecube_client or not wecube_client.token:
+                LOG.error('Failed to get WeCube token for CMDB authentication')
+                return None
+            
+            LOG.info('Creating CMDB client for server: %s with WeCube token', cmdb_server)
+            _cmdb_client = wecmdb.EntityClient(cmdb_server, wecube_client.token)
+        except Exception as e:
+            LOG.error('Failed to create CMDB client: %s', str(e))
+            return None
         
         return _cmdb_client
 
@@ -356,7 +363,7 @@ def notify_pod(event, cluster_id, data):
             return
         
         LOG.info('Preparing to send notification to WeCube')
-        LOG.info('WeCube endpoint: %s', CONF.wecube.server)
+        LOG.info('WeCube endpoint: %s', CONF.wecube.base_url)
         LOG.info('Sub-system code: %s', CONF.wecube.sub_system_code)
         
         # 检查是否获取到了 CMDB GUID
