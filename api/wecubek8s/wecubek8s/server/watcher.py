@@ -103,7 +103,8 @@ def get_cmdb_client():
                 LOG.error('Failed to get WeCube token for CMDB authentication')
                 return None
             
-            LOG.info('Creating CMDB client for server: %s with WeCube token', cmdb_server)
+            LOG.info('Creating CMDB client for server: %s with WeCube system token (prefix: %s...)', 
+                    cmdb_server, wecube_client.token[:20] if wecube_client.token else 'None')
             _cmdb_client = wecmdb.EntityClient(cmdb_server, wecube_client.token)
         except Exception as e:
             LOG.error('Failed to create CMDB client: %s', str(e))

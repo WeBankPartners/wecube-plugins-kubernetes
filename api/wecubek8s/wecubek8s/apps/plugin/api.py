@@ -1070,13 +1070,26 @@ class StatefulSet:
         
         try:
             from wecubek8s.common import wecmdb
+            from wecubek8s.common import wecube
             
             # 获取 CMDB 客户端（需要从配置中获取 CMDB 地址）
             cmdb_server = CONF.wecube.base_url
             if not cmdb_server:
                 LOG.warning('CMDB base_url not configured, skipping CMDB sync')
                 return
-            cmdb_client = wecmdb.EntityClient(cmdb_server)
+            
+            # 【关键修复】使用 WeCube 系统 token 而不是请求上下文的 token
+            # 这样可以确保 watcher 和 apply API 使用相同的 token 访问 CMDB
+            # 避免数据隔离导致 watcher 查询不到 apply API 创建的记录
+            try:
+                wecube_client = wecube.WeCubeClient(CONF.wecube.base_url, None)
+                wecube_client.login_subsystem()
+                LOG.info('Successfully logged in to WeCube, using system token for CMDB (token prefix: %s...)', 
+                        wecube_client.token[:20] if wecube_client.token else 'None')
+                cmdb_client = wecmdb.EntityClient(cmdb_server, wecube_client.token)
+            except Exception as e:
+                LOG.error('Failed to get WeCube system token for CMDB: %s, using request context token as fallback', str(e))
+                cmdb_client = wecmdb.EntityClient(cmdb_server)
             
             # 1. 查询 CMDB 中该 instanceId 下的所有 Pod
             query_data = {
