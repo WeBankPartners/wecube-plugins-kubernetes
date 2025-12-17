@@ -1498,6 +1498,21 @@ class StatefulSet:
         # 将 Pod 列表转换为字符串格式（用分号拼接），方便页面显示
         pods_str = ';'.join([pod['name'] for pod in pod_list]) if pod_list else ''
         
+        # 标记预期创建的 Pod（告知 watcher 这些 Pod 是主动创建的，不需要通知 WeCube）
+        # 这样可以避免 watcher 在收到 POD.ADDED 事件时重复触发编排
+        # 只有 Pod 漂移/崩溃重启等意外情况，watcher 才会通知 WeCube
+        try:
+            from wecubek8s.server import watcher
+            pod_names = [pod['name'] for pod in pod_list]
+            watcher.mark_expected_pods(
+                cluster_id=cluster_info['id'],
+                namespace=data['namespace'],
+                pod_names=pod_names,
+                source='statefulset_apply'
+            )
+        except Exception as e:
+            LOG.warning('Failed to mark expected pods in watcher (watcher may still notify for these pods): %s', str(e))
+        
         # 构建返回结果
         result = {
             'id': exists_resource.metadata.uid,

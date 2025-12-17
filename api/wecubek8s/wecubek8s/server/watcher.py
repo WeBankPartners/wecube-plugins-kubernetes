@@ -66,6 +66,21 @@ _wecube_client_token_ttl = 3600  # Token 有效期 1 小时
 _cmdb_client = None
 _cmdb_client_lock = threading.Lock()
 
+# 事件去重缓存（防止短时间内重复处理同一个事件）
+# Key: (pod_uid, event_type), Value: timestamp
+_event_dedup_cache = {}
+_event_dedup_lock = threading.Lock()
+_event_dedup_window = 10  # 去重时间窗口：10秒内的重复事件会被忽略
+
+# 预期 Pod 创建缓存（用于区分 API 主动创建 vs Pod 漂移/崩溃重启）
+# Key: (cluster_id, namespace, pod_name), Value: {'timestamp': float, 'source': 'statefulset_apply'}
+# 当通过 API 创建 StatefulSet 时，会将预期创建的 Pod 加入此缓存
+# Watcher 收到 POD.ADDED 时，如果 Pod 在缓存中 → 跳过通知（用户主动创建）
+#                         如果 Pod 不在缓存中 → 执行通知（Pod 漂移或崩溃重启）
+_expected_pod_cache = {}
+_expected_pod_lock = threading.Lock()
+_expected_pod_window = 300  # 预期 Pod 缓存时间窗口：5分钟（StatefulSet 创建 Pod 可能较慢）
+
 
 def get_wecube_client():
     """获取 WeCube 客户端（复用客户端，避免重复登录）"""
@@ -111,6 +126,70 @@ def get_cmdb_client():
             return None
         
         return _cmdb_client
+
+
+def mark_expected_pods(cluster_id, namespace, pod_names, source='statefulset_apply'):
+    """
+    标记预期创建的 Pod（由 API 主动创建，不需要 watcher 通知）
+    
+    Args:
+        cluster_id: 集群 ID
+        namespace: 命名空间
+        pod_names: Pod 名称列表 ['pod-0', 'pod-1', ...]
+        source: 创建来源（默认 'statefulset_apply'）
+    """
+    with _expected_pod_lock:
+        current_time = time.time()
+        
+        # 清理过期的缓存条目
+        expired_keys = [k for k, v in _expected_pod_cache.items() 
+                       if current_time - v['timestamp'] > _expected_pod_window]
+        for k in expired_keys:
+            del _expected_pod_cache[k]
+        
+        # 标记新的预期 Pod
+        for pod_name in pod_names:
+            key = (cluster_id, namespace, pod_name)
+            _expected_pod_cache[key] = {
+                'timestamp': current_time,
+                'source': source
+            }
+        
+        LOG.info('🏷️  Marked %d pods as expected from %s: cluster=%s, namespace=%s, pods=%s',
+                len(pod_names), source, cluster_id, namespace, pod_names)
+        LOG.info('Total expected pods in cache: %d', len(_expected_pod_cache))
+
+
+def is_expected_pod(cluster_id, namespace, pod_name):
+    """
+    检查 Pod 是否是预期创建的（如果是，则不需要 watcher 通知）
+    
+    Returns:
+        (bool, dict): (是否预期创建, 缓存信息)
+    """
+    with _expected_pod_lock:
+        key = (cluster_id, namespace, pod_name)
+        current_time = time.time()
+        
+        # 清理过期的缓存条目
+        expired_keys = [k for k, v in _expected_pod_cache.items() 
+                       if current_time - v['timestamp'] > _expected_pod_window]
+        for k in expired_keys:
+            del _expected_pod_cache[k]
+        
+        if key in _expected_pod_cache:
+            info = _expected_pod_cache[key]
+            time_since_mark = current_time - info['timestamp']
+            
+            # 返回后从缓存中移除（每个 Pod 只使用一次）
+            del _expected_pod_cache[key]
+            
+            return True, {
+                'source': info['source'],
+                'time_since_mark': time_since_mark
+            }
+        
+        return False, {}
 
 
 def query_host_resource_guid(cmdb_client, pod_host_ip):
@@ -830,6 +909,63 @@ def notify_pod(event, cluster_id, data):
     LOG.info('Full pod data: %s', data)
     
     try:
+        # ===== 事件去重检查 =====
+        pod_uid = data.get('id')  # Kubernetes Pod UID
+        if not pod_uid:
+            LOG.error('Pod UID not found in data, cannot perform deduplication check')
+        else:
+            event_key = (pod_uid, event)
+            current_time = time.time()
+            
+            with _event_dedup_lock:
+                # 清理过期的缓存条目（超过去重窗口的）
+                expired_keys = [k for k, t in _event_dedup_cache.items() 
+                               if current_time - t > _event_dedup_window]
+                for k in expired_keys:
+                    del _event_dedup_cache[k]
+                
+                # 检查是否是重复事件
+                if event_key in _event_dedup_cache:
+                    time_since_last = current_time - _event_dedup_cache[event_key]
+                    LOG.warning('=' * 80)
+                    LOG.warning('🔄 DUPLICATE EVENT DETECTED - SKIPPING')
+                    LOG.warning('Event: %s, Pod UID: %s', event, pod_uid)
+                    LOG.warning('Time since last event: %.2f seconds', time_since_last)
+                    LOG.warning('Dedup window: %d seconds', _event_dedup_window)
+                    LOG.warning('This is likely a retry or duplicate notification from Kubernetes')
+                    LOG.warning('=' * 80)
+                    return
+                
+                # 记录本次事件
+                _event_dedup_cache[event_key] = current_time
+                LOG.info('✅ Event deduplication check passed - this is a new event')
+                LOG.info('Event key: %s, Total cached events: %d', event_key, len(_event_dedup_cache))
+        
+        # ===== 预期 Pod 创建检查（只针对 POD.ADDED 事件）=====
+        if event == 'POD.ADDED':
+            pod_name = data.get('name')
+            pod_namespace = data.get('namespace')
+            
+            if pod_name and pod_namespace:
+                is_expected, info = is_expected_pod(cluster_id, pod_namespace, pod_name)
+                
+                if is_expected:
+                    LOG.warning('=' * 80)
+                    LOG.warning('🏷️  EXPECTED POD CREATION DETECTED - SKIPPING WATCHER NOTIFICATION')
+                    LOG.warning('Pod: %s, Namespace: %s, Cluster: %s', pod_name, pod_namespace, cluster_id)
+                    LOG.warning('Source: %s, Time since marked: %.2f seconds', 
+                               info.get('source', 'unknown'), info.get('time_since_mark', 0))
+                    LOG.warning('This Pod was created via API (StatefulSet apply), not due to drift/crash')
+                    LOG.warning('Watcher will skip notification to avoid duplicate orchestration')
+                    LOG.warning('=' * 80)
+                    LOG.info('notify_pod completed - expected Pod creation, no action taken')
+                    return
+                else:
+                    LOG.info('✅ Pod NOT in expected list - this is a drift/crash/restart event')
+                    LOG.info('Watcher will proceed with CMDB sync and WeCube notification')
+            else:
+                LOG.warning('Pod name or namespace missing, cannot check expected Pod list')
+        
         # ===== 第一步：同步 CMDB（在通知之前） =====
         LOG.info('-' * 40)
         LOG.info('Step 1: Start CMDB synchronization')
