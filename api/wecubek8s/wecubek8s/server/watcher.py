@@ -206,12 +206,15 @@ def sync_pod_to_cmdb_on_added(pod_data):
         for attempt in range(1, MAX_RETRIES + 1):
             LOG.info('[Step 1] [Retry %d/%d] Querying CMDB by code (pod name): %s', 
                     attempt, MAX_RETRIES, pod_name)
+            LOG.info('[Step 1] [Retry %d/%d] Query data: %s', attempt, MAX_RETRIES, query_data)
             
             cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
             found_count = len(cmdb_response.get('data', [])) if cmdb_response else 0
             
             LOG.info('[Step 1] [Retry %d/%d] Query result: found %d record(s)', 
                     attempt, MAX_RETRIES, found_count)
+            LOG.info('[Step 1] [Retry %d/%d] CMDB response: %s', 
+                    attempt, MAX_RETRIES, cmdb_response)
             
             # 如果找到记录，立即跳出循环
             if cmdb_response and cmdb_response.get('data') and len(cmdb_response['data']) > 0:
