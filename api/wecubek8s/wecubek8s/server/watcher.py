@@ -166,9 +166,10 @@ def sync_pod_to_cmdb_on_added(pod_data):
     # ===== 步骤0：重试机制配置 =====
     # apply API 可能正在创建 K8s 资源并等待 Pod 就绪（30-240秒）
     # 需要足够长的重试时间确保 apply API 完成 CMDB 记录创建
-    MAX_RETRIES = 15      # 最多重试 15 次
+    # 注意：有 packageUrl 时 apply API 等待 240 秒，无 packageUrl 时等待 30 秒
+    MAX_RETRIES = 30      # 最多重试 30 次
     RETRY_INTERVAL = 8    # 每次间隔 8 秒
-    # 总等待时间：最多 15 * 8 = 120 秒（可覆盖 apply API 的等待窗口）
+    # 总等待时间：最多 30 * 8 = 240 秒（与 apply API 最大等待时间一致）
     
     cmdb_client = get_cmdb_client()
     if not cmdb_client:
