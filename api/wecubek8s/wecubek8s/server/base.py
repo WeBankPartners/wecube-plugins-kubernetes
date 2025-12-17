@@ -48,7 +48,7 @@ def get_env_value(value, origin_value):
     return value
 
 
-@config.intercept('database')
+@config.intercept('db')
 def build_database_connection(db_config, origin_value):
     """
     修复数据库连接字符串的变量替换问题
