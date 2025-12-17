@@ -1,6 +1,6 @@
 #!/bin/sh
-# 设置环境变量强制限制 gevent threadpool
-export GEVENT_THREADPOOL=10
+# 设置环境变量限制 gevent threadpool 大小
+export GEVENT_THREADPOOL_SIZE=10
 # 使用 thread 解析器（稳定可靠）
 export GEVENT_RESOLVER=thread
 
