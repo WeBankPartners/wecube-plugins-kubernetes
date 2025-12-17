@@ -10,6 +10,9 @@ from concurrent.futures import ThreadPoolExecutor as PoolExecutor
 from talos.core import config
 from talos.core import utils
 
+# ⚠️ 关键：必须在初始化配置之前导入，以便注册配置拦截器
+from wecubek8s.server import base as wecubek8s_base
+
 # 初始化配置和数据库（必须在使用 CONF 和数据库之前）
 # 使用 talos.server.base.initialize_server 确保数据库池正确初始化
 from talos.server import base as talos_base
@@ -49,7 +52,6 @@ except Exception as e:
 
 from wecubek8s.apps.model import api
 from wecubek8s.common import wecube
-from wecubek8s.server import base as wecubek8s_base
 
 LOG = logging.getLogger(__name__)
 CONF = config.CONF
