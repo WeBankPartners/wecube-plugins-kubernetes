@@ -490,9 +490,11 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             LOG.warning('Pod name missing, skipping CMDB sync: %s', pod_data)
             return
         
-        LOG.info('Syncing POD.DELETED to CMDB: pod=%s, id=%s', pod_name, pod_id)
+        LOG.info('='*60)
+        LOG.info('🗑️  Syncing POD.DELETED to CMDB: pod=%s, id=%s', pod_name, pod_id)
+        LOG.info('='*60)
         
-        # ===== 方式1：通过 code 字段查询 =====
+        # ===== 方式1：通过 code 字段查询（优先级最高） =====
         query_data = {
             "criteria": {
                 "attrName": "code",
@@ -501,64 +503,278 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             }
         }
         
-        LOG.info('Querying CMDB by code: %s', pod_name)
+        LOG.info('[Query-1] Querying CMDB by code (pod name): %s', pod_name)
         cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
-        LOG.info('Query response: %s', cmdb_response)
+        LOG.info('[Query-1] Response status: %s', 
+                'SUCCESS' if cmdb_response and cmdb_response.get('data') else 'NO DATA')
         
         pod_guid = None
         existing_asset_id = None
+        existing_pod = None
         
         if cmdb_response and cmdb_response.get('data') and len(cmdb_response['data']) > 0:
-            LOG.info('Found %d pod(s) in CMDB by code', len(cmdb_response['data']))
+            LOG.info('[Query-1] ✅ Found %d pod(s) in CMDB by code', len(cmdb_response['data']))
             existing_pod = cmdb_response['data'][0]
             pod_guid = existing_pod.get('guid')
             existing_asset_id = existing_pod.get('asset_id')
-            LOG.info('Found pod in CMDB: guid=%s, asset_id=%s, code=%s', 
-                    pod_guid, existing_asset_id, existing_pod.get('code'))
+            LOG.info('[Query-1] Pod details: guid=%s, asset_id=%s, code=%s, key_name=%s, state=%s', 
+                    pod_guid, existing_asset_id, existing_pod.get('code'), 
+                    existing_pod.get('key_name'), existing_pod.get('state'))
         else:
-            LOG.warning('Pod not found by code, trying to query by asset_id: %s', pod_id)
+            LOG.warning('[Query-1] ❌ Pod not found by code')
             
-            # ===== 方式2：通过 asset_id 查询（备用） =====
-            if pod_id:
-                query_by_asset_id = {
+            # ===== 方式2：通过 key_name 查询（某些 CMDB 使用 key_name 作为唯一键） =====
+            LOG.info('[Query-2] Trying to query by key_name: %s', pod_name)
+            query_by_keyname = {
+                "criteria": {
+                    "attrName": "key_name",
+                    "op": "eq",
+                    "condition": pod_name
+                }
+            }
+            cmdb_response_keyname = cmdb_client.query('wecmdb', 'pod', query_by_keyname)
+            LOG.info('[Query-2] Response status: %s', 
+                    'SUCCESS' if cmdb_response_keyname and cmdb_response_keyname.get('data') else 'NO DATA')
+            
+            if cmdb_response_keyname and cmdb_response_keyname.get('data') and len(cmdb_response_keyname['data']) > 0:
+                LOG.info('[Query-2] ✅ Found %d pod(s) in CMDB by key_name', len(cmdb_response_keyname['data']))
+                existing_pod = cmdb_response_keyname['data'][0]
+                pod_guid = existing_pod.get('guid')
+                existing_asset_id = existing_pod.get('asset_id')
+                LOG.info('[Query-2] Pod details: guid=%s, asset_id=%s, code=%s, key_name=%s, state=%s', 
+                        pod_guid, existing_asset_id, existing_pod.get('code'), 
+                        existing_pod.get('key_name'), existing_pod.get('state'))
+            else:
+                LOG.warning('[Query-2] ❌ Pod not found by key_name')
+                
+                # ===== 方式3：通过 asset_id 查询（备用） =====
+                if pod_id:
+                    LOG.info('[Query-3] Trying to query by asset_id: %s', pod_id)
+                    query_by_asset_id = {
+                        "criteria": {
+                            "attrName": "asset_id",
+                            "op": "eq",
+                            "condition": pod_id
+                        }
+                    }
+                    
+                    cmdb_response_by_id = cmdb_client.query('wecmdb', 'pod', query_by_asset_id)
+                    LOG.info('[Query-3] Response status: %s', 
+                            'SUCCESS' if cmdb_response_by_id and cmdb_response_by_id.get('data') else 'NO DATA')
+                    
+                    if cmdb_response_by_id and cmdb_response_by_id.get('data') and len(cmdb_response_by_id['data']) > 0:
+                        LOG.info('[Query-3] ✅ Found %d pod(s) in CMDB by asset_id', len(cmdb_response_by_id['data']))
+                        existing_pod = cmdb_response_by_id['data'][0]
+                        pod_guid = existing_pod.get('guid')
+                        existing_asset_id = existing_pod.get('asset_id')
+                        LOG.info('[Query-3] Pod details: guid=%s, asset_id=%s, code=%s, key_name=%s, state=%s', 
+                                pod_guid, existing_asset_id, existing_pod.get('code'), 
+                                existing_pod.get('key_name'), existing_pod.get('state'))
+                    else:
+                        LOG.warning('[Query-3] ❌ Pod not found by asset_id')
+                else:
+                    LOG.warning('[Query-3] ⚠️  No asset_id available (K8s Pod UID missing)')
+        
+        # ===== 如果还是找不到，尝试模糊查询（处理命名不一致的情况） =====
+        if not pod_guid:
+            LOG.warning('='*60)
+            LOG.warning('[Query-4] All exact matches failed, trying FUZZY search...')
+            LOG.warning('[Query-4] Search criteria:')
+            LOG.warning('  - code (pod name): %s', pod_name)
+            LOG.warning('  - asset_id (K8s UID): %s', pod_id if pod_id else 'N/A')
+            LOG.warning('='*60)
+            
+            # 尝试查询所有状态为 created_0 的 Pod（可能是预创建但未同步的）
+            try:
+                LOG.info('[Query-4-Fuzzy] Step 1: Query all pods with state=created_0')
+                fuzzy_query = {
                     "criteria": {
-                        "attrName": "asset_id",
+                        "attrName": "state",
                         "op": "eq",
-                        "condition": pod_id
+                        "condition": "created_0"
                     }
                 }
+                fuzzy_response = cmdb_client.query('wecmdb', 'pod', fuzzy_query)
                 
-                LOG.info('Querying CMDB by asset_id: %s', pod_id)
-                cmdb_response_by_id = cmdb_client.query('wecmdb', 'pod', query_by_asset_id)
-                LOG.info('Query by asset_id response: %s', cmdb_response_by_id)
-                
-                if cmdb_response_by_id and cmdb_response_by_id.get('data') and len(cmdb_response_by_id['data']) > 0:
-                    LOG.info('Found %d pod(s) in CMDB by asset_id', len(cmdb_response_by_id['data']))
-                    existing_pod = cmdb_response_by_id['data'][0]
-                    pod_guid = existing_pod.get('guid')
-                    existing_asset_id = existing_pod.get('asset_id')
-                    LOG.info('Found pod in CMDB by asset_id: guid=%s, asset_id=%s, code=%s', 
-                            pod_guid, existing_asset_id, existing_pod.get('code'))
+                if fuzzy_response and fuzzy_response.get('data') and len(fuzzy_response['data']) > 0:
+                    total_created_pods = len(fuzzy_response['data'])
+                    LOG.info('[Query-4-Fuzzy] Found %d pods in created_0 state', total_created_pods)
+                    LOG.info('[Query-4-Fuzzy] Step 2: Filter by name similarity')
+                    
+                    # 检查是否有名称相似的 Pod
+                    similar_pods = []
+                    exact_match_pods = []  # 完全匹配（但可能是不同字段）
+                    
+                    for pod in fuzzy_response['data']:
+                        pod_code = pod.get('code', '')
+                        pod_key_name = pod.get('key_name', '')
+                        pod_asset_id = pod.get('asset_id', '')
+                        
+                        # 精确匹配检查
+                        is_exact = False
+                        if pod_code == pod_name or pod_key_name == pod_name:
+                            is_exact = True
+                            exact_match_pods.append({
+                                'guid': pod.get('guid'),
+                                'code': pod_code,
+                                'key_name': pod_key_name,
+                                'asset_id': pod_asset_id,
+                                'state': pod.get('state', '')
+                            })
+                        
+                        # 模糊匹配检查（前缀或包含）
+                        if not is_exact:
+                            if (pod_code and (pod_name in pod_code or pod_code in pod_name)) or \
+                               (pod_key_name and (pod_name in pod_key_name or pod_key_name in pod_name)):
+                                similar_pods.append({
+                                    'guid': pod.get('guid'),
+                                    'code': pod_code,
+                                    'key_name': pod_key_name,
+                                    'asset_id': pod_asset_id,
+                                    'state': pod.get('state', '')
+                                })
+                    
+                    # 优先处理完全匹配
+                    if exact_match_pods:
+                        LOG.warning('[Query-4-Fuzzy] ✅ Found %d EXACT match(es) in created_0 pods:', len(exact_match_pods))
+                        for idx, sp in enumerate(exact_match_pods, 1):
+                            LOG.warning('   [%d] guid=%s, code=%s, key_name=%s, asset_id=%s, state=%s',
+                                       idx, sp['guid'], sp['code'], sp['key_name'], sp['asset_id'], sp['state'])
+                        
+                        if len(exact_match_pods) == 1:
+                            pod_guid = exact_match_pods[0]['guid']
+                            existing_asset_id = exact_match_pods[0]['asset_id']
+                            existing_pod = exact_match_pods[0]
+                            LOG.info('[Query-4-Fuzzy] ✅ Only one exact match, will use it: guid=%s', pod_guid)
+                        else:
+                            # 如果有多个精确匹配，尝试通过 asset_id 区分
+                            LOG.warning('[Query-4-Fuzzy] Multiple exact matches found')
+                            if pod_id:
+                                matching_by_asset = [p for p in exact_match_pods if p['asset_id'] == pod_id]
+                                if len(matching_by_asset) == 1:
+                                    pod_guid = matching_by_asset[0]['guid']
+                                    existing_asset_id = matching_by_asset[0]['asset_id']
+                                    existing_pod = matching_by_asset[0]
+                                    LOG.info('[Query-4-Fuzzy] ✅ Found unique match by asset_id: guid=%s', pod_guid)
+                                else:
+                                    LOG.error('[Query-4-Fuzzy] Cannot determine which pod to delete (ambiguous)')
+                            else:
+                                LOG.error('[Query-4-Fuzzy] Cannot determine which pod to delete (no asset_id to compare)')
+                    
+                    # 如果没有精确匹配，使用相似匹配
+                    elif similar_pods:
+                        LOG.warning('[Query-4-Fuzzy] ⚠️  Found %d SIMILAR pods (not exact match):', len(similar_pods))
+                        for idx, sp in enumerate(similar_pods, 1):
+                            LOG.warning('   [%d] guid=%s, code=%s, key_name=%s, asset_id=%s, state=%s',
+                                       idx, sp['guid'], sp['code'], sp['key_name'], sp['asset_id'], sp['state'])
+                        
+                        if len(similar_pods) == 1:
+                            pod_guid = similar_pods[0]['guid']
+                            existing_asset_id = similar_pods[0]['asset_id']
+                            existing_pod = similar_pods[0]
+                            LOG.warning('[Query-4-Fuzzy] ⚠️  Only one similar pod found, will use it: guid=%s', pod_guid)
+                            LOG.warning('[Query-4-Fuzzy] Please verify this is correct!')
+                        else:
+                            LOG.error('[Query-4-Fuzzy] Multiple similar pods found, cannot auto-delete (ambiguous)')
+                            LOG.error('[Query-4-Fuzzy] Please manually check and delete the correct record')
+                    else:
+                        LOG.warning('[Query-4-Fuzzy] ❌ No similar pods found in %d created_0 pods', total_created_pods)
                 else:
-                    LOG.warning('Pod not found by asset_id either')
+                    LOG.warning('[Query-4-Fuzzy] ❌ No pods in created_0 state')
+            except Exception as fuzzy_err:
+                LOG.error('[Query-4-Fuzzy] ❌ Fuzzy search failed: %s', str(fuzzy_err))
+                LOG.exception(fuzzy_err)
         
         # ===== 执行删除操作 =====
         if not pod_guid:
-            LOG.warning('Pod %s not found in CMDB (tried both code and asset_id), no action needed for deletion', pod_name)
+            LOG.error('='*60)
+            LOG.error('❌ DELETION FAILED: Pod not found in CMDB')
+            LOG.error('='*60)
+            LOG.error('Pod information:')
+            LOG.error('  - name (code): %s', pod_name)
+            LOG.error('  - K8s UID (asset_id): %s', pod_id if pod_id else 'N/A')
+            LOG.error('')
+            LOG.error('Query attempts made:')
+            LOG.error('  ✗ Query by code (pod name)')
+            LOG.error('  ✗ Query by key_name')
+            if pod_id:
+                LOG.error('  ✗ Query by asset_id (K8s UID)')
+            LOG.error('  ✗ Fuzzy search in created_0 pods')
+            LOG.error('')
+            LOG.error('📋 Manual cleanup required:')
+            LOG.error('  1. Open WeCMDB UI: %s', CONF.wecube.base_url if CONF.wecube.base_url else '<cmdb-url>')
+            LOG.error('  2. Navigate to: Data Management → Pod table')
+            LOG.error('  3. Search conditions:')
+            LOG.error('     - code LIKE "%%%s%%"', pod_name[:40])
+            LOG.error('     - OR key_name LIKE "%%%s%%"', pod_name[:40])
+            if pod_id:
+                LOG.error('     - OR asset_id = "%s"', pod_id)
+            LOG.error('  4. Check the found record(s) and delete manually')
+            LOG.error('  5. Or use CMDB API to delete:')
+            LOG.error('     curl -X DELETE %s/wecmdb/api/v1/ci/pod/<guid>', 
+                     CONF.wecube.base_url if CONF.wecube.base_url else '<cmdb-url>')
+            LOG.error('='*60)
             return
         
         # 验证 asset_id 是否匹配（如果提供了 pod_id）
         if pod_id and existing_asset_id and existing_asset_id != pod_id:
-            LOG.warning('Pod %s asset_id mismatch (CMDB: %s, K8s: %s), skipping delete sync', 
-                       pod_name, existing_asset_id, pod_id)
-            LOG.warning('This might be a different pod instance with the same name')
+            LOG.warning('='*60)
+            LOG.warning('⚠️  ASSET_ID MISMATCH DETECTED')
+            LOG.warning('='*60)
+            LOG.warning('Pod name: %s', pod_name)
+            LOG.warning('CMDB asset_id: %s', existing_asset_id)
+            LOG.warning('K8s Pod UID:   %s', pod_id)
+            LOG.warning('')
+            LOG.warning('This suggests one of the following:')
+            LOG.warning('  1. Pod was recreated with same name but different UID')
+            LOG.warning('  2. CMDB record is stale (old Pod instance)')
+            LOG.warning('  3. Name collision between different pods')
+            LOG.warning('')
+            LOG.warning('Action: Skipping deletion to avoid removing wrong record')
+            LOG.warning('Recommendation: Manually verify and cleanup in CMDB UI')
+            LOG.warning('='*60)
             return
         
-        # 直接删除 CMDB 中的 Pod 记录
-        LOG.info('Deleting pod from CMDB: guid=%s, code=%s, asset_id=%s', 
-                pod_guid, pod_name, existing_asset_id)
-        cmdb_client.delete('wecmdb', 'pod', [pod_guid])
-        LOG.info('✅ Successfully deleted pod from CMDB: %s (guid: %s)', pod_name, pod_guid)
+        # 执行删除
+        try:
+            LOG.info('='*60)
+            LOG.info('[DELETE] Preparing to delete pod from CMDB')
+            LOG.info('[DELETE] Target pod details:')
+            LOG.info('  - guid: %s', pod_guid)
+            LOG.info('  - code: %s', existing_pod.get('code') if existing_pod else pod_name)
+            LOG.info('  - key_name: %s', existing_pod.get('key_name') if existing_pod else 'N/A')
+            LOG.info('  - asset_id: %s', existing_asset_id if existing_asset_id else 'N/A')
+            LOG.info('  - state: %s', existing_pod.get('state') if existing_pod else 'N/A')
+            LOG.info('')
+            
+            LOG.info('[DELETE] Executing CMDB delete operation...')
+            cmdb_client.delete('wecmdb', 'pod', [pod_guid])
+            
+            LOG.info('='*60)
+            LOG.info('✅ Successfully deleted pod from CMDB')
+            LOG.info('  - Pod name: %s', pod_name)
+            LOG.info('  - GUID: %s', pod_guid)
+            LOG.info('  - Asset ID: %s', existing_asset_id if existing_asset_id else 'N/A')
+            LOG.info('='*60)
+        except Exception as del_err:
+            LOG.error('='*60)
+            LOG.error('❌ DELETION FAILED: CMDB delete operation error')
+            LOG.error('='*60)
+            LOG.error('Target pod:')
+            LOG.error('  - name: %s', pod_name)
+            LOG.error('  - guid: %s', pod_guid)
+            LOG.error('Error: %s', str(del_err))
+            LOG.exception(del_err)
+            LOG.error('')
+            LOG.error('Possible causes:')
+            LOG.error('  1. Network connection to CMDB failed')
+            LOG.error('  2. Authentication token expired')
+            LOG.error('  3. Pod record has dependencies (foreign key constraints)')
+            LOG.error('  4. Insufficient permissions')
+            LOG.error('')
+            LOG.error('Recommendation: Check CMDB logs and retry manually')
+            LOG.error('='*60)
+            raise
     
     except Exception as e:
         LOG.error('Failed to sync POD.DELETED to CMDB for pod %s: %s', 
