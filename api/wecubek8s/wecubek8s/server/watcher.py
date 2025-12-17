@@ -198,7 +198,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
         query_data = {
             "criteria": {
                 "attrName": "code",
-                "op": "eq",
+                "op": "contains",
                 "condition": pod_name
             }
         }
