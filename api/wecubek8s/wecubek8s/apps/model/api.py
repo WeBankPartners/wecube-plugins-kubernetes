@@ -134,8 +134,13 @@ class Deployment(BaseEntity):
                 if tag_key == const.Tag.DEPLOYMENT_ID_TAG:
                     correlation_id = tag_value
                     break
+        
+        # 使用 cluster_id + uid 作为全局唯一标识
+        asset_id = f"{cluster['id']}_{item.metadata.uid}" if item.metadata.uid else None
+        
         result = {
             'id': item.metadata.uid,
+            'asset_id': asset_id,
             'name': item.metadata.name,
             'displayName': f'{cluster["name"]}-{item.metadata.namespace}-{item.metadata.name}',
             'namespace': item.metadata.namespace,
@@ -230,15 +235,19 @@ class Pod(BaseEntity):
                         statefulset_id = owner.uid
                     # 可以继续添加其他控制器类型（如 DaemonSet、Job 等）
         
+        # 使用 cluster_id + pod_uid 作为全局唯一标识，防止重复集群配置导致的重复创建
+        asset_id = f"{cluster['id']}_{item.metadata.uid}" if item.metadata.uid else None
+        
         result = {
             'id': item.metadata.uid,
+            'asset_id': asset_id,  # 全局唯一标识（cluster_id + pod_uid）
             'name': item.metadata.name,
             'displayName': f'{cluster["name"]}-{item.metadata.namespace}-{item.metadata.name}',
             'namespace': item.metadata.namespace,
             'ip_address': item.status.pod_ip,
-            'host_ip': item.status.host_ip,  # ⭐ 新增：Pod 所在节点的 IP 地址（用于关联 host_resource）
+            'host_ip': item.status.host_ip,
             'replicaset_id': controll_by,
-            'statefulset_id': statefulset_id,  # ⭐ 新增：StatefulSet UID（用于关联 app_instance）
+            'statefulset_id': statefulset_id,
             'deployment_id': None,
             'correlation_id': correlation_id,
             'node_id': item.spec.node_name,

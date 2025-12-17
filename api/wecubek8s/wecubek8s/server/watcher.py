@@ -145,11 +145,31 @@ def query_host_resource_guid(cmdb_client, pod_host_ip):
 
 
 def sync_pod_to_cmdb_on_added(pod_data):
-    """Pod 新增时同步到 CMDB
+    """Pod 新增时同步到 CMDB（仅更新模式 + 重试机制）
+    
+    核心原则：Watcher 只负责更新已存在的 CMDB 记录，不创建新记录
+    
+    工作流程：
+    1. 使用重试机制等待 apply API 完成 CMDB 预创建（避免时序竞态）
+    2. 通过 pod name（code 字段）查询 CMDB
+    3. 如果记录存在：
+       - 更新 asset_id（填充 K8s UID）
+       - 复用已有的 app_instance（不修改）
+       - 更新 host_resource（如果节点变化）
+    4. 如果记录不存在：
+       - 记录日志后直接返回，不执行任何操作
+       - 说明该 Pod 不是通过 apply API 创建的（如手动 kubectl create）
     
     Returns:
-        str: CMDB 中 Pod 记录的 GUID，失败时返回 None
+        str: CMDB 中 Pod 记录的 GUID，失败或不存在时返回 None
     """
+    # ===== 步骤0：重试机制配置 =====
+    # apply API 可能正在创建 K8s 资源并等待 Pod 就绪（30-240秒）
+    # 需要足够长的重试时间确保 apply API 完成 CMDB 记录创建
+    MAX_RETRIES = 15      # 最多重试 15 次
+    RETRY_INTERVAL = 8    # 每次间隔 8 秒
+    # 总等待时间：最多 15 * 8 = 120 秒（可覆盖 apply API 的等待窗口）
+    
     cmdb_client = get_cmdb_client()
     if not cmdb_client:
         LOG.warning('CMDB client not available, skipping pod add sync')
@@ -157,21 +177,22 @@ def sync_pod_to_cmdb_on_added(pod_data):
     
     try:
         pod_name = pod_data.get('name')
-        pod_id = pod_data.get('id')  # K8s Pod UID
+        pod_id = pod_data.get('asset_id')  # 使用 asset_id（cluster_id_pod_uid）而不是 id
         pod_host_ip = pod_data.get('host_ip')
-        app_instance_id = pod_data.get('statefulset_id') or pod_data.get('deployment_id')
+        cluster_id = pod_data.get('cluster_id')
         
-        if not pod_name or not pod_id:
-            LOG.warning('Pod name or ID missing, skipping CMDB sync: %s', pod_data)
+        if not pod_name or not pod_id or not cluster_id:
+            LOG.warning('Pod name, asset_id or cluster_id missing, skipping CMDB sync: %s', pod_data)
             return None
         
         LOG.info('='*60)
-        LOG.info('Syncing POD.ADDED to CMDB: pod=%s, id=%s, host_ip=%s', 
+        LOG.info('Syncing POD.ADDED to CMDB: pod=%s, asset_id=%s, host_ip=%s', 
                  pod_name, pod_id, pod_host_ip or 'N/A')
-        LOG.info('Deployment/StatefulSet: %s', app_instance_id or 'N/A')
+        LOG.info('Expected: Pod record already pre-created by apply API')
+        LOG.info('Watcher task: Update asset_id and verify/update host_resource')
         
-        # ===== 步骤1：通过 code（Pod name）查询 =====
-        # StatefulSet Pod name 是稳定的，部署时可能已预创建记录
+        # ===== 步骤1：通过 code（Pod name）查询 CMDB（带重试机制）=====
+        # apply API 预创建时使用 Pod name 作为 code
         query_data = {
             "criteria": {
                 "attrName": "code",
@@ -180,42 +201,79 @@ def sync_pod_to_cmdb_on_added(pod_data):
             }
         }
         
-        LOG.info('[Step 1] Querying CMDB by code: %s', pod_name)
-        cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
-        LOG.info('[Step 1] Query result: found %d record(s)', 
-                len(cmdb_response.get('data', [])) if cmdb_response else 0)
+        cmdb_response = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            LOG.info('[Step 1] [Retry %d/%d] Querying CMDB by code (pod name): %s', 
+                    attempt, MAX_RETRIES, pod_name)
+            
+            cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
+            found_count = len(cmdb_response.get('data', [])) if cmdb_response else 0
+            
+            LOG.info('[Step 1] [Retry %d/%d] Query result: found %d record(s)', 
+                    attempt, MAX_RETRIES, found_count)
+            
+            # 如果找到记录，立即跳出循环
+            if cmdb_response and cmdb_response.get('data') and len(cmdb_response['data']) > 0:
+                LOG.info('✅ Found CMDB record on attempt %d/%d', attempt, MAX_RETRIES)
+                break
+            
+            # 如果还有重试次数，等待后继续
+            if attempt < MAX_RETRIES:
+                LOG.warning('⏳ CMDB record not found yet, waiting %d seconds before retry %d/%d...', 
+                           RETRY_INTERVAL, attempt + 1, MAX_RETRIES)
+                LOG.warning('   Possible reason: apply API is still creating K8s resources or waiting for pods')
+                time.sleep(RETRY_INTERVAL)
         
-        # ===== 步骤2：如果通过 code 找到记录，则更新（包括预创建的和重建的） =====
+        # ===== 检查最终查询结果 =====
+        if not cmdb_response or not cmdb_response.get('data') or len(cmdb_response['data']) == 0:
+            LOG.warning('='*60)
+            LOG.warning('❌ CMDB record NOT FOUND after %d retries (waited %d seconds total)', 
+                       MAX_RETRIES, MAX_RETRIES * RETRY_INTERVAL)
+            LOG.warning('   Pod name: %s', pod_name)
+            LOG.warning('   Cluster: %s', cluster_id)
+            LOG.warning('   Possible reasons:')
+            LOG.warning('   1. Pod was created manually (kubectl create) without apply API')
+            LOG.warning('   2. apply API failed before creating CMDB record')
+            LOG.warning('   3. CMDB record was deleted by another process')
+            LOG.warning('   Action: Skipping sync (Watcher does not create new CMDB records)')
+            LOG.warning('='*60)
+            return None
+        
+        # ===== 步骤2：如果通过 code 找到记录，则更新 =====
         if cmdb_response and cmdb_response.get('data') and len(cmdb_response['data']) > 0:
             existing_pod = cmdb_response['data'][0]
             pod_guid = existing_pod.get('guid')
             existing_asset_id = existing_pod.get('asset_id')
             existing_host_resource = existing_pod.get('host_resource')
+            existing_app_instance = existing_pod.get('app_instance')  # 读取已有的 app_instance
             
             LOG.info('[Step 2] Found existing pod by code: guid=%s, asset_id=%s', 
                     pod_guid, existing_asset_id or 'NULL')
+            LOG.info('[Step 2] Existing relations: app_instance=%s, host_resource=%s',
+                    existing_app_instance or 'NULL', existing_host_resource or 'NULL')
             
             if not pod_guid:
                 LOG.warning('CMDB pod record has no guid, cannot update: %s', pod_name)
                 return None
             
-            # 判断是否是预创建的记录（asset_id 为空）或 Pod 重建（asset_id 不同）
+            # 判断场景
             is_pre_created = (not existing_asset_id or existing_asset_id == '')
             is_pod_rebuilt = (existing_asset_id and existing_asset_id != pod_id)
             
             if is_pre_created:
-                LOG.info('✅ Found PRE-CREATED pod record (asset_id is empty), will UPDATE it')
-                LOG.info('   This is expected for StatefulSet/Deployment pods created via API')
+                LOG.info('✅ Scenario: PRE-CREATED by apply API (asset_id empty)')
+                LOG.info('   app_instance already set by apply API: %s', existing_app_instance or 'NULL')
+                LOG.info('   Will update: asset_id + host_resource (if changed)')
             elif is_pod_rebuilt:
-                LOG.info('🔄 Pod %s REBUILT detected: old UID=%s, new UID=%s, updating...', 
-                        pod_name, existing_asset_id, pod_id)
-                LOG.info('   This could be due to: pod restart, node eviction (taint), or manual deletion')
+                LOG.info('🔄 Scenario: POD REBUILT (asset_id changed)')
+                LOG.info('   Old UID: %s → New UID: %s', existing_asset_id, pod_id)
+                LOG.info('   Will update: asset_id + host_resource (if changed)')
+                LOG.info('   Reason: pod restart, node eviction, or manual deletion')
             else:
-                LOG.info('Pod %s already exists with same asset_id, updating metadata', pod_name)
+                LOG.info('Scenario: POD EXISTS with same asset_id, checking for drift')
             
-            # 如果是 Pod 重建（不是预创建），检查新的 asset_id 是否已被其他记录使用
+            # Pod 重建时，清理重复记录
             if is_pod_rebuilt:
-                # 检查新的 asset_id 是否已被其他记录使用（防止重复）
                 check_query = {
                     "criteria": {
                         "attrName": "asset_id",
@@ -225,7 +283,6 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 }
                 check_response = cmdb_client.query('wecmdb', 'pod', check_query)
                 
-                # 如果新 asset_id 已存在且不是当前记录，删除重复记录
                 if check_response and check_response.get('data'):
                     for duplicate_pod in check_response['data']:
                         dup_guid = duplicate_pod.get('guid')
@@ -240,230 +297,63 @@ def sync_pod_to_cmdb_on_added(pod_data):
             
             update_data = {
                 'guid': pod_guid,
-                'asset_id': pod_id  # 更新为新的 UID（StatefulSet Pod 重建时必须）
+                'asset_id': pod_id  # 更新 K8s UID
             }
             
-            # 查询并关联 host_resource（Pod 漂移时宿主机可能会变化）
+            # 查询并更新 host_resource（Pod 可能调度到不同节点或发生漂移）
             if pod_host_ip:
                 host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
                 if host_resource_guid:
-                    update_data['host_resource'] = host_resource_guid
-                    
-                    # 检测 host_resource 是否发生变化
+                    # 检测 host_resource 是否变化
                     if existing_host_resource != host_resource_guid:
-                        LOG.info('🚀 POD DRIFT DETECTED! Pod %s moved to different host:', pod_name)
-                        LOG.info('   Old host_resource: %s', existing_host_resource or 'None')
+                        LOG.info('🚀 HOST CHANGED! Pod %s scheduled/drifted to different node:', pod_name)
+                        LOG.info('   Old host_resource: %s', existing_host_resource or 'NULL (not scheduled yet)')
                         LOG.info('   New host_resource: %s (IP: %s)', host_resource_guid, pod_host_ip)
-                        LOG.info('   Reason: likely node eviction/taint or manual rescheduling')
+                        update_data['host_resource'] = host_resource_guid
                     else:
-                        LOG.info('Pod %s host unchanged: host_resource=%s (IP: %s)', 
-                                pod_name, host_resource_guid, pod_host_ip)
+                        LOG.info('✓ Host unchanged: %s (IP: %s)', host_resource_guid, pod_host_ip)
+                        # 即使没变也要设置，确保数据一致性
+                        update_data['host_resource'] = host_resource_guid
                 else:
-                    LOG.warning('Failed to query host_resource for pod %s (IP: %s)', pod_name, pod_host_ip)
+                    LOG.warning('⚠️  Cannot find host_resource for IP %s in CMDB', pod_host_ip)
+                    LOG.warning('   Pod %s will be updated without host_resource', pod_name)
             else:
-                LOG.warning('Pod %s has no host IP, cannot update host_resource', pod_name)
+                LOG.warning('Pod %s has no host_ip yet (pending?)', pod_name)
             
-            # 关联 app_instance（如果有）
-            if app_instance_id:
-                update_data['app_instance'] = app_instance_id
+            # 不查询 app_instance（apply API 已设置），但保留已有值（避免覆盖为空）
+            # 只有在 apply API 没设置时才可能需要更新，但那是 apply 的 bug，watcher 不处理
             
             update_response = cmdb_client.update('wecmdb', 'pod', [update_data])
-            LOG.info('[Step 2] ✅ Successfully UPDATED existing pod in CMDB: %s (guid: %s, asset_id: %s)', 
-                    pod_name, pod_guid, pod_id)
+            LOG.info('[Step 2] ✅ Successfully UPDATED pod in CMDB')
+            LOG.info('   Pod: %s (guid: %s)', pod_name, pod_guid)
+            LOG.info('   asset_id: %s', pod_id)
+            LOG.info('   host_resource: %s', update_data.get('host_resource', 'NOT_CHANGED'))
             LOG.info('='*60)
             return pod_guid
         else:
-            # ===== 步骤3：通过 code 未找到，检查 asset_id 是否已存在 =====
-            # 防止 CMDB 中有孤儿记录（code 不同但 asset_id 相同）
-            LOG.info('[Step 3] Pod not found by code, checking by asset_id: %s', pod_id)
-            check_query = {
-                "criteria": {
-                    "attrName": "asset_id",
-                    "op": "eq",
-                    "condition": pod_id
-                }
-            }
-            check_response = cmdb_client.query('wecmdb', 'pod', check_query)
-            LOG.info('[Step 3] Query result: found %d record(s) by asset_id', 
-                    len(check_response.get('data', [])) if check_response else 0)
-            
-            if check_response and check_response.get('data') and len(check_response['data']) > 0:
-                # 发现有相同 asset_id 的记录，更新它（可能是 code 不一致）
-                existing_pod = check_response['data'][0]
-                pod_guid = existing_pod.get('guid')
-                existing_code = existing_pod.get('code')
-                LOG.warning('[Step 3] ⚠️  Found existing pod by asset_id but with different code!')
-                LOG.warning('   Expected code: %s', pod_name)
-                LOG.warning('   Existing code: %s', existing_code)
-                LOG.warning('   Will UPDATE the record (guid=%s)', pod_guid)
-                
-                update_data = {
-                    'guid': pod_guid,
-                    'code': pod_name,  # 更新 code 为正确的名称
-                    'asset_id': pod_id
-                }
-                
-                # 关联 app_instance
-                if app_instance_id:
-                    update_data['app_instance'] = app_instance_id
-                
-                # 查询并关联 host_resource
-                if pod_host_ip:
-                    host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
-                    if host_resource_guid:
-                        update_data['host_resource'] = host_resource_guid
-                
-                cmdb_client.update('wecmdb', 'pod', [update_data])
-                LOG.info('[Step 3] ✅ Successfully UPDATED pod with correct code: %s (guid: %s)', pod_name, pod_guid)
-                LOG.info('='*60)
-                return pod_guid
-            
-            # ===== 步骤4：双重确认后创建新记录 =====
-            LOG.info('[Step 4] Pod not found by code or asset_id, creating new record...')
-            LOG.warning('[Step 4] ⚠️  ATTENTION: Creating new pod record')
-            LOG.warning('   If you see duplicate records, check if deployment pre-created pods with different code values')
-            
-            create_data = {
-                'code': pod_name,
-                'asset_id': pod_id
-            }
-            
-            # 关联 app_instance（StatefulSet/Deployment）
-            if app_instance_id:
-                create_data['app_instance'] = app_instance_id
-                LOG.info('Creating pod %s with app_instance: %s', pod_name, app_instance_id)
-            
-            # 查询并关联 host_resource
-            if pod_host_ip:
-                host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
-                if host_resource_guid:
-                    create_data['host_resource'] = host_resource_guid
-                    LOG.info('Creating pod %s with host_resource GUID: %s (IP: %s)', 
-                            pod_name, host_resource_guid, pod_host_ip)
-            
-            try:
-                create_response = cmdb_client.create('wecmdb', 'pod', [create_data])
-                
-                # 从创建响应中获取 GUID
-                pod_guid = None
-                if create_response and create_response.get('data') and len(create_response['data']) > 0:
-                    pod_guid = create_response['data'][0].get('guid')
-                
-                if pod_guid:
-                    LOG.info('[Step 4] ✅ Successfully CREATED new pod in CMDB: %s (asset_id: %s, guid: %s)', 
-                            pod_name, pod_id, pod_guid)
-                    LOG.info('='*60)
-                    return pod_guid
-                else:
-                    LOG.warning('[Step 4] Pod created in CMDB but no GUID returned: %s', pod_name)
-                    LOG.info('='*60)
-                    return None
-            
-            except Exception as create_err:
-                # 如果创建失败（可能是唯一性冲突），尝试查询并更新
-                error_msg = str(create_err)
-                LOG.warning('[Step 4] ⚠️  Pod creation FAILED: %s', error_msg)
-                if 'Unique validate fail' in error_msg or 'key_name' in error_msg or 'unique' in error_msg.lower():
-                    LOG.warning('[Step 4] Detected uniqueness conflict (likely pre-created by API)')
-                    LOG.warning('   This is expected when deploying StatefulSet/Deployment via API')
-                    LOG.warning('   Will retry query by code (pod name) with small delay to handle race condition')
-                    
-                    # 等待一小段时间（并发情况下，另一个线程可能刚创建完，数据库事务还没提交）
-                    import time
-                    time.sleep(0.1)
-                    
-                    # 尝试 1: 再次按 code 查询（可能是并发创建）
-                    LOG.info('[Step 4-Retry-1] Retrying query by code (pod name): %s', pod_name)
-                    retry_query_code = {
-                        "criteria": {
-                            "attrName": "code",
-                            "op": "eq",
-                            "condition": pod_name
-                        }
-                    }
-                    retry_response = cmdb_client.query('wecmdb', 'pod', retry_query_code)
-                    
-                    if retry_response and retry_response.get('data') and len(retry_response['data']) > 0:
-                        existing_pod = retry_response['data'][0]
-                        pod_guid = existing_pod.get('guid')
-                        existing_asset_id = existing_pod.get('asset_id')
-                        LOG.info('[Step 4-Retry-1] ✅ Found pre-created pod by code (pod name)!')
-                        LOG.info('   guid=%s, asset_id=%s (empty means pre-created)', 
-                                pod_guid, existing_asset_id or 'EMPTY')
-                        
-                        # 更新记录（填充 asset_id 和其他信息）
-                        update_data = {
-                            'guid': pod_guid,
-                            'code': pod_name,  # 确保 code 正确
-                            'asset_id': pod_id  # 填充真实的 K8s Pod UID
-                        }
-                        
-                        if app_instance_id:
-                            update_data['app_instance'] = app_instance_id
-                        
-                        if pod_host_ip:
-                            host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
-                            if host_resource_guid:
-                                update_data['host_resource'] = host_resource_guid
-                                LOG.info('   Will update host_resource to: %s (IP: %s)', host_resource_guid, pod_host_ip)
-                        
-                        cmdb_client.update('wecmdb', 'pod', [update_data])
-                        LOG.info('[Step 4-Retry-1] ✅ Successfully UPDATED pre-created pod: %s (guid=%s)', 
-                                pod_name, pod_guid)
-                        LOG.info('='*60)
-                        return pod_guid
-                    
-                    # 尝试 2: 按 asset_id 查询（极少数情况：code 不同但 asset_id 相同）
-                    LOG.info('[Step 4-Retry-2] Code query still failed, trying asset_id: %s', pod_id)
-                    retry_query_asset = {
-                        "criteria": {
-                            "attrName": "asset_id",
-                            "op": "eq",
-                            "condition": pod_id
-                        }
-                    }
-                    retry_response = cmdb_client.query('wecmdb', 'pod', retry_query_asset)
-                    
-                    if retry_response and retry_response.get('data') and len(retry_response['data']) > 0:
-                        existing_pod = retry_response['data'][0]
-                        pod_guid = existing_pod.get('guid')
-                        existing_code = existing_pod.get('code')
-                        LOG.warning('[Step 4-Retry-2] ⚠️  Found pod by asset_id with different code!')
-                        LOG.warning('   Expected code: %s, Existing code: %s', pod_name, existing_code)
-                        LOG.info('[Step 4-Retry-2] Updating to correct code: %s (guid=%s)', pod_name, pod_guid)
-                        
-                        # 更新记录
-                        update_data = {
-                            'guid': pod_guid,
-                            'code': pod_name,  # 更正 code
-                            'asset_id': pod_id
-                        }
-                        
-                        if app_instance_id:
-                            update_data['app_instance'] = app_instance_id
-                        
-                        if pod_host_ip:
-                            host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
-                            if host_resource_guid:
-                                update_data['host_resource'] = host_resource_guid
-                        
-                        cmdb_client.update('wecmdb', 'pod', [update_data])
-                        LOG.info('[Step 4-Retry-2] ✅ Successfully UPDATED pod with correct code: %s (guid=%s)', 
-                                pod_name, pod_guid)
-                        LOG.info('='*60)
-                        return pod_guid
-                    else:
-                        LOG.error('[Step 4-Retry] ❌ Cannot find existing pod by code or asset_id after retry')
-                        LOG.error('   Pod name (code): %s, asset_id: %s', pod_name, pod_id)
-                        LOG.error('   This suggests a race condition or database inconsistency')
-                        LOG.error('   Recommendation: manually check CMDB pod table for orphan records')
-                        LOG.info('='*60)
-                        raise  # Re-raise original exception
-                else:
-                    # 其他类型的错误，直接抛出
-                    LOG.error('[Step 4] Unexpected error during pod creation: %s', error_msg)
-                    LOG.info('='*60)
-                    raise
+            # ===== 记录不存在：不执行任何操作（只更新模式） =====
+            LOG.warning('='*60)
+            LOG.warning('⚠️  Pod NOT found in CMDB by code (pod name)')
+            LOG.warning('='*60)
+            LOG.warning('Pod information:')
+            LOG.warning('  - Name: %s', pod_name)
+            LOG.warning('  - Namespace: %s', pod_data.get('namespace', 'N/A'))
+            LOG.warning('  - Cluster: %s', cluster_id)
+            LOG.warning('  - K8s UID (asset_id): %s', pod_id)
+            LOG.warning('  - Host IP: %s', pod_host_ip or 'N/A')
+            LOG.warning('')
+            LOG.warning('Watcher policy: UPDATE-ONLY mode')
+            LOG.warning('  ✗ Will NOT create new CMDB record')
+            LOG.warning('  ✓ Only updates existing records pre-created by apply API')
+            LOG.warning('')
+            LOG.warning('Possible reasons:')
+            LOG.warning('  1. Pod created manually via kubectl (not via apply API)')
+            LOG.warning('  2. CMDB record was deleted manually')
+            LOG.warning('  3. Race condition: apply API has not yet completed CMDB pre-creation')
+            LOG.warning('')
+            LOG.warning('Action: Skipping CMDB sync for this pod')
+            LOG.warning('='*60)
+            return None
     
     except Exception as e:
         LOG.error('='*60)
@@ -484,14 +374,15 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
     
     try:
         pod_name = pod_data.get('name')
-        pod_id = pod_data.get('id')  # K8s Pod UID
+        pod_asset_id = pod_data.get('asset_id')  # 使用 asset_id（cluster_id_pod_uid）
+        pod_id = pod_asset_id  # 兼容旧代码中的 pod_id 变量名
         
         if not pod_name:
             LOG.warning('Pod name missing, skipping CMDB sync: %s', pod_data)
             return
         
         LOG.info('='*60)
-        LOG.info('🗑️  Syncing POD.DELETED to CMDB: pod=%s, id=%s', pod_name, pod_id)
+        LOG.info('🗑️  Syncing POD.DELETED to CMDB: pod=%s, asset_id=%s', pod_name, pod_asset_id or 'N/A')
         LOG.info('='*60)
         
         # ===== 方式1：通过 code 字段查询（优先级最高） =====
@@ -548,13 +439,13 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
                 LOG.warning('[Query-2] ❌ Pod not found by key_name')
                 
                 # ===== 方式3：通过 asset_id 查询（备用） =====
-                if pod_id:
-                    LOG.info('[Query-3] Trying to query by asset_id: %s', pod_id)
+                if pod_asset_id:
+                    LOG.info('[Query-3] Trying to query by asset_id: %s', pod_asset_id)
                     query_by_asset_id = {
                         "criteria": {
                             "attrName": "asset_id",
                             "op": "eq",
-                            "condition": pod_id
+                            "condition": pod_asset_id
                         }
                     }
                     
@@ -573,7 +464,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
                     else:
                         LOG.warning('[Query-3] ❌ Pod not found by asset_id')
                 else:
-                    LOG.warning('[Query-3] ⚠️  No asset_id available (K8s Pod UID missing)')
+                    LOG.warning('[Query-3] ⚠️  No asset_id available')
         
         # ===== 如果还是找不到，尝试模糊查询（处理命名不一致的情况） =====
         if not pod_guid:
@@ -581,7 +472,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             LOG.warning('[Query-4] All exact matches failed, trying FUZZY search...')
             LOG.warning('[Query-4] Search criteria:')
             LOG.warning('  - code (pod name): %s', pod_name)
-            LOG.warning('  - asset_id (K8s UID): %s', pod_id if pod_id else 'N/A')
+            LOG.warning('  - asset_id: %s', pod_asset_id if pod_asset_id else 'N/A')
             LOG.warning('='*60)
             
             # 尝试查询所有状态为 created_0 的 Pod（可能是预创建但未同步的）
@@ -930,16 +821,32 @@ def notify_pod(event, cluster_id, data):
 
 
 def watch_pod(cluster, event_stop):
-    """监听单个集群的 Pod 事件（带指数退避重试）"""
+    """监听单个集群的 Pod 事件（带指数退避重试）
+    
+    多 watcher 安全性说明：
+    - 多个 watcher 同时监听同一集群是安全的（CMDB 操作是幂等的）
+    - CMDB 中 Pod 的 code 字段有唯一性约束，防止重复创建
+    - 所有操作都基于 code（pod name）查询，然后执行 UPDATE
+    - 即使多个 watcher 同时处理同一 Pod 事件，最终结果是一致的
+    - 延迟 1.5 秒避免与 apply API 的 CMDB 操作竞争
+    
+    建议：
+    - 生产环境建议只运行一个 watcher 实例（避免不必要的并发和日志混乱）
+    - 如果需要高可用，可以用主备模式（Kubernetes StatefulSet + ReadinessProbe）
+    - 当前设计已确保即使多实例也不会产生重复记录
+    """
     retry_delay = 0.5  # 初始延迟 0.5 秒
     max_retry_delay = 60  # 最大延迟 60 秒
+    
+    cluster_name = cluster.get('name', cluster['id'])
+    LOG.info('Starting pod watcher for cluster: %s', cluster_name)
     
     while not event_stop.is_set():
         try:
             api.Pod().watch(cluster, event_stop, notify_pod)
             retry_delay = 0.5  # 成功后重置延迟
         except Exception as e:
-            LOG.error('Exception raised while watching pod from cluster %s', cluster.get('name', cluster['id']))
+            LOG.error('Exception raised while watching pod from cluster %s', cluster_name)
             LOG.exception(e)
             
             # 指数退避：0.5s -> 1s -> 2s -> 4s -> 8s -> ... -> 60s
