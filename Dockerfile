@@ -23,8 +23,8 @@ COPY api/wecubek8s/etc /etc/wecubek8s
 # RUN chown -R app:app /var/log/wecubek8s/
 # USER app
 
-# 设置环境变量限制 gevent threadpool 和使用 thread 解析器
-ENV GEVENT_THREADPOOL=10
+# 设置环境变量限制 gevent threadpool 大小和使用 thread 解析器
+ENV GEVENT_THREADPOOL_SIZE=10
 ENV GEVENT_RESOLVER=thread
 
 COPY build/start_all.sh /scripts/start_all.sh
