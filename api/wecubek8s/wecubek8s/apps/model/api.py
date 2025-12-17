@@ -266,7 +266,16 @@ class Pod(BaseEntity):
         LOG.info('Starting watch for cluster %s', cluster.get('name', cluster['id']))
         
         try:
-            for event in w.stream(k8s_client.core_client.list_pod_for_all_namespaces):
+            # 获取当前的 resource_version，用于跳过现有的 Pod
+            # 只监听从此刻开始的新增和删除事件，不处理已存在的 Pod
+            pod_list = k8s_client.core_client.list_pod_for_all_namespaces(limit=1)
+            resource_version = pod_list.metadata.resource_version
+            LOG.info('Starting watch from resource_version: %s (skipping existing pods)', resource_version)
+            
+            for event in w.stream(
+                k8s_client.core_client.list_pod_for_all_namespaces,
+                resource_version=resource_version
+            ):
                 event_type = event.get('type')
                 pod_obj = event.get('object')
                 

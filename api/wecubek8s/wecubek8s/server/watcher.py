@@ -309,20 +309,67 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     LOG.info('Creating pod %s with host_resource GUID: %s (IP: %s)', 
                             pod_name, host_resource_guid, pod_host_ip)
             
-            create_response = cmdb_client.create('wecmdb', 'pod', [create_data])
+            try:
+                create_response = cmdb_client.create('wecmdb', 'pod', [create_data])
+                
+                # 从创建响应中获取 GUID
+                pod_guid = None
+                if create_response and create_response.get('data') and len(create_response['data']) > 0:
+                    pod_guid = create_response['data'][0].get('guid')
+                
+                if pod_guid:
+                    LOG.info('Successfully created pod in CMDB: %s (asset_id: %s, guid: %s)', 
+                            pod_name, pod_id, pod_guid)
+                    return pod_guid
+                else:
+                    LOG.warning('Pod created in CMDB but no GUID returned: %s', pod_name)
+                    return None
             
-            # 从创建响应中获取 GUID
-            pod_guid = None
-            if create_response and create_response.get('data') and len(create_response['data']) > 0:
-                pod_guid = create_response['data'][0].get('guid')
-            
-            if pod_guid:
-                LOG.info('Successfully created pod in CMDB: %s (asset_id: %s, guid: %s)', 
-                        pod_name, pod_id, pod_guid)
-                return pod_guid
-            else:
-                LOG.warning('Pod created in CMDB but no GUID returned: %s', pod_name)
-                return None
+            except Exception as create_err:
+                # 如果创建失败（可能是唯一性冲突），尝试查询并更新
+                error_msg = str(create_err)
+                if 'Unique validate fail' in error_msg or 'asset_id' in error_msg:
+                    LOG.warning('Pod creation failed due to uniqueness conflict: %s, attempting to query and update', pod_name)
+                    
+                    # 再次尝试按 asset_id 查询（可能是并发导致的）
+                    retry_query = {
+                        "criteria": {
+                            "attrName": "asset_id",
+                            "op": "eq",
+                            "condition": pod_id
+                        }
+                    }
+                    retry_response = cmdb_client.query('wecmdb', 'pod', retry_query)
+                    
+                    if retry_response and retry_response.get('data') and len(retry_response['data']) > 0:
+                        existing_pod = retry_response['data'][0]
+                        pod_guid = existing_pod.get('guid')
+                        LOG.info('Found existing pod after create failure: %s (guid=%s), updating...', pod_name, pod_guid)
+                        
+                        # 更新记录
+                        update_data = {
+                            'guid': pod_guid,
+                            'code': pod_name,  # 确保 code 正确
+                            'asset_id': pod_id
+                        }
+                        
+                        if app_instance_id:
+                            update_data['app_instance'] = app_instance_id
+                        
+                        if pod_host_ip:
+                            host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
+                            if host_resource_guid:
+                                update_data['host_resource'] = host_resource_guid
+                        
+                        cmdb_client.update('wecmdb', 'pod', [update_data])
+                        LOG.info('Successfully updated pod after create failure: %s (guid=%s)', pod_name, pod_guid)
+                        return pod_guid
+                    else:
+                        LOG.error('Cannot find existing pod after create failure: %s', pod_name)
+                        raise  # Re-raise original exception
+                else:
+                    # 其他类型的错误，直接抛出
+                    raise
     
     except Exception as e:
         LOG.error('Failed to sync POD.ADDED to CMDB for pod %s: %s', 
