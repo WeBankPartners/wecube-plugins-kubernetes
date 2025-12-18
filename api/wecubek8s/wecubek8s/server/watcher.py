@@ -68,9 +68,15 @@ _cmdb_client_lock = threading.Lock()
 
 # 事件去重缓存（防止短时间内重复处理同一个事件）
 # Key: (pod_uid, event_type), Value: timestamp
+# 多 watcher 去重策略：
+# 1. 进程内去重：使用此缓存，避免同一 watcher 重复处理（K8s watch 可能推送重复事件）
+# 2. 跨进程去重：依赖 CMDB 的唯一性约束（code 字段）+ 幂等性操作
+#    - 创建操作：CMDB code 唯一约束，只有一个 watcher 创建成功，其他失败后查询已存在记录
+#    - 更新操作：幂等的，多个 watcher 同时更新同一记录不会产生副作用
+# 3. 时间窗口：30秒内的重复事件会被当前 watcher 忽略（避免频繁 CMDB 操作）
 _event_dedup_cache = {}
 _event_dedup_lock = threading.Lock()
-_event_dedup_window = 10  # 去重时间窗口：10秒内的重复事件会被忽略
+_event_dedup_window = 30  # 去重时间窗口：30秒（增加到30秒以应对多 watcher 场景）
 
 # 预期 Pod 创建缓存（用于区分 API 主动创建 vs Pod 漂移/崩溃重启）
 # Key: (cluster_id, namespace, pod_name), Value: {'timestamp': float, 'source': 'statefulset_apply'}
@@ -220,6 +226,47 @@ def query_host_resource_guid(cmdb_client, pod_host_ip):
             LOG.warning('No host_resource found in CMDB for IP: %s', pod_host_ip)
     except Exception as e:
         LOG.error('Failed to query host_resource from CMDB for IP %s: %s', pod_host_ip, str(e))
+    
+    return None
+
+
+def query_statefulset_app_instance(k8s_client, statefulset_name, namespace):
+    """查询 StatefulSet 的 app_instance（用于 Pod 漂移时创建新 Pod 记录）
+    
+    从 K8s StatefulSet 的 annotations 中读取 app_instance（instanceId），
+    而不是从 CMDB 查询（因为 StatefulSet 详情没有存到 CMDB）
+    
+    Args:
+        k8s_client: K8s 客户端
+        statefulset_name: StatefulSet 名称
+        namespace: 命名空间
+    
+    Returns:
+        str: app_instance 的 GUID（从 annotation 读取），失败时返回 None
+    """
+    if not k8s_client or not statefulset_name or not namespace:
+        return None
+    
+    try:
+        LOG.info('Reading StatefulSet from K8s: %s/%s', namespace, statefulset_name)
+        statefulset = k8s_client.get_statefulset(statefulset_name, namespace)
+        
+        if statefulset and statefulset.metadata:
+            annotations = statefulset.metadata.annotations or {}
+            app_instance_guid = annotations.get('wecube.io/app-instance')
+            
+            if app_instance_guid:
+                LOG.info('✅ Found app_instance from StatefulSet annotation: %s', app_instance_guid)
+                return app_instance_guid
+            else:
+                LOG.warning('⚠️  StatefulSet found but no wecube.io/app-instance annotation: %s/%s', 
+                           namespace, statefulset_name)
+                LOG.warning('⚠️  This StatefulSet may have been created before the annotation feature was added')
+        else:
+            LOG.warning('⚠️  No StatefulSet found in K8s: %s/%s', namespace, statefulset_name)
+    except Exception as e:
+        LOG.error('❌ Failed to read StatefulSet from K8s: %s', str(e))
+        LOG.exception(e)
     
     return None
 
@@ -440,12 +487,167 @@ def sync_pod_to_cmdb_on_added(pod_data):
             LOG.warning('   Pod name: %s', pod_name)
             LOG.warning('   Cluster: %s', cluster_id)
             LOG.warning('   Possible reasons:')
-            LOG.warning('   1. Pod was created manually (kubectl create) without apply API')
-            LOG.warning('   2. apply API failed before creating CMDB record')
-            LOG.warning('   3. CMDB record was deleted by another process')
-            LOG.warning('   Action: Skipping sync (Watcher does not create new CMDB records)')
+            LOG.warning('   1. Pod drift/eviction (pod was recreated by StatefulSet)')
+            LOG.warning('   2. Pod was created manually (kubectl create) without apply API')
+            LOG.warning('   3. apply API failed before creating CMDB record')
             LOG.warning('='*60)
-            return None
+            
+            # ===== 新增逻辑：创建 Pod 记录（处理 Pod 漂移场景）=====
+            LOG.info('🆕 Attempting to CREATE new Pod record in CMDB (drift/eviction scenario)')
+            
+            # 步骤1：获取 app_instance（从 StatefulSet 的 annotation）
+            statefulset_name = pod_data.get('statefulset_name')  # 从 Pod 的 owner_references 获取
+            pod_namespace = pod_data.get('namespace')
+            app_instance_guid = None
+            
+            if statefulset_name and pod_namespace:
+                LOG.info('[CREATE-Step-1] Pod belongs to StatefulSet: %s/%s', pod_namespace, statefulset_name)
+                LOG.info('[CREATE-Step-1] Reading app_instance from StatefulSet annotation...')
+                
+                # 查询集群配置以创建 K8s 客户端
+                try:
+                    cluster_list = api.db_resource.Cluster().list({'id': cluster_id})
+                    if not cluster_list:
+                        LOG.error('[CREATE-Step-1] ❌ Cannot find cluster configuration for cluster_id: %s', cluster_id)
+                        LOG.error('[CREATE-Step-1] Cannot create K8s client, aborting')
+                        LOG.warning('='*60)
+                        return None
+                    
+                    cluster_info = cluster_list[0]
+                    
+                    # 确保 api_server 有正确的协议前缀
+                    from wecubek8s.common import k8s
+                    api_server = cluster_info['api_server']
+                    if not api_server.startswith('https://') and not api_server.startswith('http://'):
+                        api_server = 'https://' + api_server
+                    
+                    # 创建 K8s 客户端
+                    k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
+                    k8s_client = k8s.Client(k8s_auth)
+                    
+                    # 从 StatefulSet 的 annotation 中读取 app_instance
+                    app_instance_guid = query_statefulset_app_instance(k8s_client, statefulset_name, pod_namespace)
+                    
+                    if app_instance_guid:
+                        LOG.info('[CREATE-Step-1] ✅ Found app_instance: %s', app_instance_guid)
+                    else:
+                        LOG.error('[CREATE-Step-1] ❌ Cannot find app_instance from StatefulSet annotation')
+                        LOG.error('[CREATE-Step-1] StatefulSet: %s/%s', pod_namespace, statefulset_name)
+                        LOG.error('[CREATE-Step-1] Cannot create Pod without app_instance, aborting')
+                        LOG.warning('='*60)
+                        return None
+                        
+                except Exception as e:
+                    LOG.error('[CREATE-Step-1] ❌ Failed to read StatefulSet annotation: %s', str(e))
+                    LOG.exception(e)
+                    LOG.error('[CREATE-Step-1] Cannot create Pod without app_instance, aborting')
+                    LOG.warning('='*60)
+                    return None
+            else:
+                LOG.error('[CREATE-Step-1] ❌ Pod has no StatefulSet owner or namespace is missing')
+                LOG.error('[CREATE-Step-1] statefulset_name: %s, namespace: %s', statefulset_name or 'None', pod_namespace or 'None')
+                LOG.error('[CREATE-Step-1] This Pod may not be managed by StatefulSet')
+                LOG.error('[CREATE-Step-1] Cannot create Pod without app_instance, aborting')
+                LOG.warning('='*60)
+                return None
+            
+            # 步骤2：获取 host_resource（从 host IP）
+            host_resource_guid = None
+            if pod_host_ip:
+                LOG.info('[CREATE-Step-2] Querying host_resource for IP: %s', pod_host_ip)
+                host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
+                
+                if host_resource_guid:
+                    LOG.info('[CREATE-Step-2] ✅ Found host_resource: %s', host_resource_guid)
+                else:
+                    LOG.warning('[CREATE-Step-2] ⚠️  host_resource not found for IP: %s', pod_host_ip)
+                    LOG.warning('[CREATE-Step-2] Will create Pod without host_resource')
+            else:
+                LOG.warning('[CREATE-Step-2] ⚠️  Pod has no host_ip (pending?)')
+            
+            # 步骤3：创建 Pod 记录
+            LOG.info('[CREATE-Step-3] Creating new Pod record in CMDB...')
+            create_data = {
+                'code': pod_name,
+                'key_name': pod_name,
+                'asset_id': pod_id,  # K8s UID（带 cluster_id 前缀）
+                'app_instance': app_instance_guid,  # 从 StatefulSet 继承
+                'state': 'created_0'  # 默认状态
+            }
+            
+            # 可选字段：host_resource
+            if host_resource_guid:
+                create_data['host_resource'] = host_resource_guid
+            
+            LOG.info('[CREATE-Step-3] Create data: %s', create_data)
+            
+            try:
+                # CMDB 的 code 字段有唯一性约束，天然支持跨进程去重
+                # 如果多个 watcher 同时创建，只有一个会成功，其他会失败（然后查询到已存在的记录）
+                create_response = cmdb_client.create('wecmdb', 'pod', [create_data])
+                
+                if create_response and create_response.get('data') and len(create_response['data']) > 0:
+                    created_pod = create_response['data'][0]
+                    created_guid = created_pod.get('guid')
+                    
+                    LOG.info('='*60)
+                    LOG.info('✅ Successfully CREATED Pod in CMDB (drift/eviction scenario)')
+                    LOG.info('   Pod name: %s', pod_name)
+                    LOG.info('   Pod GUID: %s', created_guid)
+                    LOG.info('   asset_id: %s', pod_id)
+                    LOG.info('   app_instance: %s', app_instance_guid)
+                    LOG.info('   host_resource: %s', host_resource_guid or 'N/A')
+                    LOG.info('='*60)
+                    return created_guid
+                else:
+                    LOG.error('[CREATE-Step-3] ❌ Create returned no data')
+                    LOG.error('[CREATE-Step-3] Response: %s', create_response)
+                    LOG.warning('='*60)
+                    return None
+                    
+            except Exception as create_err:
+                # 可能是因为 code 唯一性冲突（多个 watcher 同时创建）
+                # 重新查询一次，看是否已被其他 watcher 创建
+                error_msg = str(create_err)
+                LOG.warning('[CREATE-Step-3] Create failed: %s', error_msg)
+                
+                if 'unique' in error_msg.lower() or 'duplicate' in error_msg.lower() or 'exists' in error_msg.lower():
+                    LOG.info('[CREATE-Step-3] Likely duplicate creation by another watcher, retrying query...')
+                    time.sleep(1)  # 等待 1 秒确保其他 watcher 创建完成
+                    
+                    # 重新查询
+                    retry_response = cmdb_client.query('wecmdb', 'pod', query_data)
+                    if retry_response and retry_response.get('data') and len(retry_response['data']) > 0:
+                        existing_pod = retry_response['data'][0]
+                        existing_guid = existing_pod.get('guid')
+                        existing_asset_id = existing_pod.get('asset_id')
+                        
+                        LOG.info('[CREATE-Step-3] ✅ Found Pod created by another watcher: guid=%s', existing_guid)
+                        
+                        # 更新 asset_id（如果为空或不匹配）
+                        if not existing_asset_id or existing_asset_id != pod_id:
+                            LOG.info('[CREATE-Step-3] Updating asset_id: %s -> %s', existing_asset_id or 'NULL', pod_id)
+                            update_data = {
+                                'guid': existing_guid,
+                                'asset_id': pod_id
+                            }
+                            if host_resource_guid:
+                                update_data['host_resource'] = host_resource_guid
+                            
+                            cmdb_client.update('wecmdb', 'pod', [update_data])
+                            LOG.info('[CREATE-Step-3] ✅ Updated asset_id successfully')
+                        
+                        LOG.info('='*60)
+                        return existing_guid
+                    else:
+                        LOG.error('[CREATE-Step-3] ❌ Retry query still found no record')
+                        LOG.warning('='*60)
+                        return None
+                else:
+                    LOG.error('[CREATE-Step-3] ❌ Create failed with unexpected error')
+                    LOG.exception(create_err)
+                    LOG.warning('='*60)
+                    return None
         
         # ===== 步骤2：如果通过 code 找到记录，则更新 =====
         if cmdb_response and cmdb_response.get('data') and len(cmdb_response['data']) > 0:
@@ -1104,16 +1306,25 @@ def watch_pod(cluster, event_stop):
     """监听单个集群的 Pod 事件（带指数退避重试）
     
     多 watcher 安全性说明：
-    - 多个 watcher 同时监听同一集群是安全的（CMDB 操作是幂等的）
-    - CMDB 中 Pod 的 code 字段有唯一性约束，防止重复创建
-    - 所有操作都基于 code（pod name）查询，然后执行 UPDATE
-    - 即使多个 watcher 同时处理同一 Pod 事件，最终结果是一致的
-    - 延迟 1.5 秒避免与 apply API 的 CMDB 操作竞争
+    - 多个 watcher 同时监听同一集群是安全的（通过 CMDB 唯一性约束 + 幂等操作保证）
+    - 创建操作：CMDB 的 code 字段有唯一性约束，多个 watcher 创建时只有一个成功，
+      其他失败后会查询到已存在的记录并更新
+    - 更新操作：完全幂等，多个 watcher 同时更新同一 Pod 不会产生副作用
+    - 查询操作：只读，无并发问题
+    - 删除操作：通过 guid 删除，即使多次删除也只会删除一次（第二次会报错但不影响数据）
+    - 进程内去重：30秒窗口避免同一 watcher 重复处理
+    - 跨进程去重：依赖 CMDB 唯一性约束（自动处理）
+    
+    Pod 漂移处理：
+    - 漂移时 Pod 会先删除再创建（UID 变化）
+    - Watcher 会监听到 POD.DELETED 和 POD.ADDED 两个事件
+    - POD.DELETED：从 CMDB 删除旧 Pod 记录
+    - POD.ADDED：重试查询（等待 apply API），找不到则创建新记录（从 StatefulSet 继承 app_instance）
     
     建议：
-    - 生产环境建议只运行一个 watcher 实例（避免不必要的并发和日志混乱）
-    - 如果需要高可用，可以用主备模式（Kubernetes StatefulSet + ReadinessProbe）
-    - 当前设计已确保即使多实例也不会产生重复记录
+    - 生产环境可以运行多个 watcher 实例（已确保安全性和一致性）
+    - 建议 2-3 个实例，提供高可用性同时避免过多日志
+    - 如需更高可用，使用 Kubernetes Deployment + HPA
     """
     retry_delay = 0.5  # 初始延迟 0.5 秒
     max_retry_delay = 60  # 最大延迟 60 秒

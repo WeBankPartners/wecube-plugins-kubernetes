@@ -872,12 +872,20 @@ class StatefulSet:
             LOG.info('Adding creator token to Pod annotations for CMDB access (token prefix: %s...)', 
                     user_token[:20])
         
+        # 将 instanceId 保存到 StatefulSet annotations 中，供 watcher 读取
+        # 这样 watcher 在处理 Pod 漂移时可以直接从 StatefulSet 获取 app_instance
+        statefulset_annotations = {}
+        if data.get('instanceId'):
+            statefulset_annotations['wecube.io/app-instance'] = data['instanceId']
+            LOG.info('Adding app-instance to StatefulSet annotations: %s', data['instanceId'])
+        
         template = {
             'apiVersion': 'apps/v1',
             'kind': 'StatefulSet',
             'metadata': {
                 'labels': resource_tags,
-                'name': resource_name
+                'name': resource_name,
+                'annotations': statefulset_annotations
             },
             'spec': {
                 'replicas': int(replicas),
@@ -1337,9 +1345,12 @@ class StatefulSet:
             pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
             if pods and pods.items:
                 for pod in pods.items:
+                    # 使用 cluster_id + pod_uid 作为全局唯一标识，与 watcher 保持一致
+                    pod_uid = pod.metadata.uid if pod.metadata.uid else ''
+                    asset_id = f"{cluster_info['id']}_{pod_uid}" if pod_uid else ''
                     pod_list.append({
                         'name': pod.metadata.name,
-                        'id': pod.metadata.uid if pod.metadata.uid else '',  # 即使 UID 为空也记录 Pod
+                        'id': asset_id,  # 使用带 cluster_id 前缀的 asset_id，与 watcher 保持一致
                         'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else ''  # Pod 所在 Node 的 IP
                     })
                 LOG.info('Found %d pods for StatefulSet %s in namespace %s (some may not have UID yet)', 

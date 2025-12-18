@@ -226,6 +226,7 @@ class Pod(BaseEntity):
                     break
         controll_by = None
         statefulset_id = None
+        statefulset_name = None  # StatefulSet 名称（用于 watcher 查询 annotation）
         if item.metadata.owner_references:
             for owner in item.metadata.owner_references:
                 if owner.controller:
@@ -233,6 +234,7 @@ class Pod(BaseEntity):
                         controll_by = owner.uid
                     elif owner.kind == 'StatefulSet':
                         statefulset_id = owner.uid
+                        statefulset_name = owner.name  # 保存 StatefulSet 名称
                     # 可以继续添加其他控制器类型（如 DaemonSet、Job 等）
         
         # 从 annotations 中提取创建者的 token（用于 watcher 访问 CMDB）
@@ -285,6 +287,7 @@ class Pod(BaseEntity):
             'host_ip': item.status.host_ip,
             'replicaset_id': controll_by,
             'statefulset_id': statefulset_id,
+            'statefulset_name': statefulset_name,  # StatefulSet 名称（用于从 K8s 读取 annotation）
             'deployment_id': None,
             'correlation_id': correlation_id,
             'node_id': item.spec.node_name,

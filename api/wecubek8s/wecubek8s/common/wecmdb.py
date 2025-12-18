@@ -40,6 +40,11 @@ class EntityClient(utils.ClientMixin):
         """更新实体数据"""
         url = self.server + self.build_query_url(package, entity, 'update')
         return self.post(url, update_data)
+    
+    def delete(self, package, entity, delete_data):
+        """删除实体数据"""
+        url = self.server + self.build_query_url(package, entity, 'delete')
+        return self.post(url, delete_data)
 
     def retrieve(self, package, entity, query):
         url = self.server + self.build_query_url(package, entity, 'query')
