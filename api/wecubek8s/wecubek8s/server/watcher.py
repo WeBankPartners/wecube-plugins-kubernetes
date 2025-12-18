@@ -389,7 +389,9 @@ def sync_pod_to_cmdb_on_added(pod_data):
        - 说明该 Pod 不是通过 apply API 创建的（如手动 kubectl create）
     
     Returns:
-        str: CMDB 中 Pod 记录的 GUID，失败或不存在时返回 None
+        tuple: (pod_guid, is_pod_drift)
+            - pod_guid (str): CMDB 中 Pod 记录的 GUID，失败或不存在时返回 None
+            - is_pod_drift (bool): 是否是 Pod 漂移场景（race condition fallback），需要发送通知
     """
     # ===== 步骤0：重试机制配置 =====
     # apply API 可能正在创建 K8s 资源并等待 Pod 就绪（30-240秒）
@@ -410,7 +412,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
         cmdb_server = CONF.wecube.base_url
         if not cmdb_server:
             LOG.warning('CMDB base_url not configured, skipping pod add sync')
-            return None
+            return (None, False)
         from wecubek8s.common import wecmdb
         cmdb_client = wecmdb.EntityClient(cmdb_server, creator_token)
     else:
@@ -425,7 +427,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
     
     if not cmdb_client:
         LOG.warning('CMDB client not available, skipping pod add sync')
-        return None
+        return (None, False)
     
     try:
         pod_name = pod_data.get('name')
@@ -436,7 +438,86 @@ def sync_pod_to_cmdb_on_added(pod_data):
         
         if not pod_name or not pod_id or not cluster_id:
             LOG.warning('Pod name, asset_id or cluster_id missing, skipping CMDB sync: %s', pod_data)
-            return None
+            return (None, False)
+        
+        # ===== 【新增】等待 Pod 调度完成（获取 host_ip）=====
+        # Pod 在 Pending 状态时没有 host_ip，需要等待调度完成
+        # 总共等待 240 秒（与 apply API 最大等待时间一致），每 10 秒检查一次
+        POD_SCHEDULE_MAX_WAIT = 240  # 最多等待 240 秒
+        POD_SCHEDULE_CHECK_INTERVAL = 10  # 每 10 秒检查一次
+        
+        if not pod_host_ip:
+            LOG.info('='*60)
+            LOG.info('⏳ Pod has no host_ip yet (Pending状态), waiting for scheduling...')
+            LOG.info('   Will check every %d seconds (max wait: %d seconds)', 
+                     POD_SCHEDULE_CHECK_INTERVAL, POD_SCHEDULE_MAX_WAIT)
+            
+            # 查询集群配置以创建 K8s 客户端（用于重新读取 Pod 状态）
+            try:
+                cluster_list = api.db_resource.Cluster().list({'id': cluster_id})
+                if not cluster_list:
+                    LOG.error('❌ Cannot find cluster configuration for cluster_id: %s', cluster_id)
+                    LOG.error('Cannot query Pod status, aborting')
+                    LOG.warning('='*60)
+                    return (None, False)
+                
+                cluster_info = cluster_list[0]
+                
+                # 创建 K8s 客户端
+                from wecubek8s.common import k8s
+                api_server = cluster_info['api_server']
+                if not api_server.startswith('https://') and not api_server.startswith('http://'):
+                    api_server = 'https://' + api_server
+                
+                k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
+                k8s_client = k8s.Client(k8s_auth)
+                
+                # 循环等待 Pod 调度完成
+                for wait_attempt in range(1, int(POD_SCHEDULE_MAX_WAIT / POD_SCHEDULE_CHECK_INTERVAL) + 1):
+                    time.sleep(POD_SCHEDULE_CHECK_INTERVAL)
+                    
+                    # 重新读取 Pod 状态
+                    LOG.info('[Wait %d/%d] Checking Pod scheduling status...', 
+                             wait_attempt, int(POD_SCHEDULE_MAX_WAIT / POD_SCHEDULE_CHECK_INTERVAL))
+                    
+                    try:
+                        pod_obj = k8s_client.get_pod(pod_namespace, pod_name)
+                        if pod_obj and pod_obj.status and pod_obj.status.host_ip:
+                            pod_host_ip = pod_obj.status.host_ip
+                            # 更新 pod_data，供后续使用
+                            pod_data['host_ip'] = pod_host_ip
+                            LOG.info('[Wait %d/%d] ✅ Pod scheduled! host_ip: %s', 
+                                     wait_attempt, int(POD_SCHEDULE_MAX_WAIT / POD_SCHEDULE_CHECK_INTERVAL), 
+                                     pod_host_ip)
+                            break
+                        else:
+                            LOG.info('[Wait %d/%d] Still pending, no host_ip yet', 
+                                     wait_attempt, int(POD_SCHEDULE_MAX_WAIT / POD_SCHEDULE_CHECK_INTERVAL))
+                    except Exception as pod_check_err:
+                        LOG.warning('[Wait %d/%d] Failed to query Pod: %s', 
+                                    wait_attempt, int(POD_SCHEDULE_MAX_WAIT / POD_SCHEDULE_CHECK_INTERVAL), 
+                                    str(pod_check_err))
+                
+                # 等待结束后，再次检查 host_ip
+                if not pod_host_ip:
+                    LOG.error('='*60)
+                    LOG.error('❌ Pod still has no host_ip after waiting %d seconds', POD_SCHEDULE_MAX_WAIT)
+                    LOG.error('   Pod: %s/%s', pod_namespace, pod_name)
+                    LOG.error('   Cannot sync Pod without host_ip (no host_resource available)')
+                    LOG.error('   Will skip CMDB sync')
+                    LOG.error('='*60)
+                    return (None, False)
+                else:
+                    LOG.info('='*60)
+                    LOG.info('✅ Pod scheduling complete, continuing CMDB sync')
+                    LOG.info('='*60)
+                    
+            except Exception as e:
+                LOG.error('❌ Failed to wait for Pod scheduling: %s', str(e))
+                LOG.exception(e)
+                LOG.error('Cannot sync Pod without host_ip, aborting')
+                LOG.warning('='*60)
+                return (None, False)
         
         LOG.info('='*60)
         LOG.info('Syncing POD.ADDED to CMDB: pod=%s, namespace=%s, asset_id=%s, host_ip=%s', 
@@ -583,26 +664,47 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 if host_resource_guid:
                     LOG.info('[CREATE-Step-2] ✅ Found host_resource: %s', host_resource_guid)
                 else:
-                    LOG.warning('[CREATE-Step-2] ⚠️  host_resource not found for IP: %s', pod_host_ip)
-                    LOG.warning('[CREATE-Step-2] Will create Pod without host_resource')
+                    LOG.error('[CREATE-Step-2] ❌ host_resource not found for IP: %s', pod_host_ip)
+                    LOG.error('[CREATE-Step-2] Cannot create Pod without host_resource')
+                    LOG.error('[CREATE-Step-2] Please ensure the node is registered in CMDB')
+                    LOG.warning('='*60)
+                    return (None, False)
             else:
-                LOG.warning('[CREATE-Step-2] ⚠️  Pod has no host_ip (pending?)')
+                LOG.error('[CREATE-Step-2] ❌ Pod has no host_ip')
+                LOG.error('[CREATE-Step-2] This should not happen - Pod should be scheduled after waiting')
+                LOG.warning('='*60)
+                return (None, False)
             
-            # 步骤3：创建 Pod 记录
-            LOG.info('[CREATE-Step-3] Creating new Pod record in CMDB...')
+            # 步骤3：最终检查 - 必须同时有 app_instance 和 host_resource
+            LOG.info('[CREATE-Step-3] Final validation before creating Pod record...')
+            if not app_instance_guid:
+                LOG.error('[CREATE-Step-3] ❌ Missing app_instance, cannot create Pod')
+                LOG.error('[CREATE-Step-3] app_instance: %s', app_instance_guid or 'None')
+                LOG.warning('='*60)
+                return (None, False)
+            
+            if not host_resource_guid:
+                LOG.error('[CREATE-Step-3] ❌ Missing host_resource, cannot create Pod')
+                LOG.error('[CREATE-Step-3] host_resource: %s', host_resource_guid or 'None')
+                LOG.warning('='*60)
+                return (None, False)
+            
+            LOG.info('[CREATE-Step-3] ✅ Validation passed:')
+            LOG.info('[CREATE-Step-3]    app_instance: %s', app_instance_guid)
+            LOG.info('[CREATE-Step-3]    host_resource: %s', host_resource_guid)
+            
+            # 步骤4：创建 Pod 记录
+            LOG.info('[CREATE-Step-4] Creating new Pod record in CMDB...')
             create_data = {
                 'code': pod_name,
                 'key_name': pod_name,
                 'asset_id': pod_id,  # K8s UID（带 cluster_id 前缀）
-                'app_instance': app_instance_guid,  # 从 StatefulSet 继承
+                'app_instance': app_instance_guid,  # 从 StatefulSet 继承（必需）
+                'host_resource': host_resource_guid,  # 从 host_ip 查询（必需）
                 'state': 'created_0'  # 默认状态
             }
             
-            # 可选字段：host_resource
-            if host_resource_guid:
-                create_data['host_resource'] = host_resource_guid
-            
-            LOG.info('[CREATE-Step-3] Create data: %s', create_data)
+            LOG.info('[CREATE-Step-4] Create data: %s', create_data)
             
             try:
                 # CMDB 的 code 字段有唯一性约束，天然支持跨进程去重
@@ -619,23 +721,24 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     LOG.info('   Pod GUID: %s', created_guid)
                     LOG.info('   asset_id: %s', pod_id)
                     LOG.info('   app_instance: %s', app_instance_guid)
-                    LOG.info('   host_resource: %s', host_resource_guid or 'N/A')
+                    LOG.info('   host_resource: %s', host_resource_guid)
                     LOG.info('='*60)
-                    return created_guid
+                    # 这是新创建的 Pod（漂移场景），返回 (guid, is_pod_drift=True)
+                    return (created_guid, True)
                 else:
-                    LOG.error('[CREATE-Step-3] ❌ Create returned no data')
-                    LOG.error('[CREATE-Step-3] Response: %s', create_response)
+                    LOG.error('[CREATE-Step-4] ❌ Create returned no data')
+                    LOG.error('[CREATE-Step-4] Response: %s', create_response)
                     LOG.warning('='*60)
-                    return None
+                    return (None, False)
                     
             except Exception as create_err:
                 # 可能是因为 code 唯一性冲突（多个 watcher 同时创建）
                 # 重新查询一次，看是否已被其他 watcher 创建
                 error_msg = str(create_err)
-                LOG.warning('[CREATE-Step-3] Create failed: %s', error_msg)
+                LOG.warning('[CREATE-Step-4] Create failed: %s', error_msg)
                 
                 if 'unique' in error_msg.lower() or 'duplicate' in error_msg.lower() or 'exists' in error_msg.lower():
-                    LOG.info('[CREATE-Step-3] Likely duplicate creation by another watcher, retrying query...')
+                    LOG.info('[CREATE-Step-4] Likely duplicate creation by another watcher, retrying query...')
                     time.sleep(1)  # 等待 1 秒确保其他 watcher 创建完成
                     
                     # 重新查询
@@ -645,32 +748,32 @@ def sync_pod_to_cmdb_on_added(pod_data):
                         existing_guid = existing_pod.get('guid')
                         existing_asset_id = existing_pod.get('asset_id')
                         
-                        LOG.info('[CREATE-Step-3] ✅ Found Pod created by another watcher: guid=%s', existing_guid)
+                        LOG.info('[CREATE-Step-4] ✅ Found Pod created by another watcher: guid=%s', existing_guid)
                         
                         # 更新 asset_id（如果为空或不匹配）
                         if not existing_asset_id or existing_asset_id != pod_id:
-                            LOG.info('[CREATE-Step-3] Updating asset_id: %s -> %s', existing_asset_id or 'NULL', pod_id)
+                            LOG.info('[CREATE-Step-4] Updating asset_id: %s -> %s', existing_asset_id or 'NULL', pod_id)
                             update_data = {
                                 'guid': existing_guid,
-                                'asset_id': pod_id
+                                'asset_id': pod_id,
+                                'host_resource': host_resource_guid  # 确保 host_resource 也更新
                             }
-                            if host_resource_guid:
-                                update_data['host_resource'] = host_resource_guid
                             
                             cmdb_client.update('wecmdb', 'pod', [update_data])
-                            LOG.info('[CREATE-Step-3] ✅ Updated asset_id successfully')
+                            LOG.info('[CREATE-Step-4] ✅ Updated asset_id and host_resource successfully')
                         
                         LOG.info('='*60)
-                        return existing_guid
+                        # 找到其他 watcher 创建的记录，也算是 Pod 漂移场景
+                        return (existing_guid, True)
                     else:
-                        LOG.error('[CREATE-Step-3] ❌ Retry query still found no record')
+                        LOG.error('[CREATE-Step-4] ❌ Retry query still found no record')
                         LOG.warning('='*60)
-                        return None
+                        return (None, False)
                 else:
-                    LOG.error('[CREATE-Step-3] ❌ Create failed with unexpected error')
+                    LOG.error('[CREATE-Step-4] ❌ Create failed with unexpected error')
                     LOG.exception(create_err)
                     LOG.warning('='*60)
-                    return None
+                    return (None, False)
         
         # ===== 步骤2：如果通过 code 找到记录，则更新 =====
         if cmdb_response and cmdb_response.get('data') and len(cmdb_response['data']) > 0:
@@ -687,7 +790,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
             
             if not pod_guid:
                 LOG.warning('CMDB pod record has no guid, cannot update: %s', pod_name)
-                return None
+                return (None, False)
             
             # 判断场景
             is_pre_created = (not existing_asset_id or existing_asset_id == '')
@@ -734,24 +837,50 @@ def sync_pod_to_cmdb_on_added(pod_data):
             }
             
             # 查询并更新 host_resource（Pod 可能调度到不同节点或发生漂移）
+            host_resource_guid = None
             if pod_host_ip:
+                LOG.info('[Step 2] Querying host_resource for IP: %s', pod_host_ip)
                 host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
+                
                 if host_resource_guid:
                     # 检测 host_resource 是否变化
                     if existing_host_resource != host_resource_guid:
                         LOG.info('🚀 HOST CHANGED! Pod %s scheduled/drifted to different node:', pod_name)
                         LOG.info('   Old host_resource: %s', existing_host_resource or 'NULL (not scheduled yet)')
                         LOG.info('   New host_resource: %s (IP: %s)', host_resource_guid, pod_host_ip)
-                        update_data['host_resource'] = host_resource_guid
                     else:
                         LOG.info('✓ Host unchanged: %s (IP: %s)', host_resource_guid, pod_host_ip)
-                        # 即使没变也要设置，确保数据一致性
-                        update_data['host_resource'] = host_resource_guid
+                    # 设置 host_resource（确保数据一致性）
+                    update_data['host_resource'] = host_resource_guid
                 else:
-                    LOG.warning('⚠️  Cannot find host_resource for IP %s in CMDB', pod_host_ip)
-                    LOG.warning('   Pod %s will be updated without host_resource', pod_name)
+                    LOG.error('[Step 2] ❌ Cannot find host_resource for IP %s in CMDB', pod_host_ip)
+                    LOG.error('[Step 2] Cannot update Pod without host_resource')
+                    LOG.error('[Step 2] Please ensure the node is registered in CMDB')
+                    LOG.warning('='*60)
+                    return (None, False)
             else:
-                LOG.warning('Pod %s has no host_ip yet (pending?)', pod_name)
+                LOG.error('[Step 2] ❌ Pod has no host_ip')
+                LOG.error('[Step 2] This should not happen - Pod should be scheduled after waiting')
+                LOG.warning('='*60)
+                return (None, False)
+            
+            # 最终检查 - 必须同时有 app_instance 和 host_resource
+            LOG.info('[Step 2] Final validation before updating Pod record...')
+            if not existing_app_instance:
+                LOG.error('[Step 2] ❌ Missing app_instance in existing record, cannot update Pod')
+                LOG.error('[Step 2]    app_instance: %s', existing_app_instance or 'None')
+                LOG.warning('='*60)
+                return (None, False)
+            
+            if not host_resource_guid:
+                LOG.error('[Step 2] ❌ Missing host_resource, cannot update Pod')
+                LOG.error('[Step 2]    host_resource: %s', host_resource_guid or 'None')
+                LOG.warning('='*60)
+                return (None, False)
+            
+            LOG.info('[Step 2] ✅ Validation passed:')
+            LOG.info('[Step 2]    app_instance: %s (existing)', existing_app_instance)
+            LOG.info('[Step 2]    host_resource: %s', host_resource_guid)
             
             # 不查询 app_instance（apply API 已设置），但保留已有值（避免覆盖为空）
             # 只有在 apply API 没设置时才可能需要更新，但那是 apply 的 bug，watcher 不处理
@@ -763,7 +892,8 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 LOG.info('   asset_id: %s', pod_id)
                 LOG.info('   host_resource: %s', update_data.get('host_resource', 'NOT_CHANGED'))
                 LOG.info('='*60)
-                return pod_guid
+                # 正常更新场景，不是 Pod 漂移，无需发送通知
+                return (pod_guid, False)
             except Exception as update_err:
                 # 更新失败，可能是因为记录在查询后被 POD.DELETED 删除了（时序竞态）
                 error_msg = str(update_err)
@@ -785,22 +915,50 @@ def sync_pod_to_cmdb_on_added(pod_data):
                         LOG.error('[Step 2-Fallback] ❌ No app_instance available, cannot create Pod')
                         LOG.error('[Step 2-Fallback] This should not happen - record had app_instance before deletion')
                         LOG.warning('='*60)
-                        return None
+                        return (None, False)
                     
-                    # 创建数据（可能没有 host_resource，因为 Pod 可能还在 Pending 状态）
+                    # 获取 host_resource（必须有 host_ip 才能查询）
+                    host_resource_guid = None
+                    if pod_host_ip:
+                        LOG.info('[Step 2-Fallback] Querying host_resource for IP: %s', pod_host_ip)
+                        host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
+                        
+                        if host_resource_guid:
+                            LOG.info('[Step 2-Fallback] ✅ Found host_resource: %s', host_resource_guid)
+                        else:
+                            LOG.error('[Step 2-Fallback] ❌ host_resource not found for IP: %s', pod_host_ip)
+                            LOG.error('[Step 2-Fallback] Cannot create Pod without host_resource')
+                            LOG.error('[Step 2-Fallback] Please ensure the node is registered in CMDB')
+                            LOG.warning('='*60)
+                            return (None, False)
+                    else:
+                        LOG.error('[Step 2-Fallback] ❌ Pod has no host_ip')
+                        LOG.error('[Step 2-Fallback] This should not happen - Pod should be scheduled after waiting')
+                        LOG.warning('='*60)
+                        return (None, False)
+                    
+                    # 最终检查 - 必须同时有 app_instance 和 host_resource
+                    LOG.info('[Step 2-Fallback] Final validation before creating Pod record...')
+                    if not app_instance_guid or not host_resource_guid:
+                        LOG.error('[Step 2-Fallback] ❌ Missing required fields, cannot create Pod')
+                        LOG.error('[Step 2-Fallback]    app_instance: %s', app_instance_guid or 'None')
+                        LOG.error('[Step 2-Fallback]    host_resource: %s', host_resource_guid or 'None')
+                        LOG.warning('='*60)
+                        return (None, False)
+                    
+                    LOG.info('[Step 2-Fallback] ✅ Validation passed:')
+                    LOG.info('[Step 2-Fallback]    app_instance: %s', app_instance_guid)
+                    LOG.info('[Step 2-Fallback]    host_resource: %s', host_resource_guid)
+                    
+                    # 创建数据
                     create_data = {
                         'code': pod_name,
                         'key_name': pod_name,
                         'asset_id': pod_id,
-                        'app_instance': app_instance_guid,
+                        'app_instance': app_instance_guid,  # 必需
+                        'host_resource': host_resource_guid,  # 必需
                         'state': 'created_0'
                     }
-                    
-                    # 如果有 host_ip，查询 host_resource
-                    if pod_host_ip:
-                        host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
-                        if host_resource_guid:
-                            create_data['host_resource'] = host_resource_guid
                     
                     LOG.info('[Step 2-Fallback] Create data: %s', create_data)
                     
@@ -818,18 +976,20 @@ def sync_pod_to_cmdb_on_added(pod_data):
                             LOG.info('   asset_id: %s', pod_id)
                             LOG.info('   app_instance: %s', app_instance_guid)
                             LOG.info('   host_resource: %s', create_data.get('host_resource', 'N/A'))
+                            LOG.info('   🔔 This is a POD DRIFT scenario - WeCube notification WILL be sent')
                             LOG.info('='*60)
-                            return created_guid
+                            # 返回 (guid, is_pod_drift=True) 标记这是 Pod 漂移场景，需要发送通知
+                            return (created_guid, True)
                         else:
                             LOG.error('[Step 2-Fallback] ❌ Create returned no data')
                             LOG.error('[Step 2-Fallback] Response: %s', create_response)
                             LOG.warning('='*60)
-                            return None
+                            return (None, False)
                     except Exception as create_err:
                         LOG.error('[Step 2-Fallback] ❌ Create also failed: %s', str(create_err))
                         LOG.exception(create_err)
                         LOG.warning('='*60)
-                        return None
+                        return (None, False)
                 else:
                     # 其他类型的错误，直接抛出
                     LOG.error('[Step 2] ❌ Update failed with unexpected error')
@@ -859,7 +1019,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
             LOG.warning('')
             LOG.warning('Action: Skipping CMDB sync for this pod')
             LOG.warning('='*60)
-            return None
+            return (None, False)
     
     except Exception as e:
         LOG.error('='*60)
@@ -868,7 +1028,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
         LOG.error('Error: %s', str(e))
         LOG.exception(e)
         LOG.error('='*60)
-        return None
+        return (None, False)
 
 
 def sync_pod_to_cmdb_on_deleted(pod_data):
@@ -1270,14 +1430,17 @@ def notify_pod(event, cluster_id, data):
         LOG.info('Step 1: Start CMDB synchronization')
         
         pod_cmdb_guid = None  # 用于存储 CMDB 中 Pod 的 GUID
+        is_pod_drift = False  # 用于标记是否是 Pod 漂移场景（需要发送通知）
         
         if event == 'POD.ADDED':
             LOG.info('Event type: POD.ADDED - will create record in CMDB')
             LOG.info('Calling sync_pod_to_cmdb_on_added with pod_id: %s', data.get('id'))
-            pod_cmdb_guid = sync_pod_to_cmdb_on_added(data)
+            pod_cmdb_guid, is_pod_drift = sync_pod_to_cmdb_on_added(data)
             
             if pod_cmdb_guid:
                 LOG.info('CMDB sync completed successfully for POD.ADDED - GUID: %s', pod_cmdb_guid)
+                if is_pod_drift:
+                    LOG.info('🔔 Pod drift detected - WeCube notification will be sent')
             else:
                 LOG.warning('CMDB sync completed but no GUID returned for POD.ADDED')
             
@@ -1310,7 +1473,8 @@ def notify_pod(event, cluster_id, data):
             # 这是跨进程的标记（存储在 K8s Pod 对象中），不受进程间内存隔离影响
             created_by = data.get('annotations', {}).get('wecube.io/created-by', '')
             
-            if created_by == 'api':
+            # 【修复 2】如果是 Pod 漂移场景，即使有 API 标记，也要发送通知
+            if created_by == 'api' and not is_pod_drift:
                 LOG.warning('=' * 80)
                 LOG.warning('🏷️  API-CREATED POD DETECTED - SKIPPING WECUBE NOTIFICATION')
                 LOG.warning('Pod: %s, Namespace: %s, Cluster: %s', pod_name, pod_namespace or 'N/A', cluster_id)
@@ -1320,6 +1484,14 @@ def notify_pod(event, cluster_id, data):
                 LOG.warning('=' * 80)
                 LOG.info('notify_pod completed - API-created Pod, CMDB updated, no notification sent')
                 return
+            elif created_by == 'api' and is_pod_drift:
+                LOG.warning('=' * 80)
+                LOG.warning('🔔 POD DRIFT DETECTED - WILL SEND NOTIFICATION')
+                LOG.warning('Pod: %s, Namespace: %s, Cluster: %s', pod_name, pod_namespace or 'N/A', cluster_id)
+                LOG.warning('Although Pod has "wecube.io/created-by" = "api" annotation,')
+                LOG.warning('it was created due to Pod drift/eviction (race condition detected)')
+                LOG.warning('CMDB has been updated, and notification WILL be sent')
+                LOG.warning('=' * 80)
             
             # 备用检查：进程内缓存（仅作为第二层保护，处理 annotation 标记失败的情况）
             if pod_name and pod_namespace:
