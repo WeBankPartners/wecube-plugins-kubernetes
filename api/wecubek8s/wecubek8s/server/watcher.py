@@ -723,7 +723,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                             LOG.warning('⚠️  Found duplicate pod with same asset_id %s (guid=%s), deleting...', 
                                        pod_id, dup_guid)
                             try:
-                                cmdb_client.delete('wecmdb', 'pod', [dup_guid])
+                                cmdb_client.delete('wecmdb', 'pod', [{'guid': dup_guid}])
                                 LOG.info('✅ Deleted duplicate pod record: guid=%s', dup_guid)
                             except Exception as del_err:
                                 LOG.error('Failed to delete duplicate pod: %s', str(del_err))
@@ -1111,7 +1111,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             LOG.info('')
             
             LOG.info('[DELETE] Executing CMDB delete operation...')
-            cmdb_client.delete('wecmdb', 'pod', [pod_guid])
+            cmdb_client.delete('wecmdb', 'pod', [{'guid': pod_guid}])
             
             LOG.info('='*60)
             LOG.info('✅ Successfully deleted pod from CMDB')
@@ -1233,22 +1233,39 @@ def notify_pod(event, cluster_id, data):
             pod_name = data.get('name')
             pod_namespace = data.get('namespace')
             
+            # 【修复】优先检查 Pod annotations 中的创建来源标记
+            # 这是跨进程的标记（存储在 K8s Pod 对象中），不受进程间内存隔离影响
+            created_by = data.get('annotations', {}).get('wecube.io/created-by', '')
+            
+            if created_by == 'api':
+                LOG.warning('=' * 80)
+                LOG.warning('🏷️  API-CREATED POD DETECTED - SKIPPING WECUBE NOTIFICATION')
+                LOG.warning('Pod: %s, Namespace: %s, Cluster: %s', pod_name, pod_namespace or 'N/A', cluster_id)
+                LOG.warning('Detection method: Pod annotation "wecube.io/created-by" = "api"')
+                LOG.warning('This Pod was created via API (StatefulSet apply), not due to drift/crash')
+                LOG.warning('CMDB has been updated (asset_id filled), but notification is skipped')
+                LOG.warning('=' * 80)
+                LOG.info('notify_pod completed - API-created Pod, CMDB updated, no notification sent')
+                return
+            
+            # 备用检查：进程内缓存（仅作为第二层保护，处理 annotation 标记失败的情况）
             if pod_name and pod_namespace:
                 is_expected, info = is_expected_pod(cluster_id, pod_namespace, pod_name)
                 
                 if is_expected:
                     LOG.warning('=' * 80)
-                    LOG.warning('🏷️  EXPECTED POD CREATION DETECTED - SKIPPING WECUBE NOTIFICATION')
+                    LOG.warning('🏷️  EXPECTED POD CREATION DETECTED (Cache) - SKIPPING WECUBE NOTIFICATION')
                     LOG.warning('Pod: %s, Namespace: %s, Cluster: %s', pod_name, pod_namespace, cluster_id)
                     LOG.warning('Source: %s, Time since marked: %.2f seconds', 
                                info.get('source', 'unknown'), info.get('time_since_mark', 0))
+                    LOG.warning('Detection method: In-process cache (may not work across processes)')
                     LOG.warning('This Pod was created via API (StatefulSet apply), not due to drift/crash')
                     LOG.warning('CMDB has been updated (asset_id filled), but notification is skipped')
                     LOG.warning('=' * 80)
                     LOG.info('notify_pod completed - expected Pod creation, CMDB updated, no notification sent')
                     return
                 else:
-                    LOG.info('✅ Pod NOT in expected list - this is a drift/crash/restart event')
+                    LOG.info('✅ Pod NOT marked as API-created - this is a drift/crash/restart event')
                     LOG.info('Watcher will send WeCube notification')
             else:
                 LOG.warning('Pod name or namespace missing, cannot check expected Pod list')

@@ -872,6 +872,11 @@ class StatefulSet:
             LOG.info('Adding creator token to Pod annotations for CMDB access (token prefix: %s...)', 
                     user_token[:20])
         
+        # 【关键标记】添加创建来源标记，让 watcher 识别这是通过 API 创建的 Pod
+        # 这样 watcher 就不会发送 WeCube 编排通知（只有 Pod 漂移/崩溃重启才通知）
+        pod_annotations['wecube.io/created-by'] = 'api'
+        LOG.info('Marking Pod as created by API to prevent duplicate orchestration notifications')
+        
         # 将 instanceId 保存到 StatefulSet annotations 中，供 watcher 读取
         # 这样 watcher 在处理 Pod 漂移时可以直接从 StatefulSet 获取 app_instance
         statefulset_annotations = {}

@@ -277,6 +277,9 @@ class Pod(BaseEntity):
         # 使用 cluster_id + pod_uid 作为全局唯一标识，防止重复集群配置导致的重复创建
         asset_id = f"{cluster['id']}_{item.metadata.uid}" if item.metadata.uid else None
         
+        # 提取所有 annotations（用于 watcher 判断 Pod 创建来源等信息）
+        annotations = dict(item.metadata.annotations) if item.metadata.annotations else {}
+        
         result = {
             'id': item.metadata.uid,
             'asset_id': asset_id,  # 全局唯一标识（cluster_id + pod_uid）
@@ -293,6 +296,7 @@ class Pod(BaseEntity):
             'node_id': item.spec.node_name,
             'cluster_id': cluster["id"],
             'creator_token': creator_token,  # 新增：创建者的 token
+            'annotations': annotations,  # 新增：完整的 annotations（用于判断创建来源等）
         }
         # patch node_id
         node_mapping = {}
