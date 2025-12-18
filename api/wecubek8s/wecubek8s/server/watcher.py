@@ -432,16 +432,39 @@ def sync_pod_to_cmdb_on_added(pod_data):
         pod_id = pod_data.get('asset_id')  # 使用 asset_id（cluster_id_pod_uid）而不是 id
         pod_host_ip = pod_data.get('host_ip')
         cluster_id = pod_data.get('cluster_id')
+        pod_namespace = pod_data.get('namespace')
         
         if not pod_name or not pod_id or not cluster_id:
             LOG.warning('Pod name, asset_id or cluster_id missing, skipping CMDB sync: %s', pod_data)
             return None
         
         LOG.info('='*60)
-        LOG.info('Syncing POD.ADDED to CMDB: pod=%s, asset_id=%s, host_ip=%s', 
-                 pod_name, pod_id, pod_host_ip or 'N/A')
-        LOG.info('Expected: Pod record already pre-created by apply API')
-        LOG.info('Watcher task: Update asset_id and verify/update host_resource')
+        LOG.info('Syncing POD.ADDED to CMDB: pod=%s, namespace=%s, asset_id=%s, host_ip=%s', 
+                 pod_name, pod_namespace or 'N/A', pod_id, pod_host_ip or 'N/A')
+        
+        # 检查是否是预期创建的 Pod（调用但不消费缓存，仅用于日志）
+        # 真正的消费会在 notify_pod 中进行
+        is_expected_creation = False
+        if pod_namespace:
+            # 先检查缓存（但不删除）
+            with _expected_pod_lock:
+                key = (cluster_id, pod_namespace, pod_name)
+                if key in _expected_pod_cache:
+                    info = _expected_pod_cache[key]
+                    is_expected_creation = True
+                    LOG.info('🏷️  This is an EXPECTED pod creation (marked by apply API)')
+                    LOG.info('   Source: %s, Time since marked: %.2f seconds', 
+                            info.get('source', 'unknown'), time.time() - info.get('timestamp', 0))
+                    LOG.info('   Expected: Pod record already pre-created by apply API')
+                    LOG.info('   Watcher task: Update asset_id and verify/update host_resource')
+                    LOG.info('   Note: Will NOT send WeCube notification later')
+                else:
+                    LOG.info('⚠️  This is an UNEXPECTED pod creation (NOT marked by apply API)')
+                    LOG.info('   Possible reasons: Pod drift, manual kubectl create, or apply marking failed')
+                    LOG.info('   Watcher will: Try to update existing CMDB record or create new one')
+        
+        # 保存标志供 notify_pod 使用
+        pod_data['_is_expected_creation'] = is_expected_creation
         
         # ===== 步骤1：通过 code（Pod name）查询 CMDB（带重试机制）=====
         # apply API 预创建时使用 Pod name 作为 code
@@ -1032,24 +1055,48 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             LOG.error('='*60)
             return
         
-        # 验证 asset_id 是否匹配（如果提供了 pod_id）
-        if pod_id and existing_asset_id and existing_asset_id != pod_id:
-            LOG.warning('='*60)
-            LOG.warning('⚠️  ASSET_ID MISMATCH DETECTED')
-            LOG.warning('='*60)
-            LOG.warning('Pod name: %s', pod_name)
-            LOG.warning('CMDB asset_id: %s', existing_asset_id)
-            LOG.warning('K8s Pod UID:   %s', pod_id)
-            LOG.warning('')
-            LOG.warning('This suggests one of the following:')
-            LOG.warning('  1. Pod was recreated with same name but different UID')
-            LOG.warning('  2. CMDB record is stale (old Pod instance)')
-            LOG.warning('  3. Name collision between different pods')
-            LOG.warning('')
-            LOG.warning('Action: Skipping deletion to avoid removing wrong record')
-            LOG.warning('Recommendation: Manually verify and cleanup in CMDB UI')
-            LOG.warning('='*60)
-            return
+        # 验证 Pod UID 是否匹配（如果提供了 pod_id）
+        # asset_id 格式: {cluster_id}_{pod_uid}，我们只比较 pod_uid 部分
+        if pod_id and existing_asset_id:
+            # 提取 Pod UID（asset_id 中下划线后的部分）
+            current_pod_uid = pod_id.split('_', 1)[-1] if '_' in pod_id else pod_id
+            existing_pod_uid = existing_asset_id.split('_', 1)[-1] if '_' in existing_asset_id else existing_asset_id
+            
+            if current_pod_uid != existing_pod_uid:
+                LOG.warning('='*60)
+                LOG.warning('⚠️  POD UID MISMATCH DETECTED')
+                LOG.warning('='*60)
+                LOG.warning('Pod name: %s', pod_name)
+                LOG.warning('CMDB Pod UID: %s', existing_pod_uid)
+                LOG.warning('K8s Pod UID:  %s', current_pod_uid)
+                LOG.warning('CMDB asset_id: %s', existing_asset_id)
+                LOG.warning('K8s asset_id:  %s', pod_id)
+                LOG.warning('')
+                LOG.warning('This suggests one of the following:')
+                LOG.warning('  1. Pod was recreated with same name but different UID')
+                LOG.warning('  2. CMDB record is stale (old Pod instance)')
+                LOG.warning('  3. Name collision between different pods')
+                LOG.warning('')
+                LOG.warning('Action: Skipping deletion to avoid removing wrong record')
+                LOG.warning('Recommendation: Manually verify and cleanup in CMDB UI')
+                LOG.warning('='*60)
+                return
+            elif existing_asset_id != pod_id:
+                # Pod UID 匹配，但 cluster_id 不同（可能是多个 watcher 配置问题）
+                LOG.info('='*60)
+                LOG.info('ℹ️  CLUSTER_ID DIFFERENCE DETECTED (Pod UID matches)')
+                LOG.info('='*60)
+                LOG.info('Pod name: %s', pod_name)
+                LOG.info('Pod UID: %s (matched)', current_pod_uid)
+                LOG.info('CMDB asset_id: %s', existing_asset_id)
+                LOG.info('K8s asset_id:  %s', pod_id)
+                LOG.info('')
+                LOG.info('This is likely due to:')
+                LOG.info('  - Multiple watchers with different cluster_id configurations')
+                LOG.info('  - cluster_id was changed in configuration')
+                LOG.info('')
+                LOG.info('Action: Proceeding with deletion (Pod UID matches)')
+                LOG.info('='*60)
         
         # 执行删除
         try:
@@ -1143,32 +1190,9 @@ def notify_pod(event, cluster_id, data):
                 LOG.info('✅ Event deduplication check passed - this is a new event')
                 LOG.info('Event key: %s, Total cached events: %d', event_key, len(_event_dedup_cache))
         
-        # ===== 预期 Pod 创建检查（只针对 POD.ADDED 事件）=====
-        if event == 'POD.ADDED':
-            pod_name = data.get('name')
-            pod_namespace = data.get('namespace')
-            
-            if pod_name and pod_namespace:
-                is_expected, info = is_expected_pod(cluster_id, pod_namespace, pod_name)
-                
-                if is_expected:
-                    LOG.warning('=' * 80)
-                    LOG.warning('🏷️  EXPECTED POD CREATION DETECTED - SKIPPING WATCHER NOTIFICATION')
-                    LOG.warning('Pod: %s, Namespace: %s, Cluster: %s', pod_name, pod_namespace, cluster_id)
-                    LOG.warning('Source: %s, Time since marked: %.2f seconds', 
-                               info.get('source', 'unknown'), info.get('time_since_mark', 0))
-                    LOG.warning('This Pod was created via API (StatefulSet apply), not due to drift/crash')
-                    LOG.warning('Watcher will skip notification to avoid duplicate orchestration')
-                    LOG.warning('=' * 80)
-                    LOG.info('notify_pod completed - expected Pod creation, no action taken')
-                    return
-                else:
-                    LOG.info('✅ Pod NOT in expected list - this is a drift/crash/restart event')
-                    LOG.info('Watcher will proceed with CMDB sync and WeCube notification')
-            else:
-                LOG.warning('Pod name or namespace missing, cannot check expected Pod list')
-        
         # ===== 第一步：同步 CMDB（在通知之前） =====
+        # 注意：无论是预期创建还是漂移，都需要同步 CMDB（填充 asset_id）
+        # 区别在于是否发送 WeCube 通知（预期创建不发送，漂移才发送）
         LOG.info('-' * 40)
         LOG.info('Step 1: Start CMDB synchronization')
         
@@ -1202,6 +1226,32 @@ def notify_pod(event, cluster_id, data):
             LOG.info('notify_pod completed successfully - CMDB updated, no notification sent')
             LOG.info('=' * 80)
             return
+        
+        # ===== 预期 Pod 创建检查（只针对 POD.ADDED 事件）=====
+        # 如果是通过 apply API 创建的 Pod，跳过 WeCube 通知（CMDB 已经更新过了）
+        if event == 'POD.ADDED':
+            pod_name = data.get('name')
+            pod_namespace = data.get('namespace')
+            
+            if pod_name and pod_namespace:
+                is_expected, info = is_expected_pod(cluster_id, pod_namespace, pod_name)
+                
+                if is_expected:
+                    LOG.warning('=' * 80)
+                    LOG.warning('🏷️  EXPECTED POD CREATION DETECTED - SKIPPING WECUBE NOTIFICATION')
+                    LOG.warning('Pod: %s, Namespace: %s, Cluster: %s', pod_name, pod_namespace, cluster_id)
+                    LOG.warning('Source: %s, Time since marked: %.2f seconds', 
+                               info.get('source', 'unknown'), info.get('time_since_mark', 0))
+                    LOG.warning('This Pod was created via API (StatefulSet apply), not due to drift/crash')
+                    LOG.warning('CMDB has been updated (asset_id filled), but notification is skipped')
+                    LOG.warning('=' * 80)
+                    LOG.info('notify_pod completed - expected Pod creation, CMDB updated, no notification sent')
+                    return
+                else:
+                    LOG.info('✅ Pod NOT in expected list - this is a drift/crash/restart event')
+                    LOG.info('Watcher will send WeCube notification')
+            else:
+                LOG.warning('Pod name or namespace missing, cannot check expected Pod list')
         
         if event == 'POD.ADDED':
             LOG.info('POD.ADDED event detected - checking configuration')
