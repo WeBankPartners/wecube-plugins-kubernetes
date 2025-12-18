@@ -756,13 +756,86 @@ def sync_pod_to_cmdb_on_added(pod_data):
             # 不查询 app_instance（apply API 已设置），但保留已有值（避免覆盖为空）
             # 只有在 apply API 没设置时才可能需要更新，但那是 apply 的 bug，watcher 不处理
             
-            update_response = cmdb_client.update('wecmdb', 'pod', [update_data])
-            LOG.info('[Step 2] ✅ Successfully UPDATED pod in CMDB')
-            LOG.info('   Pod: %s (guid: %s)', pod_name, pod_guid)
-            LOG.info('   asset_id: %s', pod_id)
-            LOG.info('   host_resource: %s', update_data.get('host_resource', 'NOT_CHANGED'))
-            LOG.info('='*60)
-            return pod_guid
+            try:
+                update_response = cmdb_client.update('wecmdb', 'pod', [update_data])
+                LOG.info('[Step 2] ✅ Successfully UPDATED pod in CMDB')
+                LOG.info('   Pod: %s (guid: %s)', pod_name, pod_guid)
+                LOG.info('   asset_id: %s', pod_id)
+                LOG.info('   host_resource: %s', update_data.get('host_resource', 'NOT_CHANGED'))
+                LOG.info('='*60)
+                return pod_guid
+            except Exception as update_err:
+                # 更新失败，可能是因为记录在查询后被 POD.DELETED 删除了（时序竞态）
+                error_msg = str(update_err)
+                LOG.warning('[Step 2] ⚠️  Update failed: %s', error_msg)
+                
+                if 'can not find' in error_msg.lower() or 'not found' in error_msg.lower():
+                    LOG.warning('[Step 2] 🔄 Record was deleted after query (race condition with POD.DELETED)')
+                    LOG.warning('[Step 2] This is a Pod drift/rebuild scenario')
+                    LOG.warning('[Step 2] Will create new record instead...')
+                    
+                    # 跳转到创建逻辑（重用前面的创建代码逻辑）
+                    # 注意：此时 Pod 可能还没有调度到节点（host_ip 为空）
+                    LOG.info('[Step 2-Fallback] Creating new Pod record after update failure...')
+                    
+                    # 获取 app_instance（从现有记录或 StatefulSet）
+                    app_instance_guid = existing_app_instance  # 复用查询到的 app_instance
+                    
+                    if not app_instance_guid:
+                        LOG.error('[Step 2-Fallback] ❌ No app_instance available, cannot create Pod')
+                        LOG.error('[Step 2-Fallback] This should not happen - record had app_instance before deletion')
+                        LOG.warning('='*60)
+                        return None
+                    
+                    # 创建数据（可能没有 host_resource，因为 Pod 可能还在 Pending 状态）
+                    create_data = {
+                        'code': pod_name,
+                        'key_name': pod_name,
+                        'asset_id': pod_id,
+                        'app_instance': app_instance_guid,
+                        'state': 'created_0'
+                    }
+                    
+                    # 如果有 host_ip，查询 host_resource
+                    if pod_host_ip:
+                        host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
+                        if host_resource_guid:
+                            create_data['host_resource'] = host_resource_guid
+                    
+                    LOG.info('[Step 2-Fallback] Create data: %s', create_data)
+                    
+                    try:
+                        create_response = cmdb_client.create('wecmdb', 'pod', [create_data])
+                        
+                        if create_response and create_response.get('data') and len(create_response['data']) > 0:
+                            created_pod = create_response['data'][0]
+                            created_guid = created_pod.get('guid')
+                            
+                            LOG.info('='*60)
+                            LOG.info('✅ Successfully CREATED Pod in CMDB (fallback after update failure)')
+                            LOG.info('   Pod name: %s', pod_name)
+                            LOG.info('   Pod GUID: %s', created_guid)
+                            LOG.info('   asset_id: %s', pod_id)
+                            LOG.info('   app_instance: %s', app_instance_guid)
+                            LOG.info('   host_resource: %s', create_data.get('host_resource', 'N/A'))
+                            LOG.info('='*60)
+                            return created_guid
+                        else:
+                            LOG.error('[Step 2-Fallback] ❌ Create returned no data')
+                            LOG.error('[Step 2-Fallback] Response: %s', create_response)
+                            LOG.warning('='*60)
+                            return None
+                    except Exception as create_err:
+                        LOG.error('[Step 2-Fallback] ❌ Create also failed: %s', str(create_err))
+                        LOG.exception(create_err)
+                        LOG.warning('='*60)
+                        return None
+                else:
+                    # 其他类型的错误，直接抛出
+                    LOG.error('[Step 2] ❌ Update failed with unexpected error')
+                    LOG.exception(update_err)
+                    LOG.warning('='*60)
+                    raise
         else:
             # ===== 记录不存在：不执行任何操作（只更新模式） =====
             LOG.warning('='*60)
