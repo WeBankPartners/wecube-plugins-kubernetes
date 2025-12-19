@@ -87,6 +87,17 @@ _expected_pod_cache = {}
 _expected_pod_lock = threading.Lock()
 _expected_pod_window = 300  # 预期 Pod 缓存时间窗口：5分钟（StatefulSet 创建 Pod 可能较慢）
 
+# 最近删除的 Pod 缓存（用于检测 Pod 漂移场景）
+# Key: (cluster_id, namespace, pod_name), Value: {'timestamp': float, 'guid': str, 'old_asset_id': str, 'host_ip': str}
+# 当 watcher 收到 POD.DELETED 事件并成功删除 CMDB 记录时，将 Pod 信息加入此缓存
+# 当 watcher 收到 POD.ADDED 事件时，检查缓存：
+#   - 如果同名 Pod 在缓存中（时间窗口内） → 这是 Pod 漂移场景，快速更新 CMDB 记录（无需等待）
+#   - 如果同名 Pod 不在缓存中 → 这是新建场景，进入重试循环等待 apply API
+# 时间窗口：60秒（足够长以覆盖大多数 Pod 漂移场景，StatefulSet 通常在 Pod 删除后几秒内重建）
+_recently_deleted_pods = {}
+_recently_deleted_pods_lock = threading.Lock()
+_recently_deleted_pods_window = 60  # 最近删除 Pod 缓存时间窗口：60秒
+
 
 def get_wecube_client():
     """获取 WeCube 客户端（复用客户端，避免重复登录）"""
@@ -557,43 +568,248 @@ def sync_pod_to_cmdb_on_added(pod_data):
             }
         }
         
-        cmdb_response = None
-        for attempt in range(1, MAX_RETRIES + 1):
-            LOG.info('[Step 1] [Retry %d/%d] Querying CMDB by code (pod name): %s', 
-                    attempt, MAX_RETRIES, pod_name)
-            LOG.info('[Step 1] [Retry %d/%d] Query data: %s', attempt, MAX_RETRIES, query_data)
+        # ===== 步骤1.0：检查"最近删除的 Pod"缓存（快速漂移检测） =====
+        cache_key = (cluster_id, pod_namespace, pod_name)
+        recently_deleted_info = None
+        
+        with _recently_deleted_pods_lock:
+            if cache_key in _recently_deleted_pods:
+                cached_info = _recently_deleted_pods[cache_key]
+                cache_age = time.time() - cached_info['timestamp']
+                
+                # 检查缓存是否在有效期内
+                if cache_age <= _recently_deleted_pods_window:
+                    recently_deleted_info = cached_info
+                    LOG.info('='*60)
+                    LOG.info('🎯 DRIFT DETECTED IN CACHE!')
+                    LOG.info('='*60)
+                    LOG.info('   Pod was recently deleted %d seconds ago', int(cache_age))
+                    LOG.info('   This is a confirmed Pod drift/eviction scenario')
+                    LOG.info('   Old GUID: %s', cached_info['guid'])
+                    LOG.info('   Old asset_id: %s', cached_info['old_asset_id'])
+                    LOG.info('   New asset_id: %s', pod_id)
+                    LOG.info('   Will REUSE the GUID and update the record immediately (NO wait needed!)')
+                    LOG.info('='*60)
+                    
+                    # 从缓存中删除（已使用）
+                    del _recently_deleted_pods[cache_key]
+                    LOG.info('[DRIFT-CACHE] Removed from cache (used for drift detection)')
+                else:
+                    # 缓存已过期，清理
+                    LOG.info('[DRIFT-CACHE] Found expired cache entry (age: %d seconds), removing...', int(cache_age))
+                    del _recently_deleted_pods[cache_key]
+        
+        # 如果检测到漂移场景，直接更新记录（重用旧 GUID）
+        if recently_deleted_info:
+            LOG.info('[DRIFT-UPDATE] Updating Pod record for confirmed drift scenario...')
+            LOG.info('[DRIFT-UPDATE] Reusing GUID: %s', recently_deleted_info['guid'])
+            LOG.info('[DRIFT-UPDATE] Old asset_id: %s', recently_deleted_info['old_asset_id'])
+            LOG.info('[DRIFT-UPDATE] New asset_id: %s', pod_id)
             
-            cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
-            found_count = len(cmdb_response.get('data', [])) if cmdb_response else 0
+            # 查询新的 host_resource（Pod 可能漂移到不同的节点）
+            host_resource_guid = None
+            if pod_host_ip:
+                LOG.info('[DRIFT-UPDATE] Querying host_resource for new IP: %s', pod_host_ip)
+                host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
+                
+                if host_resource_guid:
+                    LOG.info('[DRIFT-UPDATE] ✅ Found host_resource: %s', host_resource_guid)
+                else:
+                    LOG.warning('[DRIFT-UPDATE] ⚠️  host_resource not found for IP: %s', pod_host_ip)
+                    LOG.warning('[DRIFT-UPDATE] Will still update asset_id')
             
-            LOG.info('[Step 1] [Retry %d/%d] Query result: found %d record(s)', 
-                    attempt, MAX_RETRIES, found_count)
-            LOG.info('[Step 1] [Retry %d/%d] CMDB response: %s', 
-                    attempt, MAX_RETRIES, cmdb_response)
+            # 更新 CMDB 记录（重用旧 GUID）
+            update_data = {
+                'guid': recently_deleted_info['guid'],
+                'asset_id': pod_id,  # 更新为新的 UID
+            }
             
-            # 如果找到记录，立即跳出循环
-            if cmdb_response and cmdb_response.get('data') and len(cmdb_response['data']) > 0:
-                LOG.info('✅ Found CMDB record on attempt %d/%d', attempt, MAX_RETRIES)
-                break
+            # 只在找到 host_resource 时更新（避免清空）
+            if host_resource_guid:
+                update_data['host_resource'] = host_resource_guid
             
-            # 如果还有重试次数，等待后继续
-            if attempt < MAX_RETRIES:
-                LOG.warning('⏳ CMDB record not found yet, waiting %d seconds before retry %d/%d...', 
-                           RETRY_INTERVAL, attempt + 1, MAX_RETRIES)
-                LOG.warning('   Possible reason: apply API is still creating K8s resources or waiting for pods')
+            LOG.info('[DRIFT-UPDATE] Update data: %s', update_data)
+            
+            try:
+                update_response = cmdb_client.update('wecmdb', 'pod', [update_data])
+                
+                if update_response and update_response.get('data'):
+                    updated_pod = update_response['data'][0]
+                    LOG.info('='*60)
+                    LOG.info('✅ Successfully updated Pod record for CONFIRMED drift scenario')
+                    LOG.info('   Pod name: %s', pod_name)
+                    LOG.info('   Pod GUID: %s (reused)', updated_pod.get('guid'))
+                    LOG.info('   Old asset_id: %s', recently_deleted_info['old_asset_id'])
+                    LOG.info('   New asset_id: %s', pod_id)
+                    LOG.info('   host_resource: %s', host_resource_guid or 'not updated')
+                    LOG.info('   ⚡ Total time: < 1 second (cache-based detection, no CMDB query needed!)')
+                    LOG.info('='*60)
+                    # 返回 (guid, is_pod_drift=True) - 表示这是漂移场景
+                    return (updated_pod.get('guid'), True)
+                else:
+                    LOG.error('[DRIFT-UPDATE] ❌ Update returned no data')
+                    LOG.error('[DRIFT-UPDATE] Response: %s', update_response)
+                    LOG.error('[DRIFT-UPDATE] Will fall back to normal creation flow')
+                    
+            except Exception as update_err:
+                LOG.error('[DRIFT-UPDATE] ❌ Update failed: %s', str(update_err))
+                LOG.exception(update_err)
+                LOG.error('[DRIFT-UPDATE] Possible cause: Record was already deleted by another watcher')
+                LOG.error('[DRIFT-UPDATE] Will fall back to normal creation flow (create new record)')
+        
+        # ===== 步骤1.1：首次查询 CMDB（没有检测到缓存中的漂移） =====
+        LOG.info('[Step 1.1] Initial query: Checking if Pod record exists by code (pod name): %s', pod_name)
+        LOG.info('[Step 1.1] Query data: %s', query_data)
+        
+        cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
+        found_count = len(cmdb_response.get('data', [])) if cmdb_response else 0
+        
+        LOG.info('[Step 1.1] Query result: found %d record(s)', found_count)
+        
+        # ===== 步骤1.2：如果没找到记录，进一步检测是否是 Pod 漂移场景（备用检测） =====
+        # 注意：这是备用检测机制，主要用于处理多 watcher 场景下，另一个 watcher 删除了记录的情况
+        if not cmdb_response or not cmdb_response.get('data') or len(cmdb_response['data']) == 0:
+            LOG.info('='*60)
+            LOG.info('🔍 BACKUP DRIFT DETECTION: Cache miss, querying CMDB...')
+            LOG.info('   This handles cases where another watcher deleted the record')
+            LOG.info('   Looking for old records with same pod name but different UID')
+            LOG.info('='*60)
+            
+            # 查询所有同名 Pod 记录（不论 UID）
+            # 这是备用检测机制，主要用于多 watcher 场景
+            drift_query_data = {
+                "criteria": {
+                    "attrName": "code",
+                    "op": "eq",  # 使用精确匹配而不是 contains
+                    "condition": pod_name
+                }
+            }
+            
+            LOG.info('[BACKUP-DRIFT-CHECK] Querying CMDB with exact match...')
+            drift_response = cmdb_client.query('wecmdb', 'pod', drift_query_data)
+            drift_records = drift_response.get('data', []) if drift_response else []
+            
+            LOG.info('[BACKUP-DRIFT-CHECK] Found %d record(s) with same pod name', len(drift_records))
+            
+            # 检查是否有旧记录（asset_id 不同）
+            old_record = None
+            for record in drift_records:
+                record_asset_id = record.get('asset_id')
+                LOG.info('[BACKUP-DRIFT-CHECK] Checking record: guid=%s, asset_id=%s', 
+                        record.get('guid'), record_asset_id or 'NULL')
+                
+                if record_asset_id and record_asset_id != pod_id:
+                    # 找到旧记录：Pod name 相同但 UID 不同（另一个 watcher 没删掉，或删除失败）
+                    old_record = record
+                    LOG.info('='*60)
+                    LOG.info('🎯 BACKUP DRIFT DETECTED! Found stale Pod record with different UID')
+                    LOG.info('   Old UID: %s', record_asset_id)
+                    LOG.info('   New UID: %s', pod_id)
+                    LOG.info('   This is a Pod drift scenario (cache miss, possibly multi-watcher)')
+                    LOG.info('   Will update the CMDB record immediately (NO 240s wait needed)')
+                    LOG.info('='*60)
+                    break
+            
+            # 如果检测到漂移（备用机制），立即更新记录
+            if old_record:
+                LOG.info('[BACKUP-DRIFT-UPDATE] Updating Pod record for backup drift scenario...')
+                LOG.info('[BACKUP-DRIFT-UPDATE] GUID: %s', old_record.get('guid'))
+                LOG.info('[BACKUP-DRIFT-UPDATE] Old asset_id: %s', old_record.get('asset_id'))
+                LOG.info('[BACKUP-DRIFT-UPDATE] New asset_id: %s', pod_id)
+                
+                # 查询新的 host_resource（Pod 可能漂移到不同的节点）
+                host_resource_guid = None
+                if pod_host_ip:
+                    LOG.info('[BACKUP-DRIFT-UPDATE] Querying host_resource for new IP: %s', pod_host_ip)
+                    host_resource_guid = query_host_resource_guid(cmdb_client, pod_host_ip)
+                    
+                    if host_resource_guid:
+                        LOG.info('[BACKUP-DRIFT-UPDATE] ✅ Found host_resource: %s', host_resource_guid)
+                    else:
+                        LOG.warning('[BACKUP-DRIFT-UPDATE] ⚠️  host_resource not found for IP: %s', pod_host_ip)
+                        LOG.warning('[BACKUP-DRIFT-UPDATE] Will still update asset_id')
+                
+                # 更新 CMDB 记录
+                update_data = {
+                    'guid': old_record.get('guid'),
+                    'asset_id': pod_id,  # 更新为新的 UID
+                }
+                
+                # 只在找到 host_resource 时更新（避免清空）
+                if host_resource_guid:
+                    update_data['host_resource'] = host_resource_guid
+                
+                LOG.info('[BACKUP-DRIFT-UPDATE] Update data: %s', update_data)
+                
+                try:
+                    update_response = cmdb_client.update('wecmdb', 'pod', [update_data])
+                    
+                    if update_response and update_response.get('data'):
+                        updated_pod = update_response['data'][0]
+                        LOG.info('='*60)
+                        LOG.info('✅ Successfully updated Pod record for BACKUP drift scenario')
+                        LOG.info('   Pod name: %s', pod_name)
+                        LOG.info('   Pod GUID: %s', updated_pod.get('guid'))
+                        LOG.info('   Old asset_id: %s', old_record.get('asset_id'))
+                        LOG.info('   New asset_id: %s', pod_id)
+                        LOG.info('   host_resource: %s', host_resource_guid or 'not updated')
+                        LOG.info('   ⚡ Detection method: Backup CMDB query (cache miss)')
+                        LOG.info('='*60)
+                        # 返回 (guid, is_pod_drift=True) - 表示这是漂移场景
+                        return (updated_pod.get('guid'), True)
+                    else:
+                        LOG.error('[BACKUP-DRIFT-UPDATE] ❌ Update returned no data')
+                        LOG.error('[BACKUP-DRIFT-UPDATE] Response: %s', update_response)
+                        # 更新失败，继续进入重试循环
+                        
+                except Exception as update_err:
+                    LOG.error('[BACKUP-DRIFT-UPDATE] ❌ Update failed: %s', str(update_err))
+                    LOG.exception(update_err)
+                    # 更新失败，继续进入重试循环
+            else:
+                LOG.info('='*60)
+                LOG.info('⚠️  No drift detected in backup check')
+                LOG.info('   Cache miss AND no stale records found in CMDB')
+                LOG.info('   This is likely a new Pod creation from apply API')
+                LOG.info('   Will enter retry loop to wait for apply API to complete CMDB pre-creation')
+                LOG.info('='*60)
+        
+        # ===== 步骤1.3：进入重试循环（等待 apply API 完成 CMDB 预创建）=====
+        # 只有在没有找到记录且不是漂移场景时，才进入重试循环
+        if not cmdb_response or not cmdb_response.get('data') or len(cmdb_response['data']) == 0:
+            LOG.info('[Step 1.3] Entering retry loop (waiting for apply API to complete)...')
+            
+            for attempt in range(1, MAX_RETRIES + 1):
+                LOG.info('[Step 1.3] [Retry %d/%d] Waiting %d seconds before retry...', 
+                        attempt, MAX_RETRIES, RETRY_INTERVAL)
                 time.sleep(RETRY_INTERVAL)
+                
+                LOG.info('[Step 1.3] [Retry %d/%d] Querying CMDB by code (pod name): %s', 
+                        attempt, MAX_RETRIES, pod_name)
+                
+                cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
+                found_count = len(cmdb_response.get('data', [])) if cmdb_response else 0
+                
+                LOG.info('[Step 1.3] [Retry %d/%d] Query result: found %d record(s)', 
+                        attempt, MAX_RETRIES, found_count)
+                
+                # 如果找到记录，立即跳出循环
+                if cmdb_response and cmdb_response.get('data') and len(cmdb_response['data']) > 0:
+                    LOG.info('✅ Found CMDB record on retry %d/%d', attempt, MAX_RETRIES)
+                    break
         
         # ===== 检查最终查询结果 =====
         if not cmdb_response or not cmdb_response.get('data') or len(cmdb_response['data']) == 0:
             LOG.warning('='*60)
-            LOG.warning('❌ CMDB record NOT FOUND after %d retries (waited %d seconds total)', 
-                       MAX_RETRIES, MAX_RETRIES * RETRY_INTERVAL)
+            LOG.warning('❌ CMDB record NOT FOUND after drift detection + %d retries', MAX_RETRIES)
+            LOG.warning('   Total wait time: %d seconds', MAX_RETRIES * RETRY_INTERVAL)
             LOG.warning('   Pod name: %s', pod_name)
             LOG.warning('   Cluster: %s', cluster_id)
             LOG.warning('   Possible reasons:')
-            LOG.warning('   1. Pod drift/eviction (pod was recreated by StatefulSet)')
-            LOG.warning('   2. Pod was created manually (kubectl create) without apply API')
-            LOG.warning('   3. apply API failed before creating CMDB record')
+            LOG.warning('   1. Pod was created manually (kubectl create) without apply API')
+            LOG.warning('   2. apply API failed before creating CMDB record')
+            LOG.warning('   3. StatefulSet was created without instanceId (missing wecube.io/app-instance annotation)')
+            LOG.warning('   Note: Pod drift scenario is already handled by fast drift detection')
             LOG.warning('='*60)
             
             # ===== 新增逻辑：创建 Pod 记录（处理 Pod 漂移场景）=====
@@ -1062,6 +1278,11 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
         pod_asset_id = pod_data.get('asset_id')  # 使用 asset_id（cluster_id_pod_uid）
         pod_id = pod_asset_id  # 兼容旧代码中的 pod_id 变量名
         
+        # 从 asset_id 中提取 cluster_id（格式：{cluster_id}_{pod_uid}）
+        cluster_id = None
+        if pod_asset_id and '_' in pod_asset_id:
+            cluster_id = pod_asset_id.split('_', 1)[0]
+        
         if not pod_name:
             LOG.warning('Pod name missing, skipping CMDB sync: %s', pod_data)
             return
@@ -1356,6 +1577,25 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             LOG.info('  - GUID: %s', pod_guid)
             LOG.info('  - Asset ID: %s', existing_asset_id if existing_asset_id else 'N/A')
             LOG.info('='*60)
+            
+            # ===== 存入"最近删除的 Pod"缓存，用于后续快速检测 Pod 漂移场景 =====
+            cache_key = (cluster_id, pod_data.get('namespace', 'default'), pod_name)
+            cache_value = {
+                'timestamp': time.time(),
+                'guid': pod_guid,
+                'old_asset_id': existing_asset_id,
+                'host_ip': existing_pod.get('host_resource') if existing_pod else None  # 保存旧的 host_resource
+            }
+            
+            with _recently_deleted_pods_lock:
+                _recently_deleted_pods[cache_key] = cache_value
+                LOG.info('[DRIFT-CACHE] Added to recently deleted pods cache:')
+                LOG.info('[DRIFT-CACHE]   Key: cluster=%s, namespace=%s, pod_name=%s', 
+                        cluster_id, pod_data.get('namespace', 'default'), pod_name)
+                LOG.info('[DRIFT-CACHE]   Value: guid=%s, old_asset_id=%s', 
+                        pod_guid, existing_asset_id)
+                LOG.info('[DRIFT-CACHE]   TTL: %d seconds (for drift detection)', 
+                        _recently_deleted_pods_window)
         except Exception as del_err:
             LOG.error('='*60)
             LOG.error('❌ DELETION FAILED: CMDB delete operation error')
