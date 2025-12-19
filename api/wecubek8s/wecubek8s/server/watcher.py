@@ -408,9 +408,10 @@ def sync_pod_to_cmdb_on_added(pod_data):
     # apply API 可能正在创建 K8s 资源并等待 Pod 就绪（30-240秒）
     # 需要足够长的重试时间确保 apply API 完成 CMDB 记录创建
     # 注意：有 packageUrl 时 apply API 等待 240 秒，无 packageUrl 时等待 30 秒
-    MAX_RETRIES = 30      # 最多重试 30 次
-    RETRY_INTERVAL = 8    # 每次间隔 8 秒
-    # 总等待时间：最多 30 * 8 = 240 秒（与 apply API 最大等待时间一致）
+    MAX_RETRIES = 15      # 最多重试 15 次（减少重试次数）
+    RETRY_INTERVAL = 4    # 每次间隔 4 秒（缩短间隔）
+    # 总等待时间：最多 15 * 4 = 60 秒（足够 apply API 完成预创建）
+    # 如果 60 秒后还没找到记录，说明不是 apply API 创建的，直接进入创建逻辑
     
     # 【关键修复】从 pod_data 中读取创建者的 token
     # 这个 token 是 API 在创建 Pod 时保存到 annotations 中的
@@ -453,9 +454,9 @@ def sync_pod_to_cmdb_on_added(pod_data):
         
         # ===== 【新增】等待 Pod 调度完成（获取 host_ip）=====
         # Pod 在 Pending 状态时没有 host_ip，需要等待调度完成
-        # 总共等待 240 秒（与 apply API 最大等待时间一致），每 10 秒检查一次
-        POD_SCHEDULE_MAX_WAIT = 240  # 最多等待 240 秒
-        POD_SCHEDULE_CHECK_INTERVAL = 10  # 每 10 秒检查一次
+        # 总共等待 120 秒（通常 Pod 调度很快），每 5 秒检查一次
+        POD_SCHEDULE_MAX_WAIT = 120  # 最多等待 120 秒（缩短等待时间）
+        POD_SCHEDULE_CHECK_INTERVAL = 5  # 每 5 秒检查一次（加快检查频率）
         
         if not pod_host_ip:
             LOG.info('='*60)
@@ -531,8 +532,8 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 return (None, False)
         
         LOG.info('='*60)
-        LOG.info('Syncing POD.ADDED to CMDB: pod=%s, namespace=%s, asset_id=%s, host_ip=%s', 
-                 pod_name, pod_namespace or 'N/A', pod_id, pod_host_ip or 'N/A')
+        LOG.info('Syncing POD.ADDED to CMDB: pod=%s, namespace=%s, asset_id=%s, host_ip=%s, cluster_id=%s', 
+                 pod_name, pod_namespace or 'N/A', pod_id, pod_host_ip or 'N/A', cluster_id)
         
         # 检查是否是预期创建的 Pod（调用但不消费缓存，仅用于日志）
         # 真正的消费会在 notify_pod 中进行
@@ -572,7 +573,22 @@ def sync_pod_to_cmdb_on_added(pod_data):
         cache_key = (cluster_id, pod_namespace, pod_name)
         recently_deleted_info = None
         
+        # 🔍 调试：检查缓存中是否有同名 Pod（不同 cluster_id）
         with _recently_deleted_pods_lock:
+            # 先检查是否有同名 Pod（忽略 cluster_id）
+            similar_keys = [k for k in _recently_deleted_pods.keys() 
+                           if k[1] == pod_namespace and k[2] == pod_name]
+            if similar_keys:
+                for k in similar_keys:
+                    cached_cluster_id, cached_ns, cached_name = k
+                    if cached_cluster_id != cluster_id:
+                        LOG.warning('⚠️  CLUSTER_ID MISMATCH DETECTED in drift cache!')
+                        LOG.warning('   Expected cluster_id: %s', cluster_id)
+                        LOG.warning('   Cached cluster_id: %s', cached_cluster_id)
+                        LOG.warning('   Pod: %s/%s', cached_ns, cached_name)
+                        LOG.warning('   This suggests multiple watchers with different cluster_id configs')
+                        LOG.warning('   or database has duplicate cluster records with different IDs')
+            
             if cache_key in _recently_deleted_pods:
                 cached_info = _recently_deleted_pods[cache_key]
                 cache_age = time.time() - cached_info['timestamp']
@@ -750,25 +766,40 @@ def sync_pod_to_cmdb_on_added(pod_data):
         # 只有在没有找到记录且不是漂移场景时，才进入重试循环
         # 如果是快速漂移场景，跳过重试（记录已删除，直接创建新记录）
         if not is_fast_drift_detected and (not cmdb_response or not cmdb_response.get('data') or len(cmdb_response['data']) == 0):
+            # 🎯 优化：检查是否有 API 创建标记，如果有，说明 apply API 应该已经预创建了记录
+            # 如果没有标记，可能是手动创建或漂移，不需要等待太久
+            has_api_annotation = pod_data.get('annotations', {}).get('wecube.io/created-by') == 'api'
+            
+            # 根据是否有 API 标记调整重试策略
+            if has_api_annotation:
+                actual_max_retries = MAX_RETRIES
+                LOG.info('[Step 1.3] Pod has API annotation, will wait up to %d seconds for apply API',
+                        MAX_RETRIES * RETRY_INTERVAL)
+            else:
+                # 没有 API 标记，很可能不是 apply API 创建的，减少等待时间
+                actual_max_retries = max(3, MAX_RETRIES // 5)  # 最多 3 次重试（12 秒）
+                LOG.info('[Step 1.3] Pod has NO API annotation, will only wait %d seconds before creating',
+                        actual_max_retries * RETRY_INTERVAL)
+            
             LOG.info('[Step 1.3] Entering retry loop (waiting for apply API to complete)...')
             
-            for attempt in range(1, MAX_RETRIES + 1):
+            for attempt in range(1, actual_max_retries + 1):
                 LOG.info('[Step 1.3] [Retry %d/%d] Waiting %d seconds before retry...', 
-                        attempt, MAX_RETRIES, RETRY_INTERVAL)
+                        attempt, actual_max_retries, RETRY_INTERVAL)
                 time.sleep(RETRY_INTERVAL)
                 
                 LOG.info('[Step 1.3] [Retry %d/%d] Querying CMDB by code (pod name): %s', 
-                        attempt, MAX_RETRIES, pod_name)
+                        attempt, actual_max_retries, pod_name)
                 
                 cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
                 found_count = len(cmdb_response.get('data', [])) if cmdb_response else 0
                 
                 LOG.info('[Step 1.3] [Retry %d/%d] Query result: found %d record(s)', 
-                        attempt, MAX_RETRIES, found_count)
+                        attempt, actual_max_retries, found_count)
                 
                 # 如果找到记录，立即跳出循环
                 if cmdb_response and cmdb_response.get('data') and len(cmdb_response['data']) > 0:
-                    LOG.info('✅ Found CMDB record on retry %d/%d', attempt, MAX_RETRIES)
+                    LOG.info('✅ Found CMDB record on retry %d/%d', attempt, actual_max_retries)
                     break
         
         # ===== 检查最终查询结果 =====
@@ -781,8 +812,8 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 LOG.info('='*60)
             else:
                 LOG.warning('='*60)
-                LOG.warning('❌ CMDB record NOT FOUND after drift detection + %d retries', MAX_RETRIES)
-                LOG.warning('   Total wait time: %d seconds', MAX_RETRIES * RETRY_INTERVAL)
+                LOG.warning('❌ CMDB record NOT FOUND after drift detection + %d retries', actual_max_retries)
+                LOG.warning('   Total wait time: %d seconds', actual_max_retries * RETRY_INTERVAL)
                 LOG.warning('   Pod name: %s', pod_name)
                 LOG.warning('   Cluster: %s', cluster_id)
                 LOG.warning('   Possible reasons:')
