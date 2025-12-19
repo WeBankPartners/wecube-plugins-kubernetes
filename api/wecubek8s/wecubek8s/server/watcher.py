@@ -615,7 +615,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                         LOG.error('[CREATE-Step-1] ❌ Cannot find cluster configuration for cluster_id: %s', cluster_id)
                         LOG.error('[CREATE-Step-1] Cannot create K8s client, aborting')
                         LOG.warning('='*60)
-                        return None
+                        return (None, False)
                     
                     cluster_info = cluster_list[0]
                     
@@ -637,23 +637,27 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     else:
                         LOG.error('[CREATE-Step-1] ❌ Cannot find app_instance from StatefulSet annotation')
                         LOG.error('[CREATE-Step-1] StatefulSet: %s/%s', pod_namespace, statefulset_name)
+                        LOG.error('[CREATE-Step-1] This StatefulSet was created without instanceId parameter')
+                        LOG.error('[CREATE-Step-1] Solution: Add annotation manually or recreate with instanceId:')
+                        LOG.error('[CREATE-Step-1]   kubectl annotate statefulset %s -n %s wecube.io/app-instance=<guid> --overwrite', 
+                                 statefulset_name, pod_namespace)
                         LOG.error('[CREATE-Step-1] Cannot create Pod without app_instance, aborting')
                         LOG.warning('='*60)
-                        return None
+                        return (None, False)
                         
                 except Exception as e:
                     LOG.error('[CREATE-Step-1] ❌ Failed to read StatefulSet annotation: %s', str(e))
                     LOG.exception(e)
                     LOG.error('[CREATE-Step-1] Cannot create Pod without app_instance, aborting')
                     LOG.warning('='*60)
-                    return None
+                    return (None, False)
             else:
                 LOG.error('[CREATE-Step-1] ❌ Pod has no StatefulSet owner or namespace is missing')
                 LOG.error('[CREATE-Step-1] statefulset_name: %s, namespace: %s', statefulset_name or 'None', pod_namespace or 'None')
                 LOG.error('[CREATE-Step-1] This Pod may not be managed by StatefulSet')
                 LOG.error('[CREATE-Step-1] Cannot create Pod without app_instance, aborting')
                 LOG.warning('='*60)
-                return None
+                return (None, False)
             
             # 步骤2：获取 host_resource（从 host IP）
             host_resource_guid = None
