@@ -775,7 +775,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 
                 try:
                     # 删除旧记录
-                    cmdb_client.delete('wecmdb', 'pod', [old_record.get('guid')])
+                    cmdb_client.delete('wecmdb', 'pod', [{'guid': old_record.get('guid')}])
                     LOG.info('[BACKUP-DRIFT-DELETE] ✅ Successfully deleted stale Pod record')
                     LOG.info('[BACKUP-DRIFT-DELETE]    GUID: %s', old_record.get('guid'))
                     LOG.info('[BACKUP-DRIFT-DELETE]    asset_id: %s', old_record.get('asset_id'))
@@ -1108,7 +1108,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                             LOG.warning('⚠️  Found duplicate pod with same asset_id %s (guid=%s), deleting...', 
                                        pod_id, dup_guid)
                             try:
-                                cmdb_client.delete('wecmdb', 'pod', [dup_guid])
+                                cmdb_client.delete('wecmdb', 'pod', [{'guid': dup_guid}])
                                 LOG.info('✅ Deleted duplicate pod record: guid=%s', dup_guid)
                             except Exception as del_err:
                                 LOG.error('Failed to delete duplicate pod: %s', str(del_err))
@@ -1640,7 +1640,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             LOG.info('')
             
             LOG.info('[DELETE] Executing CMDB delete operation...')
-            cmdb_client.delete('wecmdb', 'pod', [pod_guid])
+            cmdb_client.delete('wecmdb', 'pod', [{'guid': pod_guid}])
             
             LOG.info('='*60)
             LOG.info('✅ Successfully deleted pod from CMDB')
