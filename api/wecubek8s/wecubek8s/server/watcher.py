@@ -561,11 +561,22 @@ def sync_pod_to_cmdb_on_added(pod_data):
         
         # ===== 步骤1：通过 code（Pod name）查询 CMDB（带重试机制）=====
         # apply API 预创建时使用 Pod name 作为 code
+        # 注意：只查询状态为 created_0 的记录（过滤已软删除的记录）
         query_data = {
             "criteria": {
-                "attrName": "code",
-                "op": "contains",
-                "condition": pod_name
+                "condition": [
+                    {
+                        "attrName": "code",
+                        "op": "contains",
+                        "condition": pod_name
+                    },
+                    {
+                        "attrName": "state",
+                        "op": "eq",
+                        "condition": "created_0"
+                    }
+                ],
+                "op": "and"
             }
         }
         
@@ -632,29 +643,45 @@ def sync_pod_to_cmdb_on_added(pod_data):
             created_by_api = pod_data.get('annotations', {}).get('wecube.io/created-by') == 'api'
             
             if created_by_api:
-                # 这是 API 重新创建，不是漂移
+                # Pod 有 API 标记，但也在漂移缓存中，需要进一步判断
                 LOG.info('='*60)
-                LOG.info('✅ API RE-DEPLOYMENT DETECTED (NOT drift)')
+                LOG.info('🔍 API ANNOTATION + DRIFT CACHE DETECTED')
                 LOG.info('='*60)
-                LOG.info('   Same pod name as recently deleted pod, but has API annotation')
+                LOG.info('   Same pod name as recently deleted pod, and has API annotation')
                 LOG.info('   Old asset_id: %s', recently_deleted_info.get('old_asset_id'))
                 LOG.info('   New asset_id: %s', pod_id)
-                LOG.info('   This is a StatefulSet re-deployment via API (delete old + create new)')
-                LOG.info('   Will treat as normal API creation (NO drift notification)')
+                LOG.info('   Need to query CMDB to determine: API re-deployment OR drift')
                 LOG.info('='*60)
                 
-                # 清理缓存（避免影响后续判断）
-                # 但不设置 is_fast_drift_detected，让代码进入正常的 API 创建流程
-                is_fast_drift_detected = False
-                
-                # 继续正常流程：查询 CMDB 中是否有预创建的记录
-                LOG.info('[API-REDEPLOY] Querying CMDB for pre-created record by code (pod name): %s', pod_name)
-                LOG.info('[API-REDEPLOY] Query data: %s', query_data)
+                # 立即查询 CMDB，判断是否有预创建的记录
+                LOG.info('[HYBRID-CHECK] Querying CMDB for pre-created record by code (pod name): %s', pod_name)
+                LOG.info('[HYBRID-CHECK] Query data: %s', query_data)
                 
                 cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
                 found_count = len(cmdb_response.get('data', [])) if cmdb_response else 0
                 
-                LOG.info('[API-REDEPLOY] Query result: found %d record(s)', found_count)
+                LOG.info('[HYBRID-CHECK] Query result: found %d record(s)', found_count)
+                
+                # 根据查询结果判断场景
+                if found_count > 0:
+                    # 找到了预创建的记录 → 这是 API 重新部署
+                    is_fast_drift_detected = False
+                    LOG.info('='*60)
+                    LOG.info('✅ CONFIRMED: API RE-DEPLOYMENT (found pre-created record)')
+                    LOG.info('   CMDB has pre-created record, this is API delete + create')
+                    LOG.info('   Will update the record (NO drift notification)')
+                    LOG.info('='*60)
+                else:
+                    # 没找到预创建的记录 → 这是 Pod 漂移（annotation 是旧的）
+                    is_fast_drift_detected = True
+                    cmdb_response = None  # 触发后续创建逻辑
+                    LOG.info('='*60)
+                    LOG.info('🎯 CONFIRMED: POD DRIFT (no pre-created record found)')
+                    LOG.info('   Although Pod has API annotation, CMDB has no pre-created record')
+                    LOG.info('   This means: Pod was deleted and K8s auto-recreated it (drift)')
+                    LOG.info('   The API annotation is from the old Pod (inherited)')
+                    LOG.info('   Will create new record immediately (NO 60s wait!)')
+                    LOG.info('='*60)
             else:
                 # 这是真正的 Pod 漂移（K8s 自动重建，没有 API 标记）
                 LOG.info('='*60)
@@ -714,11 +741,22 @@ def sync_pod_to_cmdb_on_added(pod_data):
             
             # 查询所有同名 Pod 记录（不论 UID）
             # 这是备用检测机制，主要用于多 watcher 场景
+            # 注意：只查询状态为 created_0 的记录（过滤已软删除的记录）
             drift_query_data = {
                 "criteria": {
-                    "attrName": "code",
-                    "op": "eq",  # 使用精确匹配而不是 contains
-                    "condition": pod_name
+                    "condition": [
+                        {
+                            "attrName": "code",
+                            "op": "eq",  # 使用精确匹配而不是 contains
+                            "condition": pod_name
+                        },
+                        {
+                            "attrName": "state",
+                            "op": "eq",
+                            "condition": "created_0"
+                        }
+                    ],
+                    "op": "and"
                 }
             }
             
@@ -747,22 +785,27 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     LOG.info('='*60)
                     break
             
-            # 如果检测到漂移（备用机制），删除旧记录（方案B：DELETE时删除，ADDED时创建新记录）
+            # 如果检测到漂移（备用机制），软删除旧记录（方案B：DELETE时软删除，ADDED时创建新记录）
             if old_record:
                 LOG.info('='*60)
-                LOG.info('[BACKUP-DRIFT-DELETE] Deleting stale Pod record for backup drift scenario...')
+                LOG.info('[BACKUP-DRIFT-DELETE] Soft-deleting stale Pod record for backup drift scenario...')
                 LOG.info('[BACKUP-DRIFT-DELETE] GUID: %s', old_record.get('guid'))
                 LOG.info('[BACKUP-DRIFT-DELETE] Old asset_id: %s', old_record.get('asset_id'))
                 LOG.info('[BACKUP-DRIFT-DELETE] New asset_id: %s', pod_id)
-                LOG.info('[BACKUP-DRIFT-DELETE] Strategy: Delete old + Create new (Scheme B)')
+                LOG.info('[BACKUP-DRIFT-DELETE] Strategy: Soft-delete old (set state=destroy_0) + Create new')
                 LOG.info('='*60)
                 
                 try:
-                    # 删除旧记录
-                    cmdb_client.delete('wecmdb', 'pod', [{'guid': old_record.get('guid')}])
-                    LOG.info('[BACKUP-DRIFT-DELETE] ✅ Successfully deleted stale Pod record')
+                    # 软删除旧记录（更新状态为 destroy_0）
+                    update_data = {
+                        'guid': old_record.get('guid'),
+                        'state': 'destroy_0'
+                    }
+                    cmdb_client.update('wecmdb', 'pod', [update_data])
+                    LOG.info('[BACKUP-DRIFT-DELETE] ✅ Successfully soft-deleted stale Pod record')
                     LOG.info('[BACKUP-DRIFT-DELETE]    GUID: %s', old_record.get('guid'))
                     LOG.info('[BACKUP-DRIFT-DELETE]    asset_id: %s', old_record.get('asset_id'))
+                    LOG.info('[BACKUP-DRIFT-DELETE]    state: created_0 -> destroy_0')
                     
                     # 存入缓存，用于后续漂移检测
                     cache_key = (cluster_id, pod_data.get('namespace', 'default'), pod_name)
@@ -776,14 +819,14 @@ def sync_pod_to_cmdb_on_added(pod_data):
                         _recently_deleted_pods[cache_key] = cache_value
                         LOG.info('[BACKUP-DRIFT-DELETE] Cached deletion for drift detection')
                     
-                    # 删除成功后，继续进入创建新记录的流程（不 return，让代码继续执行）
-                    # cmdb_response 仍然为空，所以会进入后续的创建逻辑（第 838 行）
+                    # 软删除成功后，继续进入创建新记录的流程（不 return，让代码继续执行）
+                    # cmdb_response 仍然为空，所以会进入后续的创建逻辑
                     LOG.info('[BACKUP-DRIFT-DELETE] Will create new record in next step...')
                     
                 except Exception as delete_err:
-                    LOG.error('[BACKUP-DRIFT-DELETE] ❌ Delete failed: %s', str(delete_err))
+                    LOG.error('[BACKUP-DRIFT-DELETE] ❌ Soft-delete failed: %s', str(delete_err))
                     LOG.exception(delete_err)
-                    # 删除失败，继续进入重试循环或创建逻辑
+                    # 软删除失败，继续进入重试循环或创建逻辑
             else:
                 LOG.info('='*60)
                 LOG.info('⚠️  No drift detected in backup check')
@@ -1074,13 +1117,23 @@ def sync_pod_to_cmdb_on_added(pod_data):
             else:
                 LOG.info('Scenario: POD EXISTS with same asset_id, checking for drift')
             
-            # Pod 重建时，清理重复记录
+            # Pod 重建时，清理重复记录（软删除）
             if is_pod_rebuilt:
                 check_query = {
                     "criteria": {
-                        "attrName": "asset_id",
-                        "op": "eq",
-                        "condition": pod_id
+                        "condition": [
+                            {
+                                "attrName": "asset_id",
+                                "op": "eq",
+                                "condition": pod_id
+                            },
+                            {
+                                "attrName": "state",
+                                "op": "eq",
+                                "condition": "created_0"
+                            }
+                        ],
+                        "op": "and"
                     }
                 }
                 check_response = cmdb_client.query('wecmdb', 'pod', check_query)
@@ -1089,13 +1142,17 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     for duplicate_pod in check_response['data']:
                         dup_guid = duplicate_pod.get('guid')
                         if dup_guid and dup_guid != pod_guid:
-                            LOG.warning('⚠️  Found duplicate pod with same asset_id %s (guid=%s), deleting...', 
+                            LOG.warning('⚠️  Found duplicate pod with same asset_id %s (guid=%s), soft-deleting...', 
                                        pod_id, dup_guid)
                             try:
-                                cmdb_client.delete('wecmdb', 'pod', [{'guid': dup_guid}])
-                                LOG.info('✅ Deleted duplicate pod record: guid=%s', dup_guid)
+                                update_data = {
+                                    'guid': dup_guid,
+                                    'state': 'destroy_0'
+                                }
+                                cmdb_client.update('wecmdb', 'pod', [update_data])
+                                LOG.info('✅ Soft-deleted duplicate pod record: guid=%s (state -> destroy_0)', dup_guid)
                             except Exception as del_err:
-                                LOG.error('Failed to delete duplicate pod: %s', str(del_err))
+                                LOG.error('Failed to soft-delete duplicate pod: %s', str(del_err))
             
             update_data = {
                 'guid': pod_guid,
@@ -1298,7 +1355,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
 
 
 def sync_pod_to_cmdb_on_deleted(pod_data):
-    """Pod 删除时同步到 CMDB（更新状态或删除记录）"""
+    """Pod 删除时同步到 CMDB（软删除：将状态改为 destroy_0）"""
     # 【关键修复】从 pod_data 中读取创建者的 token
     creator_token = pod_data.get('creator_token')
     
@@ -1338,15 +1395,26 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
         LOG.info('='*60)
         
         # ===== 方式1：通过 code 字段查询（优先级最高） =====
+        # 注意：只查询状态为 created_0 的记录（过滤已软删除的记录）
         query_data = {
             "criteria": {
-                "attrName": "code",
-                "op": "eq",
-                "condition": pod_name
+                "condition": [
+                    {
+                        "attrName": "code",
+                        "op": "eq",
+                        "condition": pod_name
+                    },
+                    {
+                        "attrName": "state",
+                        "op": "eq",
+                        "condition": "created_0"
+                    }
+                ],
+                "op": "and"
             }
         }
         
-        LOG.info('[Query-1] Querying CMDB by code (pod name): %s', pod_name)
+        LOG.info('[Query-1] Querying CMDB by code (pod name): %s (state=created_0)', pod_name)
         cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
         LOG.info('[Query-1] Response status: %s', 
                 'SUCCESS' if cmdb_response and cmdb_response.get('data') else 'NO DATA')
@@ -1367,12 +1435,23 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             LOG.warning('[Query-1] ❌ Pod not found by code')
             
             # ===== 方式2：通过 key_name 查询（某些 CMDB 使用 key_name 作为唯一键） =====
-            LOG.info('[Query-2] Trying to query by key_name: %s', pod_name)
+            # 注意：只查询状态为 created_0 的记录（过滤已软删除的记录）
+            LOG.info('[Query-2] Trying to query by key_name: %s (state=created_0)', pod_name)
             query_by_keyname = {
                 "criteria": {
-                    "attrName": "key_name",
-                    "op": "eq",
-                    "condition": pod_name
+                    "condition": [
+                        {
+                            "attrName": "key_name",
+                            "op": "eq",
+                            "condition": pod_name
+                        },
+                        {
+                            "attrName": "state",
+                            "op": "eq",
+                            "condition": "created_0"
+                        }
+                    ],
+                    "op": "and"
                 }
             }
             cmdb_response_keyname = cmdb_client.query('wecmdb', 'pod', query_by_keyname)
@@ -1391,13 +1470,24 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
                 LOG.warning('[Query-2] ❌ Pod not found by key_name')
                 
                 # ===== 方式3：通过 asset_id 查询（备用） =====
+                # 注意：只查询状态为 created_0 的记录（过滤已软删除的记录）
                 if pod_asset_id:
-                    LOG.info('[Query-3] Trying to query by asset_id: %s', pod_asset_id)
+                    LOG.info('[Query-3] Trying to query by asset_id: %s (state=created_0)', pod_asset_id)
                     query_by_asset_id = {
                         "criteria": {
-                            "attrName": "asset_id",
-                            "op": "eq",
-                            "condition": pod_asset_id
+                            "condition": [
+                                {
+                                    "attrName": "asset_id",
+                                    "op": "eq",
+                                    "condition": pod_asset_id
+                                },
+                                {
+                                    "attrName": "state",
+                                    "op": "eq",
+                                    "condition": "created_0"
+                                }
+                            ],
+                            "op": "and"
                         }
                     }
                     
@@ -1530,33 +1620,49 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
         
         # ===== 执行删除操作 =====
         if not pod_guid:
-            LOG.error('='*60)
-            LOG.error('❌ DELETION FAILED: Pod not found in CMDB')
-            LOG.error('='*60)
-            LOG.error('Pod information:')
-            LOG.error('  - name (code): %s', pod_name)
-            LOG.error('  - K8s UID (asset_id): %s', pod_id if pod_id else 'N/A')
-            LOG.error('')
-            LOG.error('Query attempts made:')
-            LOG.error('  ✗ Query by code (pod name)')
-            LOG.error('  ✗ Query by key_name')
+            LOG.warning('='*60)
+            LOG.warning('⚠️  Pod not found in CMDB (may be system pod or already deleted)')
+            LOG.warning('='*60)
+            LOG.warning('Pod information:')
+            LOG.warning('  - name (code): %s', pod_name)
+            LOG.warning('  - K8s UID (asset_id): %s', pod_id if pod_id else 'N/A')
+            LOG.warning('')
+            LOG.warning('Query attempts made:')
+            LOG.warning('  ✗ Query by code (pod name)')
+            LOG.warning('  ✗ Query by key_name')
             if pod_id:
-                LOG.error('  ✗ Query by asset_id (K8s UID)')
-            LOG.error('  ✗ Fuzzy search in created_0 pods')
-            LOG.error('')
-            LOG.error('📋 Manual cleanup required:')
-            LOG.error('  1. Open WeCMDB UI: %s', CONF.wecube.base_url if CONF.wecube.base_url else '<cmdb-url>')
-            LOG.error('  2. Navigate to: Data Management → Pod table')
-            LOG.error('  3. Search conditions:')
-            LOG.error('     - code LIKE "%%%s%%"', pod_name[:40])
-            LOG.error('     - OR key_name LIKE "%%%s%%"', pod_name[:40])
-            if pod_id:
-                LOG.error('     - OR asset_id = "%s"', pod_id)
-            LOG.error('  4. Check the found record(s) and delete manually')
-            LOG.error('  5. Or use CMDB API to delete:')
-            LOG.error('     curl -X DELETE %s/wecmdb/api/v1/ci/pod/<guid>', 
-                     CONF.wecube.base_url if CONF.wecube.base_url else '<cmdb-url>')
-            LOG.error('='*60)
+                LOG.warning('  ✗ Query by asset_id (K8s UID)')
+            LOG.warning('  ✗ Fuzzy search in created_0 pods')
+            LOG.warning('')
+            LOG.warning('This is normal for:')
+            LOG.warning('  - System pods (kube-system, kube-flannel, etc.)')
+            LOG.warning('  - Pods not created via apply API')
+            LOG.warning('  - Pods already deleted from CMDB')
+            LOG.warning('='*60)
+            
+            # ===== 【关键修复】即使找不到 CMDB 记录，也要存入漂移缓存 =====
+            # 这样 POD.ADDED 时才能快速检测到漂移，避免60秒等待
+            LOG.info('[DRIFT-CACHE-FALLBACK] Caching deletion for drift detection (no CMDB record)')
+            try:
+                cache_key = (cluster_id, pod_data.get('namespace', 'default'), pod_name)
+                cache_value = {
+                    'timestamp': time.time(),
+                    'guid': None,  # CMDB 中没有记录
+                    'old_asset_id': pod_asset_id,  # 使用 K8s 的 asset_id
+                    'host_ip': pod_data.get('host_ip'),
+                    'cmdb_not_found': True  # 标记 CMDB 中没找到
+                }
+                
+                with _recently_deleted_pods_lock:
+                    _recently_deleted_pods[cache_key] = cache_value
+                    LOG.info('[DRIFT-CACHE-FALLBACK] ✅ Cached for drift detection:')
+                    LOG.info('[DRIFT-CACHE-FALLBACK]   cluster=%s, namespace=%s, pod=%s', 
+                            cluster_id, pod_data.get('namespace', 'default'), pod_name)
+                    LOG.info('[DRIFT-CACHE-FALLBACK]   old_asset_id=%s', pod_asset_id)
+                    LOG.info('[DRIFT-CACHE-FALLBACK]   If Pod recreates within 60s, drift will be detected')
+            except Exception as cache_err:
+                LOG.error('[DRIFT-CACHE-FALLBACK] Failed to cache: %s', str(cache_err))
+            
             return
         
         # 验证 Pod UID 是否匹配（如果提供了 pod_id）
@@ -1602,26 +1708,31 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
                 LOG.info('Action: Proceeding with deletion (Pod UID matches)')
                 LOG.info('='*60)
         
-        # 执行删除
+        # 执行软删除（更新状态为 destroy_0）
         try:
             LOG.info('='*60)
-            LOG.info('[DELETE] Preparing to delete pod from CMDB')
-            LOG.info('[DELETE] Target pod details:')
+            LOG.info('[SOFT-DELETE] Preparing to soft-delete pod from CMDB')
+            LOG.info('[SOFT-DELETE] Target pod details:')
             LOG.info('  - guid: %s', pod_guid)
             LOG.info('  - code: %s', existing_pod.get('code') if existing_pod else pod_name)
             LOG.info('  - key_name: %s', existing_pod.get('key_name') if existing_pod else 'N/A')
             LOG.info('  - asset_id: %s', existing_asset_id if existing_asset_id else 'N/A')
-            LOG.info('  - state: %s', existing_pod.get('state') if existing_pod else 'N/A')
+            LOG.info('  - current state: %s', existing_pod.get('state') if existing_pod else 'N/A')
             LOG.info('')
             
-            LOG.info('[DELETE] Executing CMDB delete operation...')
-            cmdb_client.delete('wecmdb', 'pod', [{'guid': pod_guid}])
+            LOG.info('[SOFT-DELETE] Executing CMDB update operation (state: created_0 -> destroy_0)...')
+            update_data = {
+                'guid': pod_guid,
+                'state': 'destroy_0'
+            }
+            cmdb_client.update('wecmdb', 'pod', [update_data])
             
             LOG.info('='*60)
-            LOG.info('✅ Successfully deleted pod from CMDB')
+            LOG.info('✅ Successfully soft-deleted pod from CMDB')
             LOG.info('  - Pod name: %s', pod_name)
             LOG.info('  - GUID: %s', pod_guid)
             LOG.info('  - Asset ID: %s', existing_asset_id if existing_asset_id else 'N/A')
+            LOG.info('  - State: created_0 -> destroy_0')
             LOG.info('='*60)
             
             # ===== 存入"最近删除的 Pod"缓存，用于后续快速检测 Pod 漂移场景 =====
@@ -1644,7 +1755,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
                         _recently_deleted_pods_window)
         except Exception as del_err:
             LOG.error('='*60)
-            LOG.error('❌ DELETION FAILED: CMDB delete operation error')
+            LOG.error('❌ SOFT-DELETE FAILED: CMDB update operation error')
             LOG.error('='*60)
             LOG.error('Target pod:')
             LOG.error('  - name: %s', pod_name)
@@ -1655,7 +1766,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             LOG.error('Possible causes:')
             LOG.error('  1. Network connection to CMDB failed')
             LOG.error('  2. Authentication token expired')
-            LOG.error('  3. Pod record has dependencies (foreign key constraints)')
+            LOG.error('  3. Invalid state transition (created_0 -> destroy_0)')
             LOG.error('  4. Insufficient permissions')
             LOG.error('')
             LOG.error('Recommendation: Check CMDB logs and retry manually')
