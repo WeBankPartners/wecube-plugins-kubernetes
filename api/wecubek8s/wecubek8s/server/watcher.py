@@ -481,7 +481,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                              wait_attempt, int(POD_SCHEDULE_MAX_WAIT / POD_SCHEDULE_CHECK_INTERVAL))
                     
                     try:
-                        pod_obj = k8s_client.get_pod(pod_namespace, pod_name)
+                        pod_obj = k8s_client.get_pod(pod_name, pod_namespace)
                         if pod_obj and pod_obj.status and pod_obj.status.host_ip:
                             pod_host_ip = pod_obj.status.host_ip
                             # 更新 pod_data，供后续使用

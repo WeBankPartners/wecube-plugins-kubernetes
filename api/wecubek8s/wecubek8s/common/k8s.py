@@ -141,6 +141,9 @@ class Client:
     
     def list_all_pod(self, **kwargs):
         return self._action(self.core_client, 'list_pod_for_all_namespaces', **kwargs)
+    
+    def get_pod(self, name, namespace, **kwargs):
+        return self._action_detail(self.core_client, 'read_namespaced_pod', name, namespace, **kwargs)
 
     # Service
     def create_service(self, namespace, body, **kwargs):
