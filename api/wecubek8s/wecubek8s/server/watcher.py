@@ -88,7 +88,9 @@ _expected_pod_lock = threading.Lock()
 _expected_pod_window = 300  # 预期 Pod 缓存时间窗口：5分钟（StatefulSet 创建 Pod 可能较慢）
 
 # 最近删除的 Pod 缓存（用于检测 Pod 漂移场景）
-# Key: (cluster_id, namespace, pod_name), Value: {'timestamp': float, 'guid': str, 'old_asset_id': str, 'host_ip': str}
+# Key: (namespace, pod_name), Value: {'timestamp': float, 'guid': str, 'old_asset_id': str, 'host_ip': str, 'cluster_id': str}
+# 注意：不再使用 cluster_id 作为 key 的一部分，避免因 cluster_id 配置不一致导致缓存未命中
+#       Pod name 在同一命名空间内是唯一的（K8s 保证），足以区分不同的 Pod
 # 当 watcher 收到 POD.DELETED 事件并成功删除 CMDB 记录时，将 Pod 信息加入此缓存
 # 当 watcher 收到 POD.ADDED 事件时，检查缓存：
 #   - 如果同名 Pod 在缓存中（时间窗口内） → 这是 Pod 漂移场景，快速更新 CMDB 记录（无需等待）
@@ -570,25 +572,10 @@ def sync_pod_to_cmdb_on_added(pod_data):
         }
         
         # ===== 步骤1.0：检查"最近删除的 Pod"缓存（快速漂移检测） =====
-        cache_key = (cluster_id, pod_namespace, pod_name)
+        cache_key = (pod_namespace, pod_name)
         recently_deleted_info = None
         
-        # 🔍 调试：检查缓存中是否有同名 Pod（不同 cluster_id）
         with _recently_deleted_pods_lock:
-            # 先检查是否有同名 Pod（忽略 cluster_id）
-            similar_keys = [k for k in _recently_deleted_pods.keys() 
-                           if k[1] == pod_namespace and k[2] == pod_name]
-            if similar_keys:
-                for k in similar_keys:
-                    cached_cluster_id, cached_ns, cached_name = k
-                    if cached_cluster_id != cluster_id:
-                        LOG.warning('⚠️  CLUSTER_ID MISMATCH DETECTED in drift cache!')
-                        LOG.warning('   Expected cluster_id: %s', cluster_id)
-                        LOG.warning('   Cached cluster_id: %s', cached_cluster_id)
-                        LOG.warning('   Pod: %s/%s', cached_ns, cached_name)
-                        LOG.warning('   This suggests multiple watchers with different cluster_id configs')
-                        LOG.warning('   or database has duplicate cluster records with different IDs')
-            
             if cache_key in _recently_deleted_pods:
                 cached_info = _recently_deleted_pods[cache_key]
                 cache_age = time.time() - cached_info['timestamp']
@@ -781,12 +768,13 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     LOG.info('[BACKUP-DRIFT-DELETE]    asset_id: %s', old_record.get('asset_id'))
                     
                     # 存入缓存，用于后续漂移检测
-                    cache_key = (cluster_id, pod_data.get('namespace', 'default'), pod_name)
+                    cache_key = (pod_data.get('namespace', 'default'), pod_name)
                     cache_value = {
                         'timestamp': time.time(),
                         'guid': old_record.get('guid'),
                         'old_asset_id': old_record.get('asset_id'),
-                        'host_ip': old_record.get('host_resource')
+                        'host_ip': old_record.get('host_resource'),
+                        'cluster_id': cluster_id
                     }
                     with _recently_deleted_pods_lock:
                         _recently_deleted_pods[cache_key] = cache_value
@@ -1564,20 +1552,21 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             # 这样 POD.ADDED 时才能快速检测到漂移，避免60秒等待
             LOG.info('[DRIFT-CACHE-FALLBACK] Caching deletion for drift detection (no CMDB record)')
             try:
-                cache_key = (cluster_id, pod_data.get('namespace', 'default'), pod_name)
+                cache_key = (pod_data.get('namespace', 'default'), pod_name)
                 cache_value = {
                     'timestamp': time.time(),
                     'guid': None,  # CMDB 中没有记录
                     'old_asset_id': pod_asset_id,  # 使用 K8s 的 asset_id
                     'host_ip': pod_data.get('host_ip'),
+                    'cluster_id': cluster_id,  # 保存 cluster_id 供日志使用
                     'cmdb_not_found': True  # 标记 CMDB 中没找到
                 }
                 
                 with _recently_deleted_pods_lock:
                     _recently_deleted_pods[cache_key] = cache_value
                     LOG.info('[DRIFT-CACHE-FALLBACK] ✅ Cached for drift detection:')
-                    LOG.info('[DRIFT-CACHE-FALLBACK]   cluster=%s, namespace=%s, pod=%s', 
-                            cluster_id, pod_data.get('namespace', 'default'), pod_name)
+                    LOG.info('[DRIFT-CACHE-FALLBACK]   namespace=%s, pod=%s', 
+                            pod_data.get('namespace', 'default'), pod_name)
                     LOG.info('[DRIFT-CACHE-FALLBACK]   old_asset_id=%s', pod_asset_id)
                     LOG.info('[DRIFT-CACHE-FALLBACK]   If Pod recreates within 60s, drift will be detected')
             except Exception as cache_err:
@@ -1650,19 +1639,20 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             LOG.info('='*60)
             
             # ===== 存入"最近删除的 Pod"缓存，用于后续快速检测 Pod 漂移场景 =====
-            cache_key = (cluster_id, pod_data.get('namespace', 'default'), pod_name)
+            cache_key = (pod_data.get('namespace', 'default'), pod_name)
             cache_value = {
                 'timestamp': time.time(),
                 'guid': pod_guid,
                 'old_asset_id': existing_asset_id,
-                'host_ip': existing_pod.get('host_resource') if existing_pod else None  # 保存旧的 host_resource
+                'host_ip': existing_pod.get('host_resource') if existing_pod else None,  # 保存旧的 host_resource
+                'cluster_id': cluster_id  # 保存 cluster_id 供日志使用（非 key 的一部分）
             }
             
             with _recently_deleted_pods_lock:
                 _recently_deleted_pods[cache_key] = cache_value
                 LOG.info('[DRIFT-CACHE] Added to recently deleted pods cache:')
-                LOG.info('[DRIFT-CACHE]   Key: cluster=%s, namespace=%s, pod_name=%s', 
-                        cluster_id, pod_data.get('namespace', 'default'), pod_name)
+                LOG.info('[DRIFT-CACHE]   Key: namespace=%s, pod_name=%s', 
+                        pod_data.get('namespace', 'default'), pod_name)
                 LOG.info('[DRIFT-CACHE]   Value: guid=%s, old_asset_id=%s', 
                         pod_guid, existing_asset_id)
                 LOG.info('[DRIFT-CACHE]   TTL: %d seconds (for drift detection)', 
@@ -1702,20 +1692,21 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
         try:
             # 使用 Pod 的基本信息建立缓存（不需要 CMDB GUID）
             namespace = pod_data.get('namespace', 'default')
-            cache_key = (cluster_id, namespace, pod_name)
+            cache_key = (namespace, pod_name)
             cache_value = {
                 'timestamp': time.time(),
                 'guid': None,  # CMDB 不可用，无法获取 GUID
                 'old_asset_id': pod_asset_id,  # 使用 K8s 的 asset_id
                 'host_ip': pod_data.get('host_ip'),  # 使用 K8s 的 host_ip
+                'cluster_id': cluster_id,  # 保存 cluster_id 供日志使用
                 'cmdb_unavailable': True  # 标记 CMDB 不可用
             }
             
             with _recently_deleted_pods_lock:
                 _recently_deleted_pods[cache_key] = cache_value
                 LOG.warning('[DRIFT-CACHE-FALLBACK] Added to cache despite CMDB failure:')
-                LOG.warning('[DRIFT-CACHE-FALLBACK]   Key: cluster=%s, namespace=%s, pod_name=%s', 
-                           cluster_id, namespace, pod_name)
+                LOG.warning('[DRIFT-CACHE-FALLBACK]   Key: namespace=%s, pod_name=%s', 
+                           namespace, pod_name)
                 LOG.warning('[DRIFT-CACHE-FALLBACK]   Value: old_asset_id=%s, host_ip=%s', 
                            pod_asset_id, pod_data.get('host_ip'))
                 LOG.warning('[DRIFT-CACHE-FALLBACK]   Note: guid=None (CMDB unavailable)')
