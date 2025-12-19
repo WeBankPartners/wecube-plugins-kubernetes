@@ -627,37 +627,67 @@ def sync_pod_to_cmdb_on_added(pod_data):
         # 如果检测到漂移场景（方案B：DELETE时删除，ADDED时创建新记录）
         # 记录已在DELETE时删除，现在需要创建新记录（不是更新！）
         if recently_deleted_info:
-            LOG.info('='*60)
-            LOG.info('🎯 FAST DRIFT DETECTED (from cache)!')
-            LOG.info('='*60)
-            LOG.info('   Pod was deleted and recreated by K8s (drift/eviction scenario)')
-            LOG.info('   Old asset_id: %s', recently_deleted_info.get('old_asset_id'))
-            LOG.info('   New asset_id: %s', pod_id)
-            LOG.info('   Strategy (Scheme B): DELETE (done) + CREATE new record')
-            LOG.info('   Note: CMDB record was already deleted in POD.DELETED event')
-            LOG.info('   Will create new record immediately (NO wait needed!)')
-            LOG.info('='*60)
+            # 【关键修复】检查新 Pod 是否有 API 创建标记
+            # 如果有，说明这不是漂移，而是用户通过 API 重新部署（先删除旧 StatefulSet，再创建新的）
+            created_by_api = pod_data.get('annotations', {}).get('wecube.io/created-by') == 'api'
             
-            # 跳过后续的查询和等待逻辑，直接进入创建新记录的流程
-            # 设置标记，让后续代码知道这是漂移场景（用于日志和通知）
-            is_fast_drift_detected = True
-            
-            # 不需要查询CMDB，因为我们知道记录已被删除
-            # 直接跳到创建新记录的逻辑（第832行）
-            LOG.info('[FAST-DRIFT] Skipping CMDB query (record is already deleted)')
-            LOG.info('[FAST-DRIFT] Will jump to record creation step...')
-            
-            # 设置 cmdb_response 为空，触发创建逻辑
-            cmdb_response = None
-            
-            # 检查是否有 GUID（用于日志记录，不影响逻辑）
-            old_guid = recently_deleted_info.get('guid')
-            if old_guid:
-                LOG.info('[FAST-DRIFT] Old GUID: %s (will NOT be reused - Scheme B)', old_guid)
+            if created_by_api:
+                # 这是 API 重新创建，不是漂移
+                LOG.info('='*60)
+                LOG.info('✅ API RE-DEPLOYMENT DETECTED (NOT drift)')
+                LOG.info('='*60)
+                LOG.info('   Same pod name as recently deleted pod, but has API annotation')
+                LOG.info('   Old asset_id: %s', recently_deleted_info.get('old_asset_id'))
+                LOG.info('   New asset_id: %s', pod_id)
+                LOG.info('   This is a StatefulSet re-deployment via API (delete old + create new)')
+                LOG.info('   Will treat as normal API creation (NO drift notification)')
+                LOG.info('='*60)
+                
+                # 清理缓存（避免影响后续判断）
+                # 但不设置 is_fast_drift_detected，让代码进入正常的 API 创建流程
+                is_fast_drift_detected = False
+                
+                # 继续正常流程：查询 CMDB 中是否有预创建的记录
+                LOG.info('[API-REDEPLOY] Querying CMDB for pre-created record by code (pod name): %s', pod_name)
+                LOG.info('[API-REDEPLOY] Query data: %s', query_data)
+                
+                cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
+                found_count = len(cmdb_response.get('data', [])) if cmdb_response else 0
+                
+                LOG.info('[API-REDEPLOY] Query result: found %d record(s)', found_count)
             else:
-                LOG.warning('[FAST-DRIFT] ⚠️  Old GUID: None (CMDB was unavailable during deletion)')
-            
-            # 跳过步骤1.1和1.2，直接到步骤1.3的创建逻辑
+                # 这是真正的 Pod 漂移（K8s 自动重建，没有 API 标记）
+                LOG.info('='*60)
+                LOG.info('🎯 FAST DRIFT DETECTED (from cache)!')
+                LOG.info('='*60)
+                LOG.info('   Pod was deleted and recreated by K8s (drift/eviction scenario)')
+                LOG.info('   Old asset_id: %s', recently_deleted_info.get('old_asset_id'))
+                LOG.info('   New asset_id: %s', pod_id)
+                LOG.info('   Strategy (Scheme B): DELETE (done) + CREATE new record')
+                LOG.info('   Note: CMDB record was already deleted in POD.DELETED event')
+                LOG.info('   Will create new record immediately (NO wait needed!)')
+                LOG.info('='*60)
+                
+                # 跳过后续的查询和等待逻辑，直接进入创建新记录的流程
+                # 设置标记，让后续代码知道这是漂移场景（用于日志和通知）
+                is_fast_drift_detected = True
+                
+                # 不需要查询CMDB，因为我们知道记录已被删除
+                # 直接跳到创建新记录的逻辑（第832行）
+                LOG.info('[FAST-DRIFT] Skipping CMDB query (record is already deleted)')
+                LOG.info('[FAST-DRIFT] Will jump to record creation step...')
+                
+                # 设置 cmdb_response 为空，触发创建逻辑
+                cmdb_response = None
+                
+                # 检查是否有 GUID（用于日志记录，不影响逻辑）
+                old_guid = recently_deleted_info.get('guid')
+                if old_guid:
+                    LOG.info('[FAST-DRIFT] Old GUID: %s (will NOT be reused - Scheme B)', old_guid)
+                else:
+                    LOG.warning('[FAST-DRIFT] ⚠️  Old GUID: None (CMDB was unavailable during deletion)')
+                
+                # 跳过步骤1.1和1.2，直接到步骤1.3的创建逻辑
         
         else:
             # 没有检测到缓存中的漂移，继续正常流程
