@@ -707,7 +707,9 @@ class StatefulSet:
         # StatefulSet 的 metadata.name 必须符合 DNS-1123 label 规范（不允许点号）
         # 因为 Pod 的 hostname 会使用 <statefulset-name>-<ordinal> 格式
         # 所以这里使用 escape_service_name 而不是 escape_name
-        resource_name = api_utils.escape_service_name(data['name'])
+        # 【关键】限制为 50 字符，预留空间给 Kubernetes 自动添加的后缀（controller-revision-hash 等）
+        # 否则会导致 "metadata.labels: Invalid value: must be no more than 63 characters" 错误
+        resource_name = api_utils.escape_service_name(data['name'], max_length=50)
         resource_namespace = data['namespace']
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.STATEFULSET_ID_TAG] = resource_id
@@ -939,8 +941,8 @@ class StatefulSet:
         
         # 获取 Pod 标签作为 Service selector
         # 注意：标签值必须与创建 StatefulSet 时使用的值保持一致
-        # StatefulSet 的 resource_name 是通过 escape_service_name(data['name']) 生成的
-        resource_name = api_utils.escape_service_name(data['name'])
+        # StatefulSet 的 resource_name 是通过 escape_service_name(data['name'], max_length=50) 生成的
+        resource_name = api_utils.escape_service_name(data['name'], max_length=50)
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
         # 使用 resource_name 作为标签值，与创建 StatefulSet 时保持一致
         pod_spec_tags[const.Tag.POD_AUTO_TAG] = resource_name
@@ -1261,7 +1263,8 @@ class StatefulSet:
         k8s_client = k8s.Client(k8s_auth)
         k8s_client.ensure_namespace(data['namespace'])
         # StatefulSet 的名称使用 escape_service_name（不允许点号），与 to_resource 方法保持一致
-        resource_name = api_utils.escape_service_name(data['name'])
+        # 【关键】限制为 50 字符，避免 Kubernetes 添加后缀后超过 63 字符限制
+        resource_name = api_utils.escape_service_name(data['name'], max_length=50)
         
         # 生成 StatefulSet 资源模板
         resource_template = self.to_resource(k8s_client, data, cluster_info)
@@ -1577,7 +1580,8 @@ class StatefulSet:
         k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
         # StatefulSet 的名称使用 escape_service_name（与创建时保持一致）
-        resource_name = api_utils.escape_service_name(data['name'])
+        # 【关键】限制为 50 字符，避免 Kubernetes 添加后缀后超过 63 字符限制
+        resource_name = api_utils.escape_service_name(data['name'], max_length=50)
         correlation_id = data['correlation_id']
         
         # 查询 Pod 列表，使用 resource_name 作为标签值（与创建时保持一致）
@@ -1651,7 +1655,8 @@ class StatefulSet:
         namespace = data.get('namespace', 'default')
         
         # 使用与 apply 时一致的名称转换方式（escape_service_name）
-        resource_name = api_utils.escape_service_name(data['name'])
+        # 【关键】限制为 50 字符，避免 Kubernetes 添加后缀后超过 63 字符限制
+        resource_name = api_utils.escape_service_name(data['name'], max_length=50)
         
         # 获取 correlation_id
         correlation_id = data.get('correlation_id', '')

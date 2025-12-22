@@ -23,12 +23,17 @@ def escape_name(name):
     return re.sub(rule, '-', name.lower())
 
 
-def escape_service_name(name):
+def escape_service_name(name, max_length=63):
     '''
     DNS-1035 label (for Service names) must consist of lower case alphanumeric characters or '-',
     start with an alphabetic character, and end with an alphanumeric character.
     More strict than DNS-1123: no dots allowed, must start with a letter.
     (e.g. 'my-service', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')
+    
+    Args:
+        name: 原始名称
+        max_length: 最大长度限制（默认 63）。对于 StatefulSet，建议使用更小的值（如 50）
+                   以预留空间给 Kubernetes 自动添加的后缀（如 controller-revision-hash）
     '''
     # 1. 转换为小写并替换所有非字母数字字符为 '-'
     result = re.sub(r'[^a-z0-9]', '-', name.lower())
@@ -43,9 +48,9 @@ def escape_service_name(name):
     # 4. 合并连续的 '-' 为单个 '-'
     result = re.sub(r'-+', '-', result)
     
-    # 5. 确保长度限制（DNS 标签最大 63 字符）
-    if len(result) > 63:
-        result = result[:63].rstrip('-')
+    # 5. 确保长度限制
+    if len(result) > max_length:
+        result = result[:max_length].rstrip('-')
     
     return result
 
