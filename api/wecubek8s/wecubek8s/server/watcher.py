@@ -147,6 +147,124 @@ def get_cmdb_client():
         return _cmdb_client
 
 
+def get_cmdb_client_with_fallback(pod_data, operation_name='CMDB operation'):
+    """获取CMDB客户端（支持token失效时自动fallback到系统token）
+    
+    工作流程：
+    1. 优先尝试使用creator_token（从Pod annotations读取）
+    2. 验证token是否有效（发送测试查询）
+    3. 如果token失效（401错误），自动fallback到系统token
+    4. 系统token由watcher维护，会自动刷新，永不过期
+    
+    Args:
+        pod_data: Pod数据字典（包含creator_token）
+        operation_name: 操作名称（用于日志记录）
+    
+    Returns:
+        tuple: (cmdb_client, token_source)
+            - cmdb_client: CMDB客户端实例，失败时返回None
+            - token_source: token来源标记 ('creator' 或 'system')
+    """
+    cmdb_server = CONF.wecube.base_url
+    if not cmdb_server:
+        LOG.warning('[%s] CMDB base_url not configured', operation_name)
+        return None, None
+    
+    from wecubek8s.common import wecmdb
+    
+    # ===== 步骤1：优先尝试使用creator_token（保持数据隔离）=====
+    creator_token = pod_data.get('creator_token')
+    if creator_token:
+        LOG.info('[%s] Found creator token in Pod annotations (prefix: %s...)', 
+                operation_name, creator_token[:20])
+        LOG.info('[%s] Attempting to use creator token for CMDB access...', operation_name)
+        
+        try:
+            # 创建使用creator_token的CMDB客户端
+            cmdb_client = wecmdb.EntityClient(cmdb_server, creator_token)
+            
+            # ===== 步骤2：验证token是否有效（发送轻量级测试查询）=====
+            # 使用一个不存在的GUID查询，只是为了测试认证是否通过
+            # 这个查询会很快返回（不涉及实际数据），但能触发认证检查
+            LOG.debug('[%s] Validating creator token...', operation_name)
+            test_query = {
+                "criteria": {
+                    "attrName": "guid",
+                    "op": "eq",
+                    "condition": "test-token-validation-non-existent"
+                }
+            }
+            
+            try:
+                cmdb_client.query('wecmdb', 'pod', test_query)
+                # 查询成功（即使没有数据），说明token有效
+                LOG.info('[%s] ✅ Creator token is VALID', operation_name)
+                LOG.info('[%s] Using creator token for CMDB access (maintains data isolation)', 
+                        operation_name)
+                return cmdb_client, 'creator'
+                
+            except Exception as validation_err:
+                # 检查是否是认证错误（401 Unauthorized）
+                error_msg = str(validation_err).lower()
+                
+                if '401' in error_msg or 'unauthorized' in error_msg or 'unauthenticated' in error_msg:
+                    # Token已失效
+                    LOG.warning('[%s] ⚠️  Creator token is EXPIRED or INVALID (401)', operation_name)
+                    LOG.warning('[%s] Error details: %s', operation_name, str(validation_err))
+                    LOG.warning('[%s] This is expected for long-lived Pods (token TTL: 1-2 hours)', 
+                               operation_name)
+                    LOG.warning('[%s] Will fallback to system token...', operation_name)
+                    # 继续到fallback逻辑
+                    
+                elif 'forbidden' in error_msg or '403' in error_msg:
+                    # 权限不足（但token有效）
+                    LOG.warning('[%s] ⚠️  Creator token is valid but has insufficient permissions (403)', 
+                               operation_name)
+                    LOG.warning('[%s] Error details: %s', operation_name, str(validation_err))
+                    LOG.warning('[%s] Will fallback to system token...', operation_name)
+                    # 继续到fallback逻辑
+                    
+                else:
+                    # 其他错误（网络问题、CMDB不可用等）
+                    LOG.warning('[%s] Token validation failed with non-auth error: %s', 
+                               operation_name, str(validation_err))
+                    LOG.warning('[%s] Will try to use this token anyway (may be network issue)', 
+                               operation_name)
+                    # 返回这个客户端，让调用者处理实际操作中的错误
+                    return cmdb_client, 'creator'
+                    
+        except Exception as client_err:
+            LOG.error('[%s] Failed to create CMDB client with creator token: %s', 
+                     operation_name, str(client_err))
+            LOG.error('[%s] Will fallback to system token...', operation_name)
+            # 继续到fallback逻辑
+    else:
+        LOG.info('[%s] No creator token found in Pod annotations', operation_name)
+        LOG.info('[%s] Will use system token directly', operation_name)
+    
+    # ===== 步骤3：Fallback到系统token（永不过期，自动刷新）=====
+    LOG.info('[%s] Using SYSTEM token (WeCube subsystem token)', operation_name)
+    LOG.info('[%s] System token has full permissions and auto-refreshes every hour', 
+            operation_name)
+    
+    try:
+        wecube_client = get_wecube_client()
+        if not wecube_client or not wecube_client.token:
+            LOG.error('[%s] ❌ Failed to get WeCube system token', operation_name)
+            return None, None
+        
+        LOG.info('[%s] Creating CMDB client with system token (prefix: %s...)', 
+                operation_name, wecube_client.token[:20])
+        cmdb_client = wecmdb.EntityClient(cmdb_server, wecube_client.token)
+        return cmdb_client, 'system'
+        
+    except Exception as e:
+        LOG.error('[%s] ❌ Failed to create CMDB client with system token: %s', 
+                 operation_name, str(e))
+        LOG.exception(e)
+        return None, None
+
+
 def mark_expected_pods(cluster_id, namespace, pod_names, source='statefulset_apply'):
     """
     标记预期创建的 Pod（由 API 主动创建，不需要 watcher 通知）
@@ -415,24 +533,15 @@ def sync_pod_to_cmdb_on_added(pod_data):
     # 总等待时间：最多 15 * 4 = 60 秒（足够 apply API 完成预创建）
     # 如果 60 秒后还没找到记录，说明不是 apply API 创建的，直接进入创建逻辑
     
-    # 【关键修复】从 pod_data 中读取创建者的 token
-    # 这个 token 是 API 在创建 Pod 时保存到 annotations 中的
-    # 使用相同的 token 可以避免 CMDB 数据隔离问题
-    creator_token = pod_data.get('creator_token')
+    # 【修复】使用带自动fallback的客户端获取（支持token过期自动切换）
+    # 优先使用creator_token（保持数据隔离），如果失效则自动切换到系统token
+    cmdb_client, token_source = get_cmdb_client_with_fallback(pod_data, 'POD.ADDED')
     
-    if creator_token:
-        LOG.info('Using creator token from Pod annotations for CMDB access (prefix: %s...)', 
-                creator_token[:20])
-        cmdb_server = CONF.wecube.base_url
-        if not cmdb_server:
-            LOG.warning('CMDB base_url not configured, skipping pod add sync')
-            return (None, False)
-        from wecubek8s.common import wecmdb
-        cmdb_client = wecmdb.EntityClient(cmdb_server, creator_token)
-    else:
-        LOG.warning('No creator token found in Pod annotations, falling back to system token')
-        LOG.warning('This may cause CMDB data isolation issues')
-        cmdb_client = get_cmdb_client()
+    if not cmdb_client:
+        LOG.warning('CMDB client not available, skipping pod add sync')
+        return (None, False)
+    
+    LOG.info('Using %s token for CMDB access', token_source.upper())
     
     # 🧪 测试：首次调用时查询所有 pod 数据
     if cmdb_client and not hasattr(sync_pod_to_cmdb_on_added, '_test_executed'):
@@ -1303,25 +1412,15 @@ def sync_pod_to_cmdb_on_added(pod_data):
 
 def sync_pod_to_cmdb_on_deleted(pod_data):
     """Pod 删除时同步到 CMDB（硬删除）"""
-    # 【关键修复】从 pod_data 中读取创建者的 token
-    creator_token = pod_data.get('creator_token')
-    
-    if creator_token:
-        LOG.info('Using creator token from Pod annotations for CMDB access (prefix: %s...)', 
-                creator_token[:20])
-        cmdb_server = CONF.wecube.base_url
-        if not cmdb_server:
-            LOG.warning('CMDB base_url not configured, skipping pod delete sync')
-            return
-        from wecubek8s.common import wecmdb
-        cmdb_client = wecmdb.EntityClient(cmdb_server, creator_token)
-    else:
-        LOG.warning('No creator token found in Pod annotations, falling back to system token')
-        cmdb_client = get_cmdb_client()
+    # 【修复】使用带自动fallback的客户端获取（支持token过期自动切换）
+    # 优先使用creator_token（保持数据隔离），如果失效则自动切换到系统token
+    cmdb_client, token_source = get_cmdb_client_with_fallback(pod_data, 'POD.DELETED')
     
     if not cmdb_client:
         LOG.warning('CMDB client not available, skipping pod delete sync')
         return
+    
+    LOG.info('Using %s token for CMDB access', token_source.upper())
     
     try:
         pod_name = pod_data.get('name')
