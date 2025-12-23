@@ -1187,6 +1187,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 LOG.info('   Old UID: %s → New UID: %s', existing_asset_id, pod_id)
                 LOG.info('   Will update: asset_id + host_resource (if changed)')
                 LOG.info('   Reason: pod restart, node eviction, or manual deletion')
+                LOG.info('   ⚠️  This is a POD DRIFT/REBUILD - notification WILL be sent')
             else:
                 LOG.info('Scenario: POD EXISTS with same asset_id, checking for drift')
             
@@ -1274,8 +1275,17 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 LOG.info('   asset_id: %s', pod_id)
                 LOG.info('   host_resource: %s', update_data.get('host_resource', 'NOT_CHANGED'))
                 LOG.info('='*60)
-                # 正常更新场景，不是 Pod 漂移，无需发送通知
-                return (pod_guid, False)
+                
+                # 【修复】判断是否需要发送通知
+                # 如果是 Pod 重建场景（asset_id 变化），需要发送通知
+                if is_pod_rebuilt:
+                    LOG.info('🔔 Pod rebuild detected (asset_id changed) - this is a drift scenario')
+                    LOG.info('   Will send WeCube notification')
+                    # 返回 (guid, is_pod_drift=True) 标记需要发送通知
+                    return (pod_guid, True)
+                else:
+                    # 正常预创建更新场景，不需要发送通知
+                    return (pod_guid, False)
             except Exception as update_err:
                 # 更新失败，可能是因为记录在查询后被 POD.DELETED 删除了（时序竞态）
                 error_msg = str(update_err)
@@ -1678,14 +1688,16 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
         
         # 验证 Pod UID 是否匹配（如果提供了 pod_id）
         # asset_id 格式: {cluster_id}_{pod_uid}，我们只比较 pod_uid 部分
+        uid_mismatch_detected = False  # 标记是否检测到 UID 不匹配
         if pod_id and existing_asset_id:
             # 提取 Pod UID（asset_id 中下划线后的部分）
             current_pod_uid = pod_id.split('_', 1)[-1] if '_' in pod_id else pod_id
             existing_pod_uid = existing_asset_id.split('_', 1)[-1] if '_' in existing_asset_id else existing_asset_id
             
             if current_pod_uid != existing_pod_uid:
+                uid_mismatch_detected = True
                 LOG.warning('='*60)
-                LOG.warning('⚠️  POD UID MISMATCH DETECTED')
+                LOG.warning('⚠️  POD UID MISMATCH DETECTED - POD DRIFT SCENARIO')
                 LOG.warning('='*60)
                 LOG.warning('Pod name: %s', pod_name)
                 LOG.warning('CMDB Pod UID: %s', existing_pod_uid)
@@ -1693,15 +1705,18 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
                 LOG.warning('CMDB asset_id: %s', existing_asset_id)
                 LOG.warning('K8s asset_id:  %s', pod_id)
                 LOG.warning('')
-                LOG.warning('This suggests one of the following:')
-                LOG.warning('  1. Pod was recreated with same name but different UID')
-                LOG.warning('  2. CMDB record is stale (old Pod instance)')
-                LOG.warning('  3. Name collision between different pods')
+                LOG.warning('Analysis: This is a Pod drift/eviction scenario:')
+                LOG.warning('  1. Old Pod (UID: %s) was evicted/deleted from K8s', existing_pod_uid)
+                LOG.warning('  2. K8s recreated Pod with new UID: %s', current_pod_uid)
+                LOG.warning('  3. But CMDB still has the old Pod record (stale)')
+                LOG.warning('  4. POD.DELETED event arrived AFTER POD.ADDED (event reordering)')
                 LOG.warning('')
-                LOG.warning('Action: Skipping deletion to avoid removing wrong record')
-                LOG.warning('Recommendation: Manually verify and cleanup in CMDB UI')
+                LOG.warning('Action: WILL DELETE old Pod record (stale record cleanup)')
+                LOG.warning('Reason: The record in CMDB belongs to old Pod instance')
+                LOG.warning('Note: The new Pod will update CMDB in its POD.ADDED event')
+                LOG.warning('      This deletion will trigger drift detection cache')
                 LOG.warning('='*60)
-                return
+                # 【修复】不再 return，继续执行删除操作
             elif existing_asset_id != pod_id:
                 # Pod UID 匹配，但 cluster_id 不同（可能是多个 watcher 配置问题）
                 LOG.info('='*60)
@@ -1738,6 +1753,10 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             LOG.info('  - Pod name: %s', pod_name)
             LOG.info('  - GUID: %s', pod_guid)
             LOG.info('  - Asset ID: %s', existing_asset_id if existing_asset_id else 'N/A')
+            if uid_mismatch_detected:
+                LOG.info('  - Scenario: UID mismatch (stale record cleanup)')
+                LOG.info('  - Old UID in CMDB: %s', existing_pod_uid if 'existing_pod_uid' in locals() else 'N/A')
+                LOG.info('  - New UID in K8s:  %s', current_pod_uid if 'current_pod_uid' in locals() else 'N/A')
             LOG.info('='*60)
             
             # ===== 存入"最近删除的 Pod"缓存，用于后续快速检测 Pod 漂移场景 =====
@@ -1745,9 +1764,10 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             cache_value = {
                 'timestamp': time.time(),
                 'guid': pod_guid,
-                'old_asset_id': existing_asset_id,
+                'old_asset_id': existing_asset_id,  # 使用 CMDB 中的 asset_id（可能是旧的）
                 'host_ip': existing_pod.get('host_resource') if existing_pod else None,  # 保存旧的 host_resource
-                'cluster_id': cluster_id  # 保存 cluster_id 供日志使用（非 key 的一部分）
+                'cluster_id': cluster_id,  # 保存 cluster_id 供日志使用（非 key 的一部分）
+                'uid_mismatch': uid_mismatch_detected  # 标记是否 UID 不匹配
             }
             
             with _recently_deleted_pods_lock:
@@ -1757,6 +1777,9 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
                         pod_data.get('namespace', 'default'), pod_name)
                 LOG.info('[DRIFT-CACHE]   Value: guid=%s, old_asset_id=%s', 
                         pod_guid, existing_asset_id)
+                if uid_mismatch_detected:
+                    LOG.info('[DRIFT-CACHE]   Note: UID mismatch detected - stale record cleanup')
+                    LOG.info('[DRIFT-CACHE]   This means POD.ADDED already arrived with new UID')
                 LOG.info('[DRIFT-CACHE]   TTL: %d seconds (for drift detection)', 
                         _recently_deleted_pods_window)
         except Exception as del_err:
