@@ -172,77 +172,80 @@ def get_cmdb_client_with_fallback(pod_data, operation_name='CMDB operation'):
     
     from wecubek8s.common import wecmdb
     
-    # ===== 步骤1：优先尝试使用creator_token（保持数据隔离）=====
-    creator_token = pod_data.get('creator_token')
-    if creator_token:
-        LOG.info('[%s] Found creator token in Pod annotations (prefix: %s...)', 
-                operation_name, creator_token[:20])
-        LOG.info('[%s] Attempting to use creator token for CMDB access...', operation_name)
-        
-        try:
-            # 创建使用creator_token的CMDB客户端
-            cmdb_client = wecmdb.EntityClient(cmdb_server, creator_token)
-            
-            # ===== 步骤2：验证token是否有效（发送轻量级测试查询）=====
-            # 使用一个不存在的GUID查询，只是为了测试认证是否通过
-            # 这个查询会很快返回（不涉及实际数据），但能触发认证检查
-            LOG.debug('[%s] Validating creator token...', operation_name)
-            test_query = {
-                "criteria": {
-                    "attrName": "guid",
-                    "op": "eq",
-                    "condition": "test-token-validation-non-existent"
-                }
-            }
-            
-            try:
-                cmdb_client.query('wecmdb', 'pod', test_query)
-                # 查询成功（即使没有数据），说明token有效
-                LOG.info('[%s] ✅ Creator token is VALID', operation_name)
-                LOG.info('[%s] Using creator token for CMDB access (maintains data isolation)', 
-                        operation_name)
-                return cmdb_client, 'creator'
-                
-            except Exception as validation_err:
-                # 检查是否是认证错误（401 Unauthorized）
-                error_msg = str(validation_err).lower()
-                
-                if '401' in error_msg or 'unauthorized' in error_msg or 'unauthenticated' in error_msg:
-                    # Token已失效
-                    LOG.warning('[%s] ⚠️  Creator token is EXPIRED or INVALID (401)', operation_name)
-                    LOG.warning('[%s] Error details: %s', operation_name, str(validation_err))
-                    LOG.warning('[%s] This is expected for long-lived Pods (token TTL: 1-2 hours)', 
-                               operation_name)
-                    LOG.warning('[%s] Will fallback to system token...', operation_name)
-                    # 继续到fallback逻辑
-                    
-                elif 'forbidden' in error_msg or '403' in error_msg:
-                    # 权限不足（但token有效）
-                    LOG.warning('[%s] ⚠️  Creator token is valid but has insufficient permissions (403)', 
-                               operation_name)
-                    LOG.warning('[%s] Error details: %s', operation_name, str(validation_err))
-                    LOG.warning('[%s] Will fallback to system token...', operation_name)
-                    # 继续到fallback逻辑
-                    
-                else:
-                    # 其他错误（网络问题、CMDB不可用等）
-                    LOG.warning('[%s] Token validation failed with non-auth error: %s', 
-                               operation_name, str(validation_err))
-                    LOG.warning('[%s] Will try to use this token anyway (may be network issue)', 
-                               operation_name)
-                    # 返回这个客户端，让调用者处理实际操作中的错误
-                    return cmdb_client, 'creator'
-                    
-        except Exception as client_err:
-            LOG.error('[%s] Failed to create CMDB client with creator token: %s', 
-                     operation_name, str(client_err))
-            LOG.error('[%s] Will fallback to system token...', operation_name)
-            # 继续到fallback逻辑
-    else:
-        LOG.info('[%s] No creator token found in Pod annotations', operation_name)
-        LOG.info('[%s] Will use system token directly', operation_name)
+    # ===== 【测试模式】直接使用 system token，跳过 creator_token 逻辑 =====
+    LOG.info('[%s] 🧪 TEST MODE: Skipping creator_token, using system token directly', operation_name)
     
-    # ===== 步骤3：Fallback到系统token（永不过期，自动刷新）=====
+    # ===== 步骤1：优先尝试使用creator_token（保持数据隔离）===== 【暂时注释】
+    # creator_token = pod_data.get('creator_token')
+    # if creator_token:
+    #     LOG.info('[%s] Found creator token in Pod annotations (prefix: %s...)', 
+    #             operation_name, creator_token[:20])
+    #     LOG.info('[%s] Attempting to use creator token for CMDB access...', operation_name)
+    #     
+    #     try:
+    #         # 创建使用creator_token的CMDB客户端
+    #         cmdb_client = wecmdb.EntityClient(cmdb_server, creator_token)
+    #         
+    #         # ===== 步骤2：验证token是否有效（发送轻量级测试查询）=====
+    #         # 使用一个不存在的GUID查询，只是为了测试认证是否通过
+    #         # 这个查询会很快返回（不涉及实际数据），但能触发认证检查
+    #         LOG.debug('[%s] Validating creator token...', operation_name)
+    #         test_query = {
+    #             "criteria": {
+    #                 "attrName": "guid",
+    #                 "op": "eq",
+    #                 "condition": "test-token-validation-non-existent"
+    #             }
+    #         }
+    #         
+    #         try:
+    #             cmdb_client.query('wecmdb', 'pod', test_query)
+    #             # 查询成功（即使没有数据），说明token有效
+    #             LOG.info('[%s] ✅ Creator token is VALID', operation_name)
+    #             LOG.info('[%s] Using creator token for CMDB access (maintains data isolation)', 
+    #                     operation_name)
+    #             return cmdb_client, 'creator'
+    #             
+    #         except Exception as validation_err:
+    #             # 检查是否是认证错误（401 Unauthorized）
+    #             error_msg = str(validation_err).lower()
+    #             
+    #             if '401' in error_msg or 'unauthorized' in error_msg or 'unauthenticated' in error_msg:
+    #                 # Token已失效
+    #                 LOG.warning('[%s] ⚠️  Creator token is EXPIRED or INVALID (401)', operation_name)
+    #                 LOG.warning('[%s] Error details: %s', operation_name, str(validation_err))
+    #                 LOG.warning('[%s] This is expected for long-lived Pods (token TTL: 1-2 hours)', 
+    #                            operation_name)
+    #                 LOG.warning('[%s] Will fallback to system token...', operation_name)
+    #                 # 继续到fallback逻辑
+    #                 
+    #             elif 'forbidden' in error_msg or '403' in error_msg:
+    #                 # 权限不足（但token有效）
+    #                 LOG.warning('[%s] ⚠️  Creator token is valid but has insufficient permissions (403)', 
+    #                            operation_name)
+    #                 LOG.warning('[%s] Error details: %s', operation_name, str(validation_err))
+    #                 LOG.warning('[%s] Will fallback to system token...', operation_name)
+    #                 # 继续到fallback逻辑
+    #                 
+    #             else:
+    #                 # 其他错误（网络问题、CMDB不可用等）
+    #                 LOG.warning('[%s] Token validation failed with non-auth error: %s', 
+    #                            operation_name, str(validation_err))
+    #                 LOG.warning('[%s] Will try to use this token anyway (may be network issue)', 
+    #                            operation_name)
+    #                 # 返回这个客户端，让调用者处理实际操作中的错误
+    #                 return cmdb_client, 'creator'
+    #                 
+    #     except Exception as client_err:
+    #         LOG.error('[%s] Failed to create CMDB client with creator token: %s', 
+    #                  operation_name, str(client_err))
+    #         LOG.error('[%s] Will fallback to system token...', operation_name)
+    #         # 继续到fallback逻辑
+    # else:
+    #     LOG.info('[%s] No creator token found in Pod annotations', operation_name)
+    #     LOG.info('[%s] Will use system token directly', operation_name)
+    
+    # ===== 步骤3：直接使用系统token（永不过期，自动刷新）=====
     LOG.info('[%s] Using SYSTEM token (WeCube subsystem token)', operation_name)
     LOG.info('[%s] System token has full permissions and auto-refreshes every hour', 
             operation_name)
