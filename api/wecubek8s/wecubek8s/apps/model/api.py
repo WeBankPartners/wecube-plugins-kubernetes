@@ -333,9 +333,12 @@ class Pod(BaseEntity):
             resource_version = pod_list.metadata.resource_version
             LOG.info('Starting watch from resource_version: %s (skipping existing pods)', resource_version)
             
+            # 设置超时为 1 小时，避免 Kubernetes Python client 默认超时（2-5分钟）导致连接断开
+            # 每小时自动重连一次，保持连接健康，符合 Kubernetes 官方最佳实践
             for event in w.stream(
                 k8s_client.core_client.list_pod_for_all_namespaces,
-                resource_version=resource_version
+                resource_version=resource_version,
+                timeout_seconds=3600
             ):
                 event_type = event.get('type')
                 pod_obj = event.get('object')
