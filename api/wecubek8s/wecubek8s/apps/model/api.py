@@ -335,10 +335,15 @@ class Pod(BaseEntity):
             
             # 设置超时为 1 小时，避免 Kubernetes Python client 默认超时（2-5分钟）导致连接断开
             # 每小时自动重连一次，保持连接健康，符合 Kubernetes 官方最佳实践
+            # timeout_seconds: API Server 端超时时间
+            # _request_timeout: HTTP 客户端（urllib3）超时时间 (connect_timeout, read_timeout)
+            #   - connect_timeout=10: 连接超时 10 秒
+            #   - read_timeout=3660: 读取超时 61 分钟（略大于 timeout_seconds，确保 API Server 先超时）
             for event in w.stream(
                 k8s_client.core_client.list_pod_for_all_namespaces,
                 resource_version=resource_version,
-                timeout_seconds=3600
+                timeout_seconds=3600,
+                _request_timeout=(10, 3660)
             ):
                 event_type = event.get('type')
                 pod_obj = event.get('object')
