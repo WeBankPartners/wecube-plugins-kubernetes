@@ -23,6 +23,10 @@ COPY api/wecubek8s/etc /etc/wecubek8s
 # RUN chown -R app:app /var/log/wecubek8s/
 # USER app
 
+# 设置时区为北京时间
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
 # 设置环境变量限制 gevent threadpool 大小和使用 thread 解析器
 ENV GEVENT_THREADPOOL_SIZE=10
 ENV GEVENT_RESOLVER=thread

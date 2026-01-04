@@ -32,7 +32,11 @@ except Exception as e:
 
 import os
 import logging
+import time
 from logging.handlers import WatchedFileHandler
+
+# 强制 logging 使用本地时间（北京时间）
+logging.Formatter.converter = time.localtime
 
 from talos.core import config as __config
 
