@@ -144,6 +144,34 @@ class StatefulSet(controller.Plugin):
         return plugin_api.StatefulSet().remove(item)
 
 
+class DaemonSet(controller.Plugin):
+    allow_methods = ('POST', )
+    name = 'k8s.plugin.daemonset'
+
+    def set_item_default(self, item):
+        defaults = {'namespace': 'default'}
+        for key, value in defaults.items():
+            if not item.get(key):
+                item[key] = value
+
+    def validate_item_apply(self, item_index, item):
+        clean_item = crud.ColumnValidator.get_clean_data(rules.daemonset_rules, item, 'check')
+        self.set_item_default(clean_item)
+        return clean_item
+
+    def validate_item_destroy(self, item_index, item):
+        clean_item = crud.ColumnValidator.get_clean_data(rules.destroy_rules, item, 'check')
+        if not clean_item.get('namespace'):
+            clean_item['namespace'] = 'default'
+        return clean_item
+
+    def apply(self, reqid, operator, item_index, item, **kwargs):
+        return plugin_api.DaemonSet().apply(item)
+
+    def destroy(self, reqid, operator, item_index, item, **kwargs):
+        return plugin_api.DaemonSet().remove(item)
+
+
 class Service(controller.Plugin):
     allow_methods = ('POST', )
     name = 'k8s.plugin.service'

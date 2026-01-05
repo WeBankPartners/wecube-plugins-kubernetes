@@ -277,6 +277,49 @@
                 </outputParameters>
             </interface>
         </plugin>
+        <plugin name="daemonset">
+            <interface action="apply" path="/kubernetes/v1/daemonsets/apply" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
+                <inputParameters>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="cluster name">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="associated ci data id">correlation_id</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="daemonset name(unique)">name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="daemonset namespace(default)">namespace</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="image name without registry">image_name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="image ports(comma separated)">image_port</parameter>
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag" description="daemonset tags">tags</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="cpu limited">cpu</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="memory limited">memory</parameter>
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag" description="pod tags">pod_tags</parameter>
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="deploymentEnv" description="pod envs">envs</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="volumes(comma separated paths or json)">volumes</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">correlation_id</parameter>
+                    <parameter datatype="string">name</parameter>
+                    <parameter datatype="string">namespace</parameter>
+                    <parameter datatype="string">desired_number_scheduled</parameter>
+                    <parameter datatype="string">current_number_scheduled</parameter>
+                    <parameter datatype="string">number_ready</parameter>
+                    <parameter datatype="string">number_available</parameter>
+                </outputParameters>
+            </interface>
+            <interface action="destroy" path="/kubernetes/v1/daemonsets/destroy" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
+                <inputParameters>
+                    <parameter datatype="string" mappingType="constant" required="Y">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y">name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N">namespace</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">name</parameter>
+                    <parameter datatype="string">namespace</parameter>
+                    <parameter datatype="string">status</parameter>
+                </outputParameters>
+            </interface>
+        </plugin>
         <plugin name="node">
             <interface action="label" path="/kubernetes/v1/nodes/label" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
                 <inputParameters>

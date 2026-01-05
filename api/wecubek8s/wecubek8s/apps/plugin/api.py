@@ -2072,6 +2072,245 @@ class StatefulSet:
         return result
 
 
+class DaemonSet:
+    def to_resource(self, k8s_client, data, cluster_info):
+        """将输入数据转换为 K8s DaemonSet 资源定义"""
+        resource_id = data['correlation_id']
+        resource_name = api_utils.escape_name(data['name'])
+        resource_namespace = data['namespace']
+        resource_tags = api_utils.convert_tag(data.get('tags', []))
+        resource_tags[const.Tag.DAEMONSET_ID_TAG] = resource_id
+        
+        pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
+        pod_spec_tags[const.Tag.POD_AUTO_TAG] = resource_name
+        
+        # 添加 correlation_id 作为 Pod 标签
+        if data.get('correlation_id'):
+            pod_spec_tags['correlation_id'] = api_utils.escape_label_value(data['correlation_id'])
+        
+        pod_spec_envs = api_utils.convert_env(data.get('envs', []))
+        
+        # 自动注入 Kubernetes Downward API 环境变量
+        pod_spec_envs.extend([
+            {
+                'name': 'HOST_IP',
+                'valueFrom': {
+                    'fieldRef': {
+                        'fieldPath': 'status.hostIP'
+                    }
+                }
+            },
+            {
+                'name': 'POD_IP',
+                'valueFrom': {
+                    'fieldRef': {
+                        'fieldPath': 'status.podIP'
+                    }
+                }
+            },
+            {
+                'name': 'POD_NAME',
+                'valueFrom': {
+                    'fieldRef': {
+                        'fieldPath': 'metadata.name'
+                    }
+                }
+            },
+            {
+                'name': 'NODE_NAME',
+                'valueFrom': {
+                    'fieldRef': {
+                        'fieldPath': 'spec.nodeName'
+                    }
+                }
+            }
+        ])
+        
+        pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
+        pod_spec_limit = api_utils.convert_resource_limit(data.get('cpu', None), data.get('memory', None))
+        
+        # 从数据库的 cluster_info 中读取私有仓库地址
+        private_registry = cluster_info.get('private_registry', '')
+        
+        # 构建完整的镜像地址
+        image_name = data['image_name'].strip()
+        if private_registry:
+            full_image_name = f"{private_registry}/{image_name}"
+        else:
+            full_image_name = image_name
+        
+        # 构建 images 数组格式
+        images_data = [{
+            'name': full_image_name,
+            'ports': data.get('image_port', '')
+        }]
+        
+        containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit)
+        
+        # 处理镜像拉取凭据
+        image_pull_username = cluster_info.get('image_pull_username', '')
+        image_pull_password = cluster_info.get('image_pull_password', '')
+        
+        registry_secrets = []
+        if image_pull_username and image_pull_password:
+            registry_secrets = api_utils.convert_registry_secret(k8s_client, images_data, resource_namespace,
+                                                                 image_pull_username,
+                                                                 image_pull_password)
+        
+        # 构建 Pod 模板
+        pod_template = {
+            'metadata': {
+                'labels': pod_spec_tags
+            },
+            'spec': {
+                'containers': containers,
+                'volumes': pod_spec_src_vols,
+                'restartPolicy': 'Always'
+            }
+        }
+        
+        # 设置镜像拉取凭据
+        if registry_secrets:
+            pod_template['spec']['imagePullSecrets'] = registry_secrets
+        
+        # 处理节点选择器
+        if data.get('node_selector'):
+            pod_template['spec']['nodeSelector'] = data['node_selector']
+            LOG.info('Added nodeSelector: %s', data['node_selector'])
+        
+        # 处理容忍度（tolerations）
+        if data.get('tolerations'):
+            pod_template['spec']['tolerations'] = data['tolerations']
+            LOG.info('Added tolerations: %s', data['tolerations'])
+        
+        # 构建 DaemonSet 资源定义
+        daemonset_body = {
+            'apiVersion': 'apps/v1',
+            'kind': 'DaemonSet',
+            'metadata': {
+                'name': resource_name,
+                'namespace': resource_namespace,
+                'labels': resource_tags
+            },
+            'spec': {
+                'selector': {
+                    'matchLabels': {
+                        const.Tag.POD_AUTO_TAG: resource_name
+                    }
+                },
+                'template': pod_template,
+                'updateStrategy': {
+                    'type': 'RollingUpdate',
+                    'rollingUpdate': {
+                        'maxUnavailable': 1
+                    }
+                }
+            }
+        }
+        
+        return daemonset_body
+
+    def apply(self, data):
+        """创建或更新 DaemonSet"""
+        resource_id = data['correlation_id']
+        cluster_info = db_resource.Cluster().list({'name': data['cluster']})
+        if not cluster_info:
+            raise exceptions.ValidationError(
+                attribute='cluster',
+                msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']})
+            )
+        cluster_info = cluster_info[0]
+        
+        # 确保 namespace 有值
+        if not data.get('namespace') or data['namespace'].strip() == '':
+            data['namespace'] = 'default'
+            LOG.warning('namespace not provided for DaemonSet %s, using default', data.get('name'))
+        
+        # 确保 api_server 有正确的协议前缀
+        api_server = cluster_info['api_server']
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            api_server = 'https://' + api_server
+            LOG.warning('api_server missing protocol, adding https:// prefix: %s', api_server)
+        
+        k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
+        k8s_client = k8s.Client(k8s_auth)
+        k8s_client.ensure_namespace(data['namespace'])
+        
+        resource_name = api_utils.escape_name(data['name'])
+        exists_resource = k8s_client.get_daemonset(resource_name, data['namespace'])
+        
+        if exists_resource is None:
+            exists_resource = k8s_client.create_daemonset(
+                data['namespace'],
+                self.to_resource(k8s_client, data, cluster_info)
+            )
+            LOG.info('Created DaemonSet %s/%s', data['namespace'], resource_name)
+        else:
+            exists_resource = k8s_client.update_daemonset(
+                resource_name,
+                data['namespace'],
+                self.to_resource(k8s_client, data, cluster_info)
+            )
+            LOG.info('Updated DaemonSet %s/%s', data['namespace'], resource_name)
+        
+        # 返回结果
+        result = {
+            'correlation_id': resource_id,
+            'name': data['name'],
+            'namespace': data['namespace'],
+            'desired_number_scheduled': exists_resource.status.desired_number_scheduled or 0,
+            'current_number_scheduled': exists_resource.status.current_number_scheduled or 0,
+            'number_ready': exists_resource.status.number_ready or 0,
+            'number_available': exists_resource.status.number_available or 0
+        }
+        
+        LOG.info('DaemonSet apply result: %s', result)
+        return result
+
+    def remove(self, data):
+        """删除 DaemonSet"""
+        cluster_info = db_resource.Cluster().list({'name': data['cluster']})
+        if not cluster_info:
+            raise exceptions.ValidationError(
+                attribute='cluster',
+                msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']})
+            )
+        cluster_info = cluster_info[0]
+        
+        if not data.get('namespace'):
+            data['namespace'] = 'default'
+        
+        api_server = cluster_info['api_server']
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            api_server = 'https://' + api_server
+        
+        k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
+        k8s_client = k8s.Client(k8s_auth)
+        
+        resource_name = api_utils.escape_name(data['name'])
+        exists_resource = k8s_client.get_daemonset(resource_name, data['namespace'])
+        
+        if exists_resource:
+            k8s_client.delete_daemonset(resource_name, data['namespace'])
+            LOG.info('Deleted DaemonSet %s/%s', data['namespace'], resource_name)
+            
+            result = {
+                'name': data['name'],
+                'namespace': data['namespace'],
+                'status': 'deleted'
+            }
+        else:
+            LOG.warning('DaemonSet %s/%s not found, nothing to delete', data['namespace'], resource_name)
+            result = {
+                'name': data['name'],
+                'namespace': data['namespace'],
+                'status': 'not_found'
+            }
+        
+        LOG.info('DaemonSet destroy result: %s', result)
+        return result
+
+
 class Service:
     def to_resource(self, k8s_client, data):
         resource_id = data['correlation_id']

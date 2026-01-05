@@ -131,6 +131,25 @@ class Client:
     def list_all_statefulset(self, **kwargs):
         return self._action(self.app_client, 'list_stateful_set_for_all_namespaces', **kwargs)
 
+    # DaemonSet
+    def create_daemonset(self, namespace, body, **kwargs):
+        return self._action(self.app_client, 'create_namespaced_daemon_set', namespace, body, **kwargs)
+
+    def update_daemonset(self, name, namespace, body, **kwargs):
+        return self._action(self.app_client, 'patch_namespaced_daemon_set', name, namespace, body, **kwargs)
+
+    def delete_daemonset(self, name, namespace, **kwargs):
+        return self._action(self.app_client, 'delete_namespaced_daemon_set', name, namespace, **kwargs)
+
+    def get_daemonset(self, name, namespace, **kwargs):
+        return self._action_detail(self.app_client, 'read_namespaced_daemon_set', name, namespace, **kwargs)
+
+    def list_daemonset(self, namespace, **kwargs):
+        return self._action(self.app_client, 'list_namespaced_daemon_set', namespace, **kwargs)
+
+    def list_all_daemonset(self, **kwargs):
+        return self._action(self.app_client, 'list_daemon_set_for_all_namespaces', **kwargs)
+
     # ReplcaSet
     def list_all_replica_set(self, **kwargs):
         return self._action(self.app_client, 'list_replica_set_for_all_namespaces', **kwargs)
