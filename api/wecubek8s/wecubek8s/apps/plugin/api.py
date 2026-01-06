@@ -2075,11 +2075,17 @@ class StatefulSet:
 class DaemonSet:
     def to_resource(self, k8s_client, data, cluster_info):
         """将输入数据转换为 K8s DaemonSet 资源定义"""
+        LOG.info('[DaemonSet-API] to_resource started for %s', data.get('name'))
+        
         resource_id = data['correlation_id']
         resource_name = api_utils.escape_name(data['name'])
         resource_namespace = data['namespace']
+        LOG.info('[DaemonSet-API] Resource info: id=%s, name=%s, namespace=%s', 
+                 resource_id, resource_name, resource_namespace)
+        
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.DAEMONSET_ID_TAG] = resource_id
+        LOG.debug('[DaemonSet-API] Resource tags: %s', resource_tags)
         
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
         pod_spec_tags[const.Tag.POD_AUTO_TAG] = resource_name
@@ -2088,7 +2094,10 @@ class DaemonSet:
         if data.get('correlation_id'):
             pod_spec_tags['correlation_id'] = api_utils.escape_label_value(data['correlation_id'])
         
+        LOG.debug('[DaemonSet-API] Pod spec tags: %s', pod_spec_tags)
+        
         pod_spec_envs = api_utils.convert_env(data.get('envs', []))
+        LOG.info('[DaemonSet-API] Converted %d environment variables', len(pod_spec_envs))
         
         # 自动注入 Kubernetes Downward API 环境变量
         pod_spec_envs.extend([
@@ -2125,39 +2134,56 @@ class DaemonSet:
                 }
             }
         ])
+        LOG.debug('[DaemonSet-API] Added Downward API env vars, total env vars: %d', len(pod_spec_envs))
         
         pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
+        LOG.info('[DaemonSet-API] Converted volumes: %d source volumes, %d mount volumes', 
+                 len(pod_spec_src_vols), len(pod_spec_mnt_vols))
+        
         pod_spec_limit = api_utils.convert_resource_limit(data.get('cpu', None), data.get('memory', None))
+        LOG.info('[DaemonSet-API] Resource limits: %s', pod_spec_limit)
         
         # 从数据库的 cluster_info 中读取私有仓库地址
         private_registry = cluster_info.get('private_registry', '')
+        LOG.info('[DaemonSet-API] Private registry: %s', private_registry or '(none)')
         
         # 构建完整的镜像地址
         image_name = data['image_name'].strip()
         if private_registry:
             full_image_name = f"{private_registry}/{image_name}"
+            LOG.info('[DaemonSet-API] Using private registry, full image: %s', full_image_name)
         else:
             full_image_name = image_name
+            LOG.info('[DaemonSet-API] Using public image: %s', full_image_name)
         
         # 构建 images 数组格式
         images_data = [{
             'name': full_image_name,
             'ports': data.get('image_port', '')
         }]
+        LOG.debug('[DaemonSet-API] Images data: %s', images_data)
         
         containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit)
+        LOG.info('[DaemonSet-API] Converted %d containers', len(containers))
         
         # 处理镜像拉取凭据
         image_pull_username = cluster_info.get('image_pull_username', '')
         image_pull_password = cluster_info.get('image_pull_password', '')
+        LOG.info('[DaemonSet-API] Image pull credentials: username=%s, password=%s', 
+                 image_pull_username or '(none)', '***' if image_pull_password else '(none)')
         
         registry_secrets = []
         if image_pull_username and image_pull_password:
+            LOG.info('[DaemonSet-API] Converting registry secrets...')
             registry_secrets = api_utils.convert_registry_secret(k8s_client, images_data, resource_namespace,
                                                                  image_pull_username,
                                                                  image_pull_password)
+            LOG.info('[DaemonSet-API] Registry secrets created: %s', registry_secrets)
+        else:
+            LOG.info('[DaemonSet-API] No registry credentials provided, skipping secret creation')
         
         # 构建 Pod 模板
+        LOG.info('[DaemonSet-API] Building Pod template...')
         pod_template = {
             'metadata': {
                 'labels': pod_spec_tags
@@ -2172,18 +2198,24 @@ class DaemonSet:
         # 设置镜像拉取凭据
         if registry_secrets:
             pod_template['spec']['imagePullSecrets'] = registry_secrets
+            LOG.info('[DaemonSet-API] Added imagePullSecrets to Pod template')
         
         # 处理节点选择器
         if data.get('node_selector'):
             pod_template['spec']['nodeSelector'] = data['node_selector']
-            LOG.info('Added nodeSelector: %s', data['node_selector'])
+            LOG.info('[DaemonSet-API] Added nodeSelector: %s', data['node_selector'])
+        else:
+            LOG.debug('[DaemonSet-API] No nodeSelector specified')
         
         # 处理容忍度（tolerations）
         if data.get('tolerations'):
             pod_template['spec']['tolerations'] = data['tolerations']
-            LOG.info('Added tolerations: %s', data['tolerations'])
+            LOG.info('[DaemonSet-API] Added tolerations: %s', data['tolerations'])
+        else:
+            LOG.debug('[DaemonSet-API] No tolerations specified')
         
         # 构建 DaemonSet 资源定义
+        LOG.info('[DaemonSet-API] Building DaemonSet resource definition...')
         daemonset_body = {
             'apiVersion': 'apps/v1',
             'kind': 'DaemonSet',
@@ -2208,91 +2240,177 @@ class DaemonSet:
             }
         }
         
+        LOG.info('[DaemonSet-API] DaemonSet resource definition built successfully')
+        LOG.debug('[DaemonSet-API] DaemonSet body: %s', daemonset_body)
         return daemonset_body
 
     def apply(self, data):
         """创建或更新 DaemonSet"""
+        LOG.info('=' * 80)
+        LOG.info('[DaemonSet-API] ========== DaemonSet Apply Started ==========')
+        LOG.info('[DaemonSet-API] Request data: name=%s, cluster=%s, namespace=%s', 
+                 data.get('name'), data.get('cluster'), data.get('namespace'))
+        LOG.debug('[DaemonSet-API] Full request data: %s', data)
+        
         resource_id = data['correlation_id']
+        LOG.info('[DaemonSet-API] Resource ID (correlation_id): %s', resource_id)
+        
+        LOG.info('[DaemonSet-API] Step 1/7: Querying cluster info from database...')
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
+            LOG.error('[DaemonSet-API] Cluster not found: %s', data['cluster'])
             raise exceptions.ValidationError(
                 attribute='cluster',
                 msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']})
             )
         cluster_info = cluster_info[0]
+        LOG.info('[DaemonSet-API] ✓ Cluster found: %s (api_server=%s)', 
+                 cluster_info['name'], cluster_info.get('api_server'))
         
         # 确保 namespace 有值
+        LOG.info('[DaemonSet-API] Step 2/7: Validating namespace...')
         if not data.get('namespace') or data['namespace'].strip() == '':
             data['namespace'] = 'default'
-            LOG.warning('namespace not provided for DaemonSet %s, using default', data.get('name'))
+            LOG.warning('[DaemonSet-API] namespace not provided for DaemonSet %s, using default', data.get('name'))
+        LOG.info('[DaemonSet-API] ✓ Namespace: %s', data['namespace'])
         
         # 确保 api_server 有正确的协议前缀
+        LOG.info('[DaemonSet-API] Step 3/7: Preparing API server URL...')
         api_server = cluster_info['api_server']
         if not api_server.startswith('https://') and not api_server.startswith('http://'):
             api_server = 'https://' + api_server
-            LOG.warning('api_server missing protocol, adding https:// prefix: %s', api_server)
+            LOG.warning('[DaemonSet-API] api_server missing protocol, adding https:// prefix: %s', api_server)
+        LOG.info('[DaemonSet-API] ✓ API Server URL: %s', api_server)
         
-        k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
-        k8s_client = k8s.Client(k8s_auth)
-        k8s_client.ensure_namespace(data['namespace'])
+        LOG.info('[DaemonSet-API] Step 4/7: Creating K8s client...')
+        try:
+            k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
+            k8s_client = k8s.Client(k8s_auth)
+            LOG.info('[DaemonSet-API] ✓ K8s client created successfully')
+        except Exception as e:
+            LOG.error('[DaemonSet-API] ✗ Failed to create K8s client: %s', str(e), exc_info=True)
+            raise
+        
+        LOG.info('[DaemonSet-API] Step 5/7: Ensuring namespace exists...')
+        try:
+            k8s_client.ensure_namespace(data['namespace'])
+            LOG.info('[DaemonSet-API] ✓ Namespace ensured: %s', data['namespace'])
+        except Exception as e:
+            LOG.error('[DaemonSet-API] ✗ Failed to ensure namespace: %s', str(e), exc_info=True)
+            raise
         
         resource_name = api_utils.escape_name(data['name'])
-        exists_resource = k8s_client.get_daemonset(resource_name, data['namespace'])
+        LOG.info('[DaemonSet-API] Escaped resource name: %s -> %s', data['name'], resource_name)
         
+        LOG.info('[DaemonSet-API] Step 6/7: Checking if DaemonSet exists...')
+        try:
+            exists_resource = k8s_client.get_daemonset(resource_name, data['namespace'])
+            if exists_resource is None:
+                LOG.info('[DaemonSet-API] DaemonSet does not exist, will create new one')
+            else:
+                LOG.info('[DaemonSet-API] DaemonSet exists, will update it')
+        except Exception as e:
+            LOG.error('[DaemonSet-API] ✗ Failed to check DaemonSet existence: %s', str(e), exc_info=True)
+            raise
+        
+        LOG.info('[DaemonSet-API] Step 7/7: Creating/Updating DaemonSet...')
         if exists_resource is None:
-            exists_resource = k8s_client.create_daemonset(
-                data['namespace'],
-                self.to_resource(k8s_client, data, cluster_info)
-            )
-            LOG.info('Created DaemonSet %s/%s', data['namespace'], resource_name)
+            try:
+                LOG.info('[DaemonSet-API] Converting data to K8s resource...')
+                daemonset_body = self.to_resource(k8s_client, data, cluster_info)
+                LOG.info('[DaemonSet-API] Calling k8s_client.create_daemonset...')
+                exists_resource = k8s_client.create_daemonset(
+                    data['namespace'],
+                    daemonset_body
+                )
+                LOG.info('[DaemonSet-API] ✓ Created DaemonSet %s/%s', data['namespace'], resource_name)
+            except Exception as e:
+                LOG.error('[DaemonSet-API] ✗ Failed to create DaemonSet: %s', str(e), exc_info=True)
+                raise
         else:
-            exists_resource = k8s_client.update_daemonset(
-                resource_name,
-                data['namespace'],
-                self.to_resource(k8s_client, data, cluster_info)
-            )
-            LOG.info('Updated DaemonSet %s/%s', data['namespace'], resource_name)
+            try:
+                LOG.info('[DaemonSet-API] Converting data to K8s resource...')
+                daemonset_body = self.to_resource(k8s_client, data, cluster_info)
+                LOG.info('[DaemonSet-API] Calling k8s_client.update_daemonset...')
+                exists_resource = k8s_client.update_daemonset(
+                    resource_name,
+                    data['namespace'],
+                    daemonset_body
+                )
+                LOG.info('[DaemonSet-API] ✓ Updated DaemonSet %s/%s', data['namespace'], resource_name)
+            except Exception as e:
+                LOG.error('[DaemonSet-API] ✗ Failed to update DaemonSet: %s', str(e), exc_info=True)
+                raise
         
         # 返回结果
-        result = {
-            'correlation_id': resource_id,
-            'name': data['name'],
-            'namespace': data['namespace'],
-            'desired_number_scheduled': exists_resource.status.desired_number_scheduled or 0,
-            'current_number_scheduled': exists_resource.status.current_number_scheduled or 0,
-            'number_ready': exists_resource.status.number_ready or 0,
-            'number_available': exists_resource.status.number_available or 0
-        }
-        
-        LOG.info('DaemonSet apply result: %s', result)
-        return result
+        LOG.info('[DaemonSet-API] Preparing result...')
+        try:
+            result = {
+                'correlation_id': resource_id,
+                'name': data['name'],
+                'namespace': data['namespace'],
+                'desired_number_scheduled': exists_resource.status.desired_number_scheduled or 0,
+                'current_number_scheduled': exists_resource.status.current_number_scheduled or 0,
+                'number_ready': exists_resource.status.number_ready or 0,
+                'number_available': exists_resource.status.number_available or 0
+            }
+            
+            LOG.info('[DaemonSet-API] ========== DaemonSet Apply Completed Successfully ==========')
+            LOG.info('[DaemonSet-API] Result: %s', result)
+            LOG.info('[DaemonSet-API] Status: desired=%s, current=%s, ready=%s, available=%s',
+                     result['desired_number_scheduled'],
+                     result['current_number_scheduled'],
+                     result['number_ready'],
+                     result['number_available'])
+            LOG.info('=' * 80)
+            return result
+        except Exception as e:
+            LOG.error('[DaemonSet-API] ✗ Failed to prepare result: %s', str(e), exc_info=True)
+            raise
 
     def remove(self, data):
         """删除 DaemonSet"""
+        LOG.info('=' * 80)
+        LOG.info('[DaemonSet-API] ========== DaemonSet Remove Started ==========')
+        LOG.info('[DaemonSet-API] Request: name=%s, cluster=%s, namespace=%s', 
+                 data.get('name'), data.get('cluster'), data.get('namespace'))
+        
+        LOG.info('[DaemonSet-API] Step 1/4: Querying cluster info...')
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
+            LOG.error('[DaemonSet-API] Cluster not found: %s', data['cluster'])
             raise exceptions.ValidationError(
                 attribute='cluster',
                 msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']})
             )
         cluster_info = cluster_info[0]
+        LOG.info('[DaemonSet-API] ✓ Cluster found: %s', cluster_info['name'])
         
         if not data.get('namespace'):
             data['namespace'] = 'default'
+            LOG.info('[DaemonSet-API] Using default namespace')
         
+        LOG.info('[DaemonSet-API] Step 2/4: Preparing API server URL...')
         api_server = cluster_info['api_server']
         if not api_server.startswith('https://') and not api_server.startswith('http://'):
             api_server = 'https://' + api_server
+        LOG.info('[DaemonSet-API] ✓ API Server: %s', api_server)
         
+        LOG.info('[DaemonSet-API] Step 3/4: Creating K8s client...')
         k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
         k8s_client = k8s.Client(k8s_auth)
+        LOG.info('[DaemonSet-API] ✓ K8s client created')
         
         resource_name = api_utils.escape_name(data['name'])
+        LOG.info('[DaemonSet-API] Escaped resource name: %s -> %s', data['name'], resource_name)
+        
+        LOG.info('[DaemonSet-API] Step 4/4: Checking and deleting DaemonSet...')
         exists_resource = k8s_client.get_daemonset(resource_name, data['namespace'])
         
         if exists_resource:
+            LOG.info('[DaemonSet-API] DaemonSet exists, deleting...')
             k8s_client.delete_daemonset(resource_name, data['namespace'])
-            LOG.info('Deleted DaemonSet %s/%s', data['namespace'], resource_name)
+            LOG.info('[DaemonSet-API] ✓ Deleted DaemonSet %s/%s', data['namespace'], resource_name)
             
             result = {
                 'name': data['name'],
@@ -2300,14 +2418,17 @@ class DaemonSet:
                 'status': 'deleted'
             }
         else:
-            LOG.warning('DaemonSet %s/%s not found, nothing to delete', data['namespace'], resource_name)
+            LOG.warning('[DaemonSet-API] DaemonSet %s/%s not found, nothing to delete', 
+                       data['namespace'], resource_name)
             result = {
                 'name': data['name'],
                 'namespace': data['namespace'],
                 'status': 'not_found'
             }
         
-        LOG.info('DaemonSet destroy result: %s', result)
+        LOG.info('[DaemonSet-API] ========== DaemonSet Remove Completed ==========')
+        LOG.info('[DaemonSet-API] Result: %s', result)
+        LOG.info('=' * 80)
         return result
 
 

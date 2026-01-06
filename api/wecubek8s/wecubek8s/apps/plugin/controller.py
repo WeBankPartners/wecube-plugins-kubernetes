@@ -155,21 +155,62 @@ class DaemonSet(controller.Plugin):
                 item[key] = value
 
     def validate_item_apply(self, item_index, item):
-        clean_item = crud.ColumnValidator.get_clean_data(rules.daemonset_rules, item, 'check')
-        self.set_item_default(clean_item)
-        return clean_item
+        LOG.info('[DaemonSet-Controller] validate_item_apply started for item_index=%s, name=%s', 
+                 item_index, item.get('name'))
+        LOG.debug('[DaemonSet-Controller] Raw item data: %s', item)
+        
+        try:
+            clean_item = crud.ColumnValidator.get_clean_data(rules.daemonset_rules, item, 'check')
+            LOG.info('[DaemonSet-Controller] Validation passed for %s', item.get('name'))
+            
+            self.set_item_default(clean_item)
+            LOG.info('[DaemonSet-Controller] Defaults set: namespace=%s', clean_item.get('namespace'))
+            
+            LOG.debug('[DaemonSet-Controller] Clean item data: %s', clean_item)
+            return clean_item
+        except Exception as e:
+            LOG.error('[DaemonSet-Controller] Validation failed for item_index=%s: %s', 
+                     item_index, str(e), exc_info=True)
+            raise
 
     def validate_item_destroy(self, item_index, item):
+        LOG.info('[DaemonSet-Controller] validate_item_destroy started for item_index=%s, name=%s', 
+                 item_index, item.get('name'))
+        
         clean_item = crud.ColumnValidator.get_clean_data(rules.destroy_rules, item, 'check')
         if not clean_item.get('namespace'):
             clean_item['namespace'] = 'default'
+        
+        LOG.info('[DaemonSet-Controller] Destroy validation passed for %s', item.get('name'))
         return clean_item
 
     def apply(self, reqid, operator, item_index, item, **kwargs):
-        return plugin_api.DaemonSet().apply(item)
+        LOG.info('[DaemonSet-Controller] apply started - reqid=%s, operator=%s, item_index=%s, name=%s', 
+                 reqid, operator, item_index, item.get('name'))
+        LOG.debug('[DaemonSet-Controller] Full item data: %s', item)
+        
+        try:
+            result = plugin_api.DaemonSet().apply(item)
+            LOG.info('[DaemonSet-Controller] apply completed successfully for %s, result=%s', 
+                     item.get('name'), result)
+            return result
+        except Exception as e:
+            LOG.error('[DaemonSet-Controller] apply failed for %s: %s', 
+                     item.get('name'), str(e), exc_info=True)
+            raise
 
     def destroy(self, reqid, operator, item_index, item, **kwargs):
-        return plugin_api.DaemonSet().remove(item)
+        LOG.info('[DaemonSet-Controller] destroy started - reqid=%s, operator=%s, item_index=%s, name=%s', 
+                 reqid, operator, item_index, item.get('name'))
+        
+        try:
+            result = plugin_api.DaemonSet().remove(item)
+            LOG.info('[DaemonSet-Controller] destroy completed successfully for %s', item.get('name'))
+            return result
+        except Exception as e:
+            LOG.error('[DaemonSet-Controller] destroy failed for %s: %s', 
+                     item.get('name'), str(e), exc_info=True)
+            raise
 
 
 class Service(controller.Plugin):
