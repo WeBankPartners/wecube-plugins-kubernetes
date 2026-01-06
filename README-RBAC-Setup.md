@@ -99,6 +99,10 @@ kubectl auth can-i create deployments -n default \
 # 验证 statefulsets 权限
 kubectl auth can-i create statefulsets -n default \
   --as=system:serviceaccount:default:wecube-k8s-plugin
+
+# 验证 daemonsets 权限
+kubectl auth can-i create daemonsets -n default \
+  --as=system:serviceaccount:default:wecube-k8s-plugin
 ```
 
 ✅ 所有命令都应该返回 `yes`
@@ -253,6 +257,7 @@ kubectl delete -f k8s-plugin-rbac.yaml
 
 **最后更新**: 2025-12-10  
 **版本**: 1.0.0
+
 
 
 

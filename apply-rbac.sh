@@ -43,6 +43,10 @@ echo "检查 statefulsets 权限:"
 kubectl auth can-i create statefulsets -n default \
   --as=system:serviceaccount:default:wecube-k8s-plugin
 
+echo "检查 daemonsets 权限:"
+kubectl auth can-i create daemonsets -n default \
+  --as=system:serviceaccount:default:wecube-k8s-plugin
+
 echo ""
 echo "🔍 步骤 5: 验证 Prometheus 所需权限..."
 echo ""
@@ -82,6 +86,7 @@ echo "   cat new-token.txt"
 echo ""
 echo "🔧 如需重新生成 Token，请再次运行此脚本"
 echo "================================================================"
+
 
 
 

@@ -358,7 +358,8 @@ def convert_container(images, envs, vols, resource_limit, deploy_script=None):
     for image_info in images:
         container = container_template.copy()
         registry_server, registry_namespace, image_name, image_tag = parse_image_url(image_info['name'].strip())
-        container['name'] = image_name
+        # 使用 escape_name 确保容器名称符合 RFC 1123 规范（将下划线转换为连字符）
+        container['name'] = escape_name(image_name)
         container['image'] = image_info['name'].strip()
         container['ports'] = convert_pod_ports(image_info.get('ports', ''))
         
