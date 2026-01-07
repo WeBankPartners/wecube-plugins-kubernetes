@@ -2182,25 +2182,10 @@ class DaemonSet:
         }]
         LOG.debug('[DaemonSet-API] Images data: %s', images_data)
         
-        # 自动生成 deploy_script（针对 monitor_exporter）
+        # 获取 deploy_script（可选）
         deploy_script = data.get('deploy_script')
-        
-        # 如果是 monitor_exporter 且指定了 image_port，但没有手动提供 deploy_script
-        if not deploy_script and data['name'].strip() == 'monitor_exporter' and data.get('image_port'):
-            image_port_str = data.get('image_port', '').strip()
-            # 解析端口号（支持 "9200/tcp" 或 "9200" 格式）
-            port_number = image_port_str.split('/')[0].strip()
-            if port_number.isdigit():
-                # 为 node_exporter 生成启动脚本（使用 /bin/sh 以兼容 Alpine 等最小化镜像）
-                deploy_script = f"#!/bin/sh\nexec /bin/node_exporter --web.listen-address=:{port_number}"
-                LOG.info('[DaemonSet-API] Auto-generated deploy_script for monitor_exporter with port %s', port_number)
-            else:
-                LOG.warning('[DaemonSet-API] Invalid image_port format for auto deploy_script: %s', image_port_str)
-        
         if deploy_script:
             LOG.info('[DaemonSet-API] Using deploy_script: %s', deploy_script.replace('\n', '\\n'))
-        else:
-            LOG.debug('[DaemonSet-API] No deploy_script provided')
         
         containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit, deploy_script)
         LOG.info('[DaemonSet-API] Converted %d containers', len(containers))
