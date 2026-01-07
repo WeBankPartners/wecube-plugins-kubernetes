@@ -2191,8 +2191,8 @@ class DaemonSet:
             # 解析端口号（支持 "9200/tcp" 或 "9200" 格式）
             port_number = image_port_str.split('/')[0].strip()
             if port_number.isdigit():
-                # 为 node_exporter 生成启动脚本
-                deploy_script = f"#!/bin/bash\nexec /bin/node_exporter --web.listen-address=:{port_number}"
+                # 为 node_exporter 生成启动脚本（使用 /bin/sh 以兼容 Alpine 等最小化镜像）
+                deploy_script = f"#!/bin/sh\nexec /bin/node_exporter --web.listen-address=:{port_number}"
                 LOG.info('[DaemonSet-API] Auto-generated deploy_script for monitor_exporter with port %s', port_number)
             else:
                 LOG.warning('[DaemonSet-API] Invalid image_port format for auto deploy_script: %s', image_port_str)

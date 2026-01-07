@@ -365,9 +365,9 @@ def convert_container(images, envs, vols, resource_limit, deploy_script=None):
         
         # 如果提供了部署脚本，修改容器启动命令
         if deploy_script:
-            # 使用 bash 执行脚本，脚本最后需要启动原始的容器进程
+            # 使用 sh 执行脚本（兼容 Alpine 等最小化镜像），脚本最后需要启动原始的容器进程
             # 注意：这里假设脚本已经包含了启动原容器进程的逻辑（如 exec /docker-entrypoint.sh "$@"）
-            container['command'] = ['/bin/bash', '-c']
+            container['command'] = ['/bin/sh', '-c']
             # 将脚本中的 \\n 替换为真正的换行符
             script_content = deploy_script.replace('\\n', '\n')
             container['args'] = [script_content]
