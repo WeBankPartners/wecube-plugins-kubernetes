@@ -13,5 +13,6 @@ gevent==21.12.0
 pytz
 apscheduler
 certifi
-kubernetes
+kubernetes==28.1.0
+google-auth==2.27.0
 pymysql
