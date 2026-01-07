@@ -2099,6 +2099,25 @@ class DaemonSet:
         pod_spec_envs = api_utils.convert_env(data.get('envs', []))
         LOG.info('[DaemonSet-API] Converted %d environment variables', len(pod_spec_envs))
         
+        # 如果提供了 image_port，自动注入 PORT 环境变量
+        if data.get('image_port'):
+            image_port_str = data.get('image_port', '').strip()
+            # 解析端口号（支持 "9200/tcp" 或 "9200" 格式）
+            port_number = image_port_str.split('/')[0].strip()
+            if port_number.isdigit():
+                # 检查是否已经存在 PORT 环境变量
+                has_port_env = any(env.get('name') == 'PORT' for env in pod_spec_envs)
+                if not has_port_env:
+                    pod_spec_envs.append({
+                        'name': 'PORT',
+                        'value': port_number
+                    })
+                    LOG.info('[DaemonSet-API] Auto-injected PORT=%s from image_port parameter', port_number)
+                else:
+                    LOG.debug('[DaemonSet-API] PORT environment variable already exists, skipping auto-injection')
+            else:
+                LOG.warning('[DaemonSet-API] Invalid image_port format: %s, expected format like "9200/tcp"', image_port_str)
+        
         # 自动注入 Kubernetes Downward API 环境变量
         pod_spec_envs.extend([
             {
@@ -2341,6 +2360,50 @@ class DaemonSet:
             except Exception as e:
                 LOG.error('[DaemonSet-API] ✗ Failed to update DaemonSet: %s', str(e), exc_info=True)
                 raise
+        
+        # 等待 DaemonSet 状态更新
+        LOG.info('[DaemonSet-API] Waiting for DaemonSet status to update...')
+        max_retries = 3
+        retry_delay = 2  # 秒
+        
+        for attempt in range(max_retries):
+            try:
+                # 等待一段时间让 Kubernetes 更新状态
+                if attempt > 0:
+                    time.sleep(retry_delay)
+                    LOG.info('[DaemonSet-API] Retry %d/%d: Fetching updated DaemonSet status...', attempt + 1, max_retries)
+                else:
+                    # 第一次也等待一下，让 Kubernetes 有时间初始化
+                    time.sleep(1)
+                    LOG.info('[DaemonSet-API] Fetching DaemonSet status...')
+                
+                # 重新获取 DaemonSet 状态
+                exists_resource = k8s_client.get_daemonset(resource_name, data['namespace'])
+                
+                if exists_resource and exists_resource.status:
+                    desired = exists_resource.status.desired_number_scheduled or 0
+                    current = exists_resource.status.current_number_scheduled or 0
+                    ready = exists_resource.status.number_ready or 0
+                    available = exists_resource.status.number_available or 0
+                    
+                    LOG.info('[DaemonSet-API] Current status: desired=%d, current=%d, ready=%d, available=%d',
+                            desired, current, ready, available)
+                    
+                    # 如果 desired > 0，说明状态已经更新，可以返回
+                    if desired > 0:
+                        LOG.info('[DaemonSet-API] ✓ DaemonSet status updated successfully')
+                        break
+                    
+                    # 如果是最后一次重试，即使 desired=0 也返回
+                    if attempt == max_retries - 1:
+                        LOG.warning('[DaemonSet-API] Status still shows 0 after %d retries, returning current status', max_retries)
+                else:
+                    LOG.warning('[DaemonSet-API] Failed to fetch DaemonSet status on attempt %d', attempt + 1)
+                    
+            except Exception as e:
+                LOG.error('[DaemonSet-API] Error fetching DaemonSet status: %s', str(e))
+                if attempt == max_retries - 1:
+                    LOG.warning('[DaemonSet-API] Using initial status after retries failed')
         
         # 返回结果
         LOG.info('[DaemonSet-API] Preparing result...')
