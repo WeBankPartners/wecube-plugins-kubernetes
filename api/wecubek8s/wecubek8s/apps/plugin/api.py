@@ -584,7 +584,7 @@ class Deployment:
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
             raise exceptions.ValidationError(attribute='cluster',
-                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+                                             message=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
         
         # 确保 namespace 有值，默认使用 'default'
@@ -643,7 +643,7 @@ class Deployment:
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
             raise exceptions.ValidationError(attribute='cluster',
-                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+                                             message=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
         
         # 确保 api_server 有正确的协议前缀
@@ -1393,7 +1393,7 @@ class StatefulSet:
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
             raise exceptions.ValidationError(attribute='cluster',
-                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+                                             message=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
         
         # 确保 namespace 有值，默认使用 'default'
@@ -1495,8 +1495,8 @@ class StatefulSet:
                     LOG.error('Pod failure details: %s', error_msg)
                     
                     raise exceptions.PluginError(
-                        msg=_('StatefulSet created but Pods failed to become ready within %(timeout)ds. '
-                              'Ready: %(ready)d/%(expected)d. Details: %(details)s') % {
+                        message=_('StatefulSet created but Pods failed to become ready within %(timeout)ds. '
+                                  'Ready: %(ready)d/%(expected)d. Details: %(details)s') % {
                             'timeout': pod_ready_timeout,
                             'ready': ready_replicas,
                             'expected': replicas,
@@ -1657,7 +1657,7 @@ class StatefulSet:
                                 if phase == 'Failed':
                                     error_msg = f'Pod {pod_name} is in Failed state'
                                     LOG.error('❌ %s', error_msg)
-                                    raise exceptions.PluginError(msg=_('Pod creation failed: %(error)s') % {'error': error_msg})
+                                    raise exceptions.PluginError(message=_('Pod creation failed: %(error)s') % {'error': error_msg})
                                 
                                 # 检查容器状态
                                 if pod.status and pod.status.container_statuses:
@@ -1680,7 +1680,7 @@ class StatefulSet:
                                                     detail_msg += f', current state: terminated (exit {exit_code}, {reason})'
                                             
                                             raise exceptions.PluginError(
-                                                msg=_('Pod container crashed repeatedly: %(pod)s/%(container)s - %(error)s') % {
+                                                message=_('Pod container crashed repeatedly: %(pod)s/%(container)s - %(error)s') % {
                                                     'pod': pod_name,
                                                     'container': container_status.name,
                                                     'error': detail_msg
@@ -1698,7 +1698,7 @@ class StatefulSet:
                                                     error_msg = f'{error_msg} (restarted {restart_count} times)'
                                                 LOG.error('❌ Pod %s, Container %s: %s', pod_name, container_status.name, error_msg)
                                                 raise exceptions.PluginError(
-                                                    msg=_('Pod container failed: %(pod)s/%(container)s - %(error)s') % {
+                                                    message=_('Pod container failed: %(pod)s/%(container)s - %(error)s') % {
                                                         'pod': pod_name,
                                                         'container': container_status.name,
                                                         'error': error_msg
@@ -1712,7 +1712,7 @@ class StatefulSet:
                                                 LOG.error('❌ Pod %s, Container %s terminated with exit code %d: %s',
                                                         pod_name, container_status.name, exit_code, reason)
                                                 raise exceptions.PluginError(
-                                                    msg=_('Pod container terminated abnormally: %(pod)s/%(container)s - exit code %(code)d') % {
+                                                    message=_('Pod container terminated abnormally: %(pod)s/%(container)s - exit code %(code)d') % {
                                                         'pod': pod_name,
                                                         'container': container_status.name,
                                                         'code': exit_code
@@ -1905,7 +1905,7 @@ class StatefulSet:
                         
                         error_msg = '; '.join(error_details[:5])  # 只显示前5个错误，避免信息过长
                         raise exceptions.PluginError(
-                            msg=_('StatefulSet created but %(count)d/%(total)d pods failed to become ready within %(timeout)ds. Details: %(details)s') % {
+                            message=_('StatefulSet created but %(count)d/%(total)d pods failed to become ready within %(timeout)ds. Details: %(details)s') % {
                                 'count': len(pods_not_ready),
                                 'total': len(pod_list),
                                 'timeout': max_wait_time,
@@ -1921,7 +1921,7 @@ class StatefulSet:
             except Exception as e:
                 LOG.error('Final pod status check failed: %s', str(e))
                 raise exceptions.PluginError(
-                    msg=_('Failed to verify pod status: %(error)s') % {'error': str(e)}
+                    message=_('Failed to verify pod status: %(error)s') % {'error': str(e)}
                 )
             
             # 同步 Pod 信息到 CMDB（只同步有 ID 的 Pod）
@@ -1978,7 +1978,7 @@ class StatefulSet:
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
             raise exceptions.ValidationError(attribute='cluster',
-                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+                                             message=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
         
         # 确保 namespace 有值
@@ -2051,7 +2051,7 @@ class StatefulSet:
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
             raise exceptions.ValidationError(attribute='cluster',
-                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+                                             message=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
         
         # 确保 api_server 有正确的协议前缀
@@ -2358,7 +2358,7 @@ class DaemonSet:
             LOG.error('[DaemonSet-API] Cluster not found: %s', data['cluster'])
             raise exceptions.ValidationError(
                 attribute='cluster',
-                msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']})
+                message=_('name of cluster(%(name)s) not found' % {'name': data['cluster']})
             )
         cluster_info = cluster_info[0]
         LOG.info('[DaemonSet-API] ✓ Cluster found: %s (api_server=%s)', 
@@ -2527,7 +2527,7 @@ class DaemonSet:
             LOG.error('[DaemonSet-API] Cluster not found: %s', data['cluster'])
             raise exceptions.ValidationError(
                 attribute='cluster',
-                msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']})
+                message=_('name of cluster(%(name)s) not found' % {'name': data['cluster']})
             )
         cluster_info = cluster_info[0]
         LOG.info('[DaemonSet-API] ✓ Cluster found: %s', cluster_info['name'])
@@ -2618,7 +2618,7 @@ class Service:
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
             raise exceptions.ValidationError(attribute='cluster',
-                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+                                             message=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
         
         # 确保 namespace 有值，默认使用 'default'
@@ -2676,7 +2676,7 @@ class Service:
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
             raise exceptions.ValidationError(attribute='cluster',
-                                             msg=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+                                             message=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
         cluster_info = cluster_info[0]
         
         # 确保 api_server 有正确的协议前缀
@@ -2745,7 +2745,7 @@ class Node:
         cluster_info = db_resource.Cluster().list({'name': cluster_name})
         if not cluster_info:
             raise exceptions.ValidationError(attribute='cluster',
-                                             msg=_('name of cluster(%(name)s) not found' % {'name': cluster_name}))
+                                             message=_('name of cluster(%(name)s) not found' % {'name': cluster_name}))
         cluster_info = cluster_info[0]
         
         # 创建 k8s client
@@ -2790,7 +2790,7 @@ class Node:
                 LOG.info('Updated labels for node %s in cluster %s', node_name, cluster_name)
             except Exception as e:
                 LOG.error('Failed to update labels for node %s: %s', node_name, str(e))
-                raise exceptions.K8sCallError(cluster=cluster_name, msg='Failed to update node %s: %s' % (node_name, str(e)))
+                raise exceptions.K8sCallError(cluster=cluster_name, message='Failed to update node %s: %s' % (node_name, str(e)))
         
         return {
             'cluster': cluster_name,
@@ -2806,7 +2806,7 @@ class Node:
         cluster_info = db_resource.Cluster().list({'name': cluster_name})
         if not cluster_info:
             raise exceptions.ValidationError(attribute='cluster',
-                                             msg=_('name of cluster(%(name)s) not found' % {'name': cluster_name}))
+                                             message=_('name of cluster(%(name)s) not found' % {'name': cluster_name}))
         cluster_info = cluster_info[0]
         
         # 创建 k8s client
@@ -2825,7 +2825,7 @@ class Node:
             node = k8s_client.get_node(node_name)
             if not node:
                 raise exceptions.ValidationError(attribute='nodeName',
-                                                 msg=_('node(%(name)s) not found in cluster' % {'name': node_name}))
+                                                 message=_('node(%(name)s) not found in cluster' % {'name': node_name}))
             
             # 获取现有标签
             existing_labels = {}
@@ -2864,7 +2864,7 @@ class Node:
                 LOG.info('Removed label %s from node %s in cluster %s', tag_name, node_name, cluster_name)
             except Exception as e:
                 LOG.error('Failed to remove label from node %s: %s', node_name, str(e))
-                raise exceptions.K8sCallError(cluster=cluster_name, msg='Failed to update node %s: %s' % (node_name, str(e)))
+                raise exceptions.K8sCallError(cluster=cluster_name, message='Failed to update node %s: %s' % (node_name, str(e)))
         else:
             # 针对所有 Node
             nodes = k8s_client.list_node()
@@ -2948,7 +2948,7 @@ class ClusterInterconnect:
         if not local_cluster_name or not service_name:
             raise exceptions.ValidationError(
                 attribute='local_cluster, service_name',
-                msg=_('local_cluster and service_name are required'))
+                message=_('local_cluster and service_name are required'))
 
         # 获取集群信息
         all_clusters = self.db_cluster.list()
@@ -2957,7 +2957,7 @@ class ClusterInterconnect:
         if local_cluster_name not in cluster_map:
             raise exceptions.ValidationError(
                 attribute='local_cluster',
-                msg=_('Local cluster %(name)s not found' % {'name': local_cluster_name}))
+                message=_('Local cluster %(name)s not found' % {'name': local_cluster_name}))
 
         local_cluster = cluster_map[local_cluster_name]
         k8s_auth = k8s.AuthToken(local_cluster['api_server'], local_cluster['token'])
@@ -2969,12 +2969,12 @@ class ClusterInterconnect:
             if not remote_cluster_name:
                 raise exceptions.ValidationError(
                     attribute='remote_cluster',
-                    msg=_('remote_cluster is required when service_type is Endpoint'))
+                    message=_('remote_cluster is required when service_type is Endpoint'))
 
             if remote_cluster_name not in cluster_map:
                 raise exceptions.ValidationError(
                     attribute='remote_cluster',
-                    msg=_('Remote cluster %(name)s not found' % {'name': remote_cluster_name}))
+                    message=_('Remote cluster %(name)s not found' % {'name': remote_cluster_name}))
 
             remote_cluster = cluster_map[remote_cluster_name]
             remote_namespace = data.get('remote_namespace', 'default')
@@ -2988,8 +2988,8 @@ class ClusterInterconnect:
             if not remote_service:
                 raise exceptions.ValidationError(
                     attribute='remote_service_name',
-                    msg=_('Remote service %(name)s/%(ns)s not found' %
-                         {'name': remote_service_name, 'ns': remote_namespace}))
+                    message=_('Remote service %(name)s/%(ns)s not found' %
+                              {'name': remote_service_name, 'ns': remote_namespace}))
 
             cluster_ip = remote_service.spec.cluster_ip
             ports = []
@@ -3062,7 +3062,7 @@ class ClusterInterconnect:
                 if not remote_cluster_name:
                     raise exceptions.ValidationError(
                         attribute='external_name or remote_cluster',
-                        msg=_('external_name or remote_cluster is required for ExternalName type'))
+                        message=_('external_name or remote_cluster is required for ExternalName type'))
                 remote_namespace = data.get('remote_namespace', 'default')
                 remote_service_name = data.get('remote_service_name', service_name)
                 external_name = f"{remote_service_name}.{remote_namespace}.svc.{remote_cluster_name}.local"
@@ -3123,7 +3123,7 @@ class ClusterInterconnect:
         if not cluster_name or not policy_name:
             raise exceptions.ValidationError(
                 attribute='cluster, policy_name',
-                msg=_('cluster and policy_name are required'))
+                message=_('cluster and policy_name are required'))
 
         all_clusters = self.db_cluster.list()
         cluster_map = {c['name']: c for c in all_clusters}
@@ -3131,7 +3131,7 @@ class ClusterInterconnect:
         if cluster_name not in cluster_map:
             raise exceptions.ValidationError(
                 attribute='cluster',
-                msg=_('Cluster %(name)s not found' % {'name': cluster_name}))
+                message=_('Cluster %(name)s not found' % {'name': cluster_name}))
 
         cluster = cluster_map[cluster_name]
         k8s_auth = k8s.AuthToken(cluster['api_server'], cluster['token'])
