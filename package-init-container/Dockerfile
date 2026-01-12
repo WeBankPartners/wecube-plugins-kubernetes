@@ -54,6 +54,10 @@ RUN chmod +x /usr/local/bin/download-package.sh
 # 设置工作目录
 WORKDIR /shared-data/diff-var-files
 
+RUN addgroup -g 10001 -S appuser && adduser -u 10001 -S -D -G appuser appuser
+RUN chown -R appuser:appuser /shared-data
+USER appuser
+
 # 默认入口点：执行下载脚本
 # 脚本会从环境变量 PACKAGE_URL 读取下载地址
 ENTRYPOINT ["/usr/local/bin/download-package.sh"]

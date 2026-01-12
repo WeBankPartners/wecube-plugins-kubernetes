@@ -1420,7 +1420,12 @@ class StatefulSet:
             exists_resource = k8s_client.create_statefulset(data['namespace'], resource_template)
         else:
             LOG.info('Updating existing StatefulSet: %s/%s', data['namespace'], resource_name)
-            exists_resource = k8s_client.update_statefulset(resource_name, data['namespace'], resource_template)
+
+            # 使用 replace 而不是 patch,完全替换资源定义
+            # 这样可以避免 patch 合并时保留旧字段的问题
+            # 注意: replace 需要保留 resourceVersion
+            resource_template['metadata']['resourceVersion'] = exists_resource.metadata.resource_version
+            exists_resource = k8s_client.replace_statefulset(resource_name, data['namespace'], resource_template)
         
         # ==================== 等待 Pod 就绪（解决异步创建问题）====================
         replicas = int(data.get('replicas', 1))

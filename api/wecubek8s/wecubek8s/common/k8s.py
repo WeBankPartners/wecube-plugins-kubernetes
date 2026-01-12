@@ -119,6 +119,16 @@ class Client:
     def update_statefulset(self, name, namespace, body, **kwargs):
         return self._action(self.app_client, 'patch_namespaced_stateful_set', name, namespace, body, **kwargs)
 
+    def replace_statefulset(self, name, namespace, body, **kwargs):
+        """
+        完全替换 StatefulSet (使用 PUT 而不是 PATCH)
+
+        这会完全替换资源定义,不会合并字段,适合需要删除旧配置的场景
+        注意: 需要在 body 中包含 resourceVersion
+        """
+        return self._action(self.app_client, 'replace_namespaced_stateful_set', name, namespace, body, **kwargs)
+
+
     def delete_statefulset(self, name, namespace, **kwargs):
         return self._action(self.app_client, 'delete_namespaced_stateful_set', name, namespace, **kwargs)
 

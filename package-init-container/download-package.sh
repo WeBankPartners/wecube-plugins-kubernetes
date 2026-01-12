@@ -299,7 +299,7 @@ echo "Step 3: Extracting package..."
 TEMP_EXTRACT_DIR="/tmp/package-extract-$$"
 mkdir -p "$TEMP_EXTRACT_DIR"
 
-if ! tar -xf package.tar -C "$TEMP_EXTRACT_DIR"; then
+if ! tar -xf package.tar -o -C "$TEMP_EXTRACT_DIR"; then
     echo "Error: Failed to extract package"
     rm -rf "$TEMP_EXTRACT_DIR"
     exit 1
@@ -340,6 +340,12 @@ else
     echo "Multiple top-level items found, moving all to /shared-data/diff-var-files/..."
     mv "$TEMP_EXTRACT_DIR"/* /shared-data/diff-var-files/ 2>/dev/null || true
     mv "$TEMP_EXTRACT_DIR"/.[!.]* /shared-data/diff-var-files/ 2>/dev/null || true
+fi
+
+# 如果存在/shared-data/diff-var-files/bin 目录，则将其里面的内容增加执行权限
+if [ -d /shared-data/diff-var-files/bin ]; then
+    echo "Step 3.1: Setting executable permissions for /shared-data/diff-var-files/bin..."
+    chmod +x /shared-data/diff-var-files/bin/*
 fi
 
 # 清理临时目录
