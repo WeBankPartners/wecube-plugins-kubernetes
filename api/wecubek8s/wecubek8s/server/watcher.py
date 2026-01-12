@@ -9,6 +9,7 @@ from threading import Event
 from concurrent.futures import ThreadPoolExecutor as PoolExecutor
 from talos.core import config
 from talos.core import utils
+import urllib3.exceptions
 
 # ⚠️ 关键：必须在初始化配置之前导入，以便注册配置拦截器
 from wecubek8s.server import base as wecubek8s_base
@@ -2113,8 +2114,21 @@ def watch_pod(cluster, event_stop):
             api.Pod().watch(cluster, event_stop, notify_pod)
             retry_delay = 0.5  # 成功后重置延迟
         except Exception as e:
-            LOG.error('Exception raised while watching pod from cluster %s', cluster_name)
-            LOG.exception(e)
+            # 区分预期内的连接中断（ProtocolError）和真正的错误
+            is_connection_error = isinstance(e, (
+                urllib3.exceptions.ProtocolError,
+                urllib3.exceptions.TimeoutError,
+                ConnectionError,
+            )) or 'Connection broken' in str(e) or 'InvalidChunkLength' in str(e)
+            
+            if is_connection_error:
+                # 连接中断是正常现象（超时重连），只记录 WARNING 级别
+                LOG.warning('Watch connection interrupted for cluster %s: %s (auto-retrying)', 
+                           cluster_name, str(e)[:150])  # 只输出前150个字符
+            else:
+                # 其他异常记录完整的错误信息
+                LOG.error('Exception raised while watching pod from cluster %s', cluster_name)
+                LOG.exception(e)
             
             # 指数退避：0.5s -> 1s -> 2s -> 4s -> 8s -> ... -> 60s
             if not event_stop.is_set():

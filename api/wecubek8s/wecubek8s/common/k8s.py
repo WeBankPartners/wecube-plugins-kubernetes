@@ -44,7 +44,27 @@ class Client:
         configuration = client.Configuration()
         auth(configuration)
         self.auth = auth
+        
+        # 创建 API 客户端
         api_client = client.ApiClient(configuration)
+        
+        # 配置长时间 Watch 的超时参数，避免连接过早断开
+        # 默认的 urllib3 超时是 5 分钟，会导致 Watch 连接频繁断开
+        # 设置连接超时10秒，读取超时3660秒（61分钟）
+        try:
+            # 必须在 ApiClient 创建后修改，因为 pool_manager 是懒加载的
+            # 先访问 pool_manager 触发初始化
+            _ = api_client.rest_client.pool_manager
+            
+            # 设置超时参数
+            api_client.rest_client.pool_manager.connection_pool_kw['timeout'] = urllib3.util.Timeout(
+                connect=10.0,
+                read=3660.0
+            )
+            LOG.debug('Successfully configured urllib3 timeout: connect=10s, read=3660s')
+        except Exception as e:
+            LOG.warning('Failed to configure urllib3 timeout (may use default): %s', e)
+        
         self.core_client = client.CoreV1Api(api_client)
         self.app_client = client.AppsV1Api(api_client)
         self.networking_client = client.NetworkingV1Api(api_client)
