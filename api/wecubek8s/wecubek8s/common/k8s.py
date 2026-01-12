@@ -100,6 +100,15 @@ class Client:
     def update_deployment(self, name, namespace, body, **kwargs):
         return self._action(self.app_client, 'patch_namespaced_deployment', name, namespace, body, **kwargs)
 
+    def replace_deployment(self, name, namespace, body, **kwargs):
+        """
+        完全替换 Deployment (使用 PUT 而不是 PATCH)
+        
+        这会完全替换资源定义,不会合并字段,适合需要删除旧配置的场景
+        注意: 需要在 body 中包含 resourceVersion
+        """
+        return self._action(self.app_client, 'replace_namespaced_deployment', name, namespace, body, **kwargs)
+
     def delete_deployment(self, name, namespace, **kwargs):
         return self._action(self.app_client, 'delete_namespaced_deployment', name, namespace, **kwargs)
 
@@ -147,6 +156,15 @@ class Client:
 
     def update_daemonset(self, name, namespace, body, **kwargs):
         return self._action(self.app_client, 'patch_namespaced_daemon_set', name, namespace, body, **kwargs)
+
+    def replace_daemonset(self, name, namespace, body, **kwargs):
+        """
+        完全替换 DaemonSet (使用 PUT 而不是 PATCH)
+        
+        这会完全替换资源定义,不会合并字段,适合需要删除旧配置的场景
+        注意: 需要在 body 中包含 resourceVersion
+        """
+        return self._action(self.app_client, 'replace_namespaced_daemon_set', name, namespace, body, **kwargs)
 
     def delete_daemonset(self, name, namespace, **kwargs):
         return self._action(self.app_client, 'delete_namespaced_daemon_set', name, namespace, **kwargs)

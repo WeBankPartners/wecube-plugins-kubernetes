@@ -603,12 +603,19 @@ class Deployment:
         k8s_client = k8s.Client(k8s_auth)
         k8s_client.ensure_namespace(data['namespace'])
         resource_name = api_utils.escape_name(data['name'])
+        resource_template = self.to_resource(k8s_client, data, cluster_info)
         exists_resource = k8s_client.get_deployment(resource_name, data['namespace'])
         if exists_resource is None:
-            exists_resource = k8s_client.create_deployment(data['namespace'], self.to_resource(k8s_client, data, cluster_info))
+            LOG.info('Creating new Deployment: %s/%s', data['namespace'], resource_name)
+            exists_resource = k8s_client.create_deployment(data['namespace'], resource_template)
         else:
-            exists_resource = k8s_client.update_deployment(resource_name, data['namespace'],
-                                                           self.to_resource(k8s_client, data, cluster_info))
+            LOG.info('Updating existing Deployment: %s/%s', data['namespace'], resource_name)
+            
+            # 使用 replace 而不是 patch,完全替换资源定义
+            # 这样可以避免 patch 合并时保留旧字段的问题
+            # 注意: replace 需要保留 resourceVersion
+            resource_template['metadata']['resourceVersion'] = exists_resource.metadata.resource_version
+            exists_resource = k8s_client.replace_deployment(resource_name, data['namespace'], resource_template)
         # 若入参提供端口信息，则同时创建/更新对应 Service，并返回其分配信息
         self._ensure_service_for_deployment(k8s_client, data)
         has_single_port = data.get('port') is not None
@@ -1655,11 +1662,40 @@ class StatefulSet:
                                 # 检查容器状态
                                 if pod.status and pod.status.container_statuses:
                                     for container_status in pod.status.container_statuses:
+                                        # 检查容器重启次数（超过3次认为异常）
+                                        restart_count = container_status.restart_count or 0
+                                        if restart_count > 3:
+                                            error_msg = f'Container has restarted {restart_count} times (threshold: 3)'
+                                            LOG.error('❌ Pod %s, Container %s: %s', pod_name, container_status.name, error_msg)
+                                            
+                                            # 获取更详细的状态信息
+                                            detail_msg = error_msg
+                                            if container_status.state:
+                                                if container_status.state.waiting:
+                                                    reason = container_status.state.waiting.reason or 'Unknown'
+                                                    detail_msg += f', current state: waiting ({reason})'
+                                                elif container_status.state.terminated:
+                                                    exit_code = container_status.state.terminated.exit_code or 0
+                                                    reason = container_status.state.terminated.reason or 'Unknown'
+                                                    detail_msg += f', current state: terminated (exit {exit_code}, {reason})'
+                                            
+                                            raise exceptions.PluginError(
+                                                msg=_('Pod container crashed repeatedly: %(pod)s/%(container)s - %(error)s') % {
+                                                    'pod': pod_name,
+                                                    'container': container_status.name,
+                                                    'error': detail_msg
+                                                }
+                                            )
+                                        
                                         if container_status.state and container_status.state.waiting:
                                             reason = container_status.state.waiting.reason
-                                            # 检查严重错误（镜像拉取失败、配置错误等）
-                                            if reason in ['ImagePullBackOff', 'ErrImagePull', 'CreateContainerConfigError', 'InvalidImageName']:
+                                            # 检查严重错误（镜像拉取失败、配置错误、崩溃循环等）
+                                            if reason in ['ImagePullBackOff', 'ErrImagePull', 'CreateContainerConfigError', 
+                                                         'InvalidImageName', 'CrashLoopBackOff']:
                                                 error_msg = container_status.state.waiting.message or reason
+                                                # 如果是 CrashLoopBackOff，添加重启次数信息
+                                                if reason == 'CrashLoopBackOff':
+                                                    error_msg = f'{error_msg} (restarted {restart_count} times)'
                                                 LOG.error('❌ Pod %s, Container %s: %s', pod_name, container_status.name, error_msg)
                                                 raise exceptions.PluginError(
                                                     msg=_('Pod container failed: %(pod)s/%(container)s - %(error)s') % {
@@ -1706,6 +1742,20 @@ class StatefulSet:
                                 uid_status = f'UID: {pod.metadata.uid[:8]}...' if pod.metadata.uid else 'UID: None'
                                 host_ip_status = f'host_ip: {pod.status.host_ip}' if pod.status and pod.status.host_ip else 'host_ip: None'
                                 ready_status = 'Ready' if pod.metadata.name in pod_dict and pod_dict[pod.metadata.name]['ready'] else 'NotReady'
+                                
+                                # 检查容器重启次数和状态
+                                container_info = ''
+                                if pod.status and pod.status.container_statuses:
+                                    total_restarts = sum(cs.restart_count or 0 for cs in pod.status.container_statuses)
+                                    if total_restarts > 0:
+                                        container_info = f' [Restarts: {total_restarts}]'
+                                    # 检查是否有异常状态
+                                    for cs in pod.status.container_statuses:
+                                        if cs.state and cs.state.waiting:
+                                            reason = cs.state.waiting.reason or 'Unknown'
+                                            if reason in ['CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull']:
+                                                container_info += f' [{cs.name}: {reason}]'
+                                
                                 # 检查 init container 状态
                                 init_status = ''
                                 if pod.status and pod.status.init_container_statuses:
@@ -1720,7 +1770,7 @@ class StatefulSet:
                                                 init_status = f' [Init: {init_container.name} completed]'
                                 
                                 if pod.metadata.name in [p['name'] for p in pods_incomplete]:
-                                    LOG.debug('Pod %s status: %s, %s, %s, %s%s', pod.metadata.name, phase, uid_status, host_ip_status, ready_status, init_status)
+                                    LOG.debug('Pod %s status: %s, %s, %s, %s%s%s', pod.metadata.name, phase, uid_status, host_ip_status, ready_status, container_info, init_status)
                             
                             for pod_info in pod_list:
                                 if pod_info['name'] in pod_dict:
@@ -1821,19 +1871,37 @@ class StatefulSet:
                                 # 记录容器状态
                                 if pod.status and pod.status.container_statuses:
                                     for container_status in pod.status.container_statuses:
+                                        restart_count = container_status.restart_count or 0
+                                        
                                         if container_status.state:
                                             if container_status.state.waiting:
                                                 reason = container_status.state.waiting.reason or 'Unknown'
                                                 message = container_status.state.waiting.message or ''
-                                                LOG.error('  Container %s waiting: %s - %s',
-                                                        container_status.name, reason, message)
-                                                error_details.append(f'{pod_name}/{container_status.name}: {reason}')
+                                                LOG.error('  Container %s waiting: %s (restarts: %d) - %s',
+                                                        container_status.name, reason, restart_count, message)
+                                                
+                                                # 在错误详情中包含重启次数（如果有的话）
+                                                if restart_count > 0:
+                                                    error_details.append(f'{pod_name}/{container_status.name}: {reason} (restarted {restart_count} times)')
+                                                else:
+                                                    error_details.append(f'{pod_name}/{container_status.name}: {reason}')
                                             elif container_status.state.terminated:
                                                 reason = container_status.state.terminated.reason or 'Unknown'
                                                 exit_code = container_status.state.terminated.exit_code or 0
-                                                LOG.error('  Container %s terminated: %s (exit code %d)',
-                                                        container_status.name, reason, exit_code)
-                                                error_details.append(f'{pod_name}/{container_status.name}: terminated (exit {exit_code})')
+                                                LOG.error('  Container %s terminated: %s (exit code %d, restarts: %d)',
+                                                        container_status.name, reason, exit_code, restart_count)
+                                                error_details.append(f'{pod_name}/{container_status.name}: terminated (exit {exit_code}, restarted {restart_count} times)')
+                                            elif container_status.state.running:
+                                                # 容器在运行但 Pod 不 ready（可能健康检查失败）
+                                                if restart_count > 0:
+                                                    LOG.error('  Container %s running but not ready (restarts: %d)',
+                                                            container_status.name, restart_count)
+                                                    error_details.append(f'{pod_name}/{container_status.name}: running but not ready (restarted {restart_count} times)')
+                                        else:
+                                            # 没有状态信息，但可能有重启次数
+                                            if restart_count > 0:
+                                                LOG.error('  Container %s - restarts: %d', container_status.name, restart_count)
+                                                error_details.append(f'{pod_name}/{container_status.name}: restarted {restart_count} times')
                         
                         error_msg = '; '.join(error_details[:5])  # 只显示前5个错误，避免信息过长
                         raise exceptions.PluginError(
@@ -2343,10 +2411,11 @@ class DaemonSet:
             raise
         
         LOG.info('[DaemonSet-API] Step 7/7: Creating/Updating DaemonSet...')
+        LOG.info('[DaemonSet-API] Converting data to K8s resource...')
+        daemonset_body = self.to_resource(k8s_client, data, cluster_info)
+        
         if exists_resource is None:
             try:
-                LOG.info('[DaemonSet-API] Converting data to K8s resource...')
-                daemonset_body = self.to_resource(k8s_client, data, cluster_info)
                 LOG.info('[DaemonSet-API] Calling k8s_client.create_daemonset...')
                 exists_resource = k8s_client.create_daemonset(
                     data['namespace'],
@@ -2358,10 +2427,14 @@ class DaemonSet:
                 raise
         else:
             try:
-                LOG.info('[DaemonSet-API] Converting data to K8s resource...')
-                daemonset_body = self.to_resource(k8s_client, data, cluster_info)
-                LOG.info('[DaemonSet-API] Calling k8s_client.update_daemonset...')
-                exists_resource = k8s_client.update_daemonset(
+                LOG.info('[DaemonSet-API] Using replace instead of patch to avoid field merge issues')
+                
+                # 使用 replace 而不是 patch,完全替换资源定义
+                # 这样可以避免 patch 合并时保留旧字段的问题
+                # 注意: replace 需要保留 resourceVersion
+                daemonset_body['metadata']['resourceVersion'] = exists_resource.metadata.resource_version
+                LOG.info('[DaemonSet-API] Calling k8s_client.replace_daemonset...')
+                exists_resource = k8s_client.replace_daemonset(
                     resource_name,
                     data['namespace'],
                     daemonset_body

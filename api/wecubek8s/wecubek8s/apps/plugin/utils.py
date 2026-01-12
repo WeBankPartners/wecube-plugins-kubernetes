@@ -349,7 +349,7 @@ def convert_container(images, envs, vols, resource_limit, deploy_script=None):
     container_template = {
         'name': '',
         'image': '',
-        'imagePullPolicy': 'IfNotPresent',
+        'imagePullPolicy': 'Always',
         'ports': [],
         'env': envs,
         'volumeMounts': vols,
@@ -511,7 +511,7 @@ def setup_package_init_container(data, containers, volumes, cluster_info=None):
         init_container = {
             'name': 'package-downloader',
             'image': full_init_image,  # 使用拼接后的完整镜像地址
-            'imagePullPolicy': 'IfNotPresent',
+            'imagePullPolicy': 'Always',
             'env': [
                 {
                     'name': 'PACKAGE_URL',
