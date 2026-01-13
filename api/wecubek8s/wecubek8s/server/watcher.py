@@ -2080,7 +2080,7 @@ def notify_pod(event, cluster_id, data):
 
 
 def watch_pod(cluster, event_stop):
-    """监听单个集群的 Pod 事件（带指数退避重试）
+    """监听单个集群的 Pod 事件（带指数退避重试和资源版本续传）
     
     多 watcher 安全性说明：
     - 多个 watcher 同时监听同一集群是安全的（通过 CMDB 唯一性约束 + 幂等操作保证）
@@ -2098,6 +2098,11 @@ def watch_pod(cluster, event_stop):
     - POD.DELETED：从 CMDB 删除旧 Pod 记录
     - POD.ADDED：重试查询（等待 apply API），找不到则创建新记录（从 StatefulSet 继承 app_instance）
     
+    重连和事件续传：
+    - Watch 连接会定期超时（1小时）或被中断（网络问题）
+    - 重连时会使用上次的 resourceVersion，确保不丢失事件
+    - 心跳机制（每3分钟）保持连接活跃，避免 4 分钟超时
+    
     建议：
     - 生产环境可以运行多个 watcher 实例（已确保安全性和一致性）
     - 建议 2-3 个实例，提供高可用性同时避免过多日志
@@ -2105,14 +2110,26 @@ def watch_pod(cluster, event_stop):
     """
     retry_delay = 0.5  # 初始延迟 0.5 秒
     max_retry_delay = 60  # 最大延迟 60 秒
+    last_resource_version = None  # 保存最后的资源版本，用于重连续传
     
     cluster_name = cluster.get('name', cluster['id'])
     LOG.info('Starting pod watcher for cluster: %s', cluster_name)
     
     while not event_stop.is_set():
         try:
-            api.Pod().watch(cluster, event_stop, notify_pod)
-            retry_delay = 0.5  # 成功后重置延迟
+            # 调用 watch 方法，传入上次的 resourceVersion（如果有的话）
+            # 返回最后的 resourceVersion 供下次重连使用
+            last_resource_version = api.Pod().watch(
+                cluster, 
+                event_stop, 
+                notify_pod,
+                start_resource_version=last_resource_version
+            )
+            
+            # watch 正常结束（通常是超时），记录信息并准备重连
+            LOG.info('Watch ended normally for cluster %s, reconnecting...', cluster_name)
+            retry_delay = 0.5  # 正常结束后重置延迟
+            
         except Exception as e:
             # 区分预期内的连接中断（ProtocolError）和真正的错误
             is_connection_error = isinstance(e, (
@@ -2123,12 +2140,17 @@ def watch_pod(cluster, event_stop):
             
             if is_connection_error:
                 # 连接中断是正常现象（超时重连），只记录 WARNING 级别
-                LOG.warning('Watch connection interrupted for cluster %s: %s (auto-retrying)', 
-                           cluster_name, str(e)[:150])  # 只输出前150个字符
+                LOG.warning('Watch connection interrupted for cluster %s: %s (auto-retrying with rv=%s)', 
+                           cluster_name, str(e)[:150], last_resource_version)
             else:
                 # 其他异常记录完整的错误信息
-                LOG.error('Exception raised while watching pod from cluster %s', cluster_name)
+                LOG.error('Exception raised while watching pod from cluster %s (rv=%s)', 
+                         cluster_name, last_resource_version)
                 LOG.exception(e)
+                # 严重错误时重置 resourceVersion，从当前版本重新开始
+                if 'resource version' in str(e).lower() or 'too old' in str(e).lower():
+                    LOG.warning('Resource version expired for cluster %s, resetting...', cluster_name)
+                    last_resource_version = None
             
             # 指数退避：0.5s -> 1s -> 2s -> 4s -> 8s -> ... -> 60s
             if not event_stop.is_set():
