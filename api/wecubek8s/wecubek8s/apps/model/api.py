@@ -357,12 +357,12 @@ class Pod(BaseEntity):
             # timeout_seconds: API Server 端超时时间（150 秒 = 2.5 分钟）
             # _request_timeout: HTTP 客户端（urllib3）超时时间 (connect_timeout, read_timeout)
             #   - connect_timeout=10: 连接超时 10 秒
-            #   - read_timeout=180: 读取超时 3 分钟（略大于 timeout_seconds）
+            #   - read_timeout=145: 读取超时 145 秒（略小于 timeout_seconds，客户端主动在服务器超时前结束）
             for event in w.stream(
                 k8s_client.core_client.list_pod_for_all_namespaces,
                 resource_version=last_resource_version,
                 timeout_seconds=150,  # 2.5 分钟
-                _request_timeout=(10, 180)  # 连接 10s，读取 3min
+                _request_timeout=(10, 145)  # 连接 10s，读取 145s（比 timeout_seconds 短 5 秒）
             ):
                 event_type = event.get('type')
                 pod_obj = event.get('object')
