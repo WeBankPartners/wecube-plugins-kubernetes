@@ -4,7 +4,6 @@ from __future__ import absolute_import
 
 import logging
 import datetime
-import time
 from urllib.parse import urlparse
 
 from kubernetes import watch
@@ -350,21 +349,20 @@ class Pod(BaseEntity):
             else:
                 LOG.info('Resuming watch from saved resource_version: %s', start_resource_version)
             
-            # 心跳保活参数
-            last_heartbeat_time = time.time()
-            heartbeat_interval = 180  # 每 3 分钟发送一次心跳（在 4 分钟超时之前）
+            # 事件计数器（用于统计和日志）
             event_count = 0
             
-            # 设置超时为 1 小时，但会通过心跳机制保持连接活跃
-            # timeout_seconds: API Server 端超时时间
+            # 设置超时为 2.5 分钟，主动在 API Server 超时前重连（避免 5 分钟超时）
+            # 策略：定期重连（每 2.5 分钟），重连时自动从 last_resource_version 续传
+            # timeout_seconds: API Server 端超时时间（150 秒 = 2.5 分钟）
             # _request_timeout: HTTP 客户端（urllib3）超时时间 (connect_timeout, read_timeout)
             #   - connect_timeout=10: 连接超时 10 秒
-            #   - read_timeout=3660: 读取超时 61 分钟（略大于 timeout_seconds）
+            #   - read_timeout=180: 读取超时 3 分钟（略大于 timeout_seconds）
             for event in w.stream(
                 k8s_client.core_client.list_pod_for_all_namespaces,
                 resource_version=last_resource_version,
-                timeout_seconds=3600,
-                _request_timeout=(10, 3660)
+                timeout_seconds=150,  # 2.5 分钟
+                _request_timeout=(10, 180)  # 连接 10s，读取 3min
             ):
                 event_type = event.get('type')
                 pod_obj = event.get('object')
@@ -400,21 +398,6 @@ class Pod(BaseEntity):
                     raise Exception(f'Watch stream received ERROR event for pod {pod_name}')
                 else:
                     LOG.warning('Unknown watch event type: %s for pod %s', event_type, pod_name)
-                
-                # 心跳保活：检查是否需要发送心跳请求
-                current_time = time.time()
-                if current_time - last_heartbeat_time > heartbeat_interval:
-                    try:
-                        # 发送一个轻量级的查询请求作为心跳，保持连接活跃
-                        # 这会刷新 TCP 连接，防止被 API Server 或中间网络设备关闭
-                        k8s_client.core_client.list_pod_for_all_namespaces(limit=1, timeout_seconds=5)
-                        last_heartbeat_time = current_time
-                        LOG.debug('Heartbeat sent for cluster %s (events processed: %d)', 
-                                 cluster_name, event_count)
-                    except Exception as hb_error:
-                        LOG.warning('Heartbeat failed for cluster %s: %s', cluster_name, str(hb_error))
-                        # 心跳失败可能表示连接有问题，让外层重连
-                        raise
                 
                 # 检查是否需要停止
                 if event_stop.is_set():
