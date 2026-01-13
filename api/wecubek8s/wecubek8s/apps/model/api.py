@@ -377,7 +377,7 @@ class Pod(BaseEntity):
                     w.stop()
                     break
         except Exception as e:
-            LOG.error('Error in watch stream for cluster %s: %s', cluster.get('name', cluster['id']), str(e))
+            LOG.warning('Error in watch stream for cluster %s: %s', cluster.get('name', cluster['id']), str(e))
             raise
         finally:
             w.stop()
