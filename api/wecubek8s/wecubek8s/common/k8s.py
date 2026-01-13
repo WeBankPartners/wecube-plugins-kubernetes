@@ -50,10 +50,10 @@ class Client:
         
         # 配置长时间 Watch 的超时参数，避免连接过早断开
         # 默认的 urllib3 超时是 5 分钟，会导致 Watch 连接频繁断开
-        # 设置连接超时10秒，读取超时300秒（5分钟）
+        # 设置连接超时10秒，读取超时3660秒（61分钟）
         try:
             # 创建自定义的 PoolManager，直接设置超时参数
-            timeout = urllib3.util.Timeout(connect=10.0, read=300.0)
+            timeout = urllib3.util.Timeout(connect=10.0, read=3660.0)
             
             # 替换 rest_client 的 pool_manager
             api_client.rest_client.pool_manager = urllib3.PoolManager(
@@ -72,7 +72,7 @@ class Client:
                     status_forcelist=(500, 502, 503, 504)
                 )
             )
-            LOG.info('Successfully configured urllib3 PoolManager with timeout: connect=10s, read=300s')
+            LOG.info('Successfully configured urllib3 PoolManager with timeout: connect=10s, read=3660s')
         except Exception as e:
             LOG.error('Failed to configure urllib3 timeout: %s', e)
             LOG.exception(e)

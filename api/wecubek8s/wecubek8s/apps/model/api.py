@@ -320,49 +320,30 @@ class Pod(BaseEntity):
                 results.append(self.to_dict(cluster, item))
         return results
 
-    def watch(self, cluster, event_stop, notify, start_resource_version=None):
-        """监听 Pod 事件，带心跳保活和资源版本续传
-        
-        Args:
-            cluster: 集群配置
-            event_stop: 停止事件标志
-            notify: 事件通知回调函数
-            start_resource_version: 起始资源版本（用于重连时续传，None 表示从当前版本开始）
-        
-        Returns:
-            最后一次收到的 resource_version，用于重连时续传
-        """
+    def watch(self, cluster, event_stop, notify):
         k8s_client = self.cluster_client(cluster)
         w = watch.Watch()
-        cluster_name = cluster.get('name', cluster['id'])
-        last_resource_version = start_resource_version
         
-        LOG.info('Starting watch for cluster %s', cluster_name)
+        LOG.info('Starting watch for cluster %s', cluster.get('name', cluster['id']))
         
         try:
-            # 如果没有提供起始版本，获取当前的 resource_version
-            if start_resource_version is None:
-                pod_list = k8s_client.core_client.list_pod_for_all_namespaces(limit=1)
-                last_resource_version = pod_list.metadata.resource_version
-                LOG.info('Starting watch from current resource_version: %s (skipping existing pods)', 
-                        last_resource_version)
-            else:
-                LOG.info('Resuming watch from saved resource_version: %s', start_resource_version)
+            # 获取当前的 resource_version，用于跳过现有的 Pod
+            # 只监听从此刻开始的新增和删除事件，不处理已存在的 Pod
+            pod_list = k8s_client.core_client.list_pod_for_all_namespaces(limit=1)
+            resource_version = pod_list.metadata.resource_version
+            LOG.info('Starting watch from resource_version: %s (skipping existing pods)', resource_version)
             
-            # 事件计数器（用于统计和日志）
-            event_count = 0
-            
-            # 设置超时为 2.5 分钟，主动在 API Server 超时前重连（避免 5 分钟超时）
-            # 策略：定期重连（每 2.5 分钟），重连时自动从 last_resource_version 续传
-            # timeout_seconds: API Server 端超时时间（150 秒 = 2.5 分钟）
+            # 设置超时为 1 小时，避免 Kubernetes Python client 默认超时（2-5分钟）导致连接断开
+            # 每小时自动重连一次，保持连接健康，符合 Kubernetes 官方最佳实践
+            # timeout_seconds: API Server 端超时时间
             # _request_timeout: HTTP 客户端（urllib3）超时时间 (connect_timeout, read_timeout)
             #   - connect_timeout=10: 连接超时 10 秒
-            #   - read_timeout=145: 读取超时 145 秒（略小于 timeout_seconds，客户端主动在服务器超时前结束）
+            #   - read_timeout=3660: 读取超时 61 分钟（略大于 timeout_seconds，确保 API Server 先超时）
             for event in w.stream(
                 k8s_client.core_client.list_pod_for_all_namespaces,
-                resource_version=last_resource_version,
-                timeout_seconds=150,  # 2.5 分钟
-                _request_timeout=(10, 145)  # 连接 10s，读取 145s（比 timeout_seconds 短 5 秒）
+                resource_version=resource_version,
+                timeout_seconds=3600,
+                _request_timeout=(10, 3660)
             ):
                 event_type = event.get('type')
                 pod_obj = event.get('object')
@@ -371,48 +352,33 @@ class Pod(BaseEntity):
                     LOG.warning('Received watch event without object: %s', event)
                     continue
                 
-                # 更新最后的 resource_version（用于重连续传）
-                if hasattr(pod_obj.metadata, 'resource_version') and pod_obj.metadata.resource_version:
-                    last_resource_version = pod_obj.metadata.resource_version
-                
                 pod_name = pod_obj.metadata.name if pod_obj.metadata else 'unknown'
                 pod_uid = pod_obj.metadata.uid if pod_obj.metadata else 'unknown'
-                event_count += 1
                 
-                LOG.debug('Watch event #%d: type=%s, pod=%s, uid=%s, rv=%s', 
-                         event_count, event_type, pod_name, pod_uid, last_resource_version)
+                LOG.debug('Watch event: type=%s, pod=%s, uid=%s', event_type, pod_name, pod_uid)
                 
                 if event_type == 'ADDED':
+                    # 触发 POD.ADDED 通知（移除时间过滤以避免丢失重连期间的事件）
+                    # CMDB 同步函数内部会处理去重（通过 code 字段查询已存在的 Pod）
                     LOG.info('Pod ADDED event detected: %s (uid: %s)', pod_name, pod_uid)
                     notify('POD.ADDED', cluster['id'], self.to_dict(cluster, pod_obj))
                 elif event_type == 'DELETED':
+                    # 触发 POD.DELETED 通知
                     LOG.info('Pod DELETED event detected: %s (uid: %s)', pod_name, pod_uid)
                     notify('POD.DELETED', cluster['id'], self.to_dict(cluster, pod_obj))
                 elif event_type == 'MODIFIED':
+                    # MODIFIED 事件不触发通知，避免噪音
                     LOG.debug('Pod MODIFIED event (not notifying): %s', pod_name)
-                elif event_type == 'ERROR':
-                    # 处理 ERROR 事件（通常表示资源版本过期或其他问题）
-                    LOG.warning('Watch ERROR event for pod %s: %s', pod_name, pod_obj)
-                    # 重置 resource_version，从当前版本重新开始
-                    last_resource_version = None
-                    raise Exception(f'Watch stream received ERROR event for pod {pod_name}')
                 else:
                     LOG.warning('Unknown watch event type: %s for pod %s', event_type, pod_name)
                 
-                # 检查是否需要停止
                 if event_stop.is_set():
-                    LOG.info('Watch stop requested for cluster %s', cluster_name)
+                    LOG.info('Watch stop requested for cluster %s', cluster.get('name', cluster['id']))
                     w.stop()
                     break
-            
-            # 正常结束（通常是超时重连）
-            LOG.info('Watch stream ended for cluster %s (processed %d events)', cluster_name, event_count)
-            return last_resource_version
-            
         except Exception as e:
-            LOG.error('Error in watch stream for cluster %s: %s', cluster_name, str(e))
-            # 返回最后的 resource_version，供重连时使用
+            LOG.error('Error in watch stream for cluster %s: %s', cluster.get('name', cluster['id']), str(e))
             raise
         finally:
             w.stop()
-            LOG.info('Watch stopped for cluster %s (last rv: %s)', cluster_name, last_resource_version)
+            LOG.info('Watch stopped for cluster %s', cluster.get('name', cluster['id']))

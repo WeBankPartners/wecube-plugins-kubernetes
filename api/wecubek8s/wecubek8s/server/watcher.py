@@ -1177,41 +1177,20 @@ def sync_pod_to_cmdb_on_added(pod_data):
             
             # 判断场景
             is_pre_created = (not existing_asset_id or existing_asset_id == '')
-            
-            # 【修复】提取 Pod UID，只比较 UID 而不是完整的 asset_id
-            # asset_id 格式：{cluster_id}_{pod_uid}
-            existing_pod_uid = existing_asset_id.split('_', 1)[-1] if existing_asset_id and '_' in existing_asset_id else existing_asset_id
-            current_pod_uid = pod_id.split('_', 1)[-1] if pod_id and '_' in pod_id else pod_id
-            
-            # 只有当 Pod UID 真正不同时，才认为是 Pod 重建（漂移）
-            is_pod_rebuilt = (existing_asset_id and existing_pod_uid != current_pod_uid)
-            
-            # cluster_id 变更但 Pod UID 相同（配置变更，不是漂移）
-            is_cluster_id_changed = (existing_asset_id and existing_asset_id != pod_id and existing_pod_uid == current_pod_uid)
+            is_pod_rebuilt = (existing_asset_id and existing_asset_id != pod_id)
             
             if is_pre_created:
                 LOG.info('✅ Scenario: PRE-CREATED by apply API (asset_id empty)')
                 LOG.info('   app_instance already set by apply API: %s', existing_app_instance or 'NULL')
                 LOG.info('   Will update: asset_id + host_resource (if changed)')
             elif is_pod_rebuilt:
-                LOG.info('🔄 Scenario: POD REBUILT (Pod UID changed - REAL DRIFT)')
-                LOG.info('   Old Pod UID: %s → New Pod UID: %s', existing_pod_uid, current_pod_uid)
-                LOG.info('   Old asset_id: %s', existing_asset_id)
-                LOG.info('   New asset_id: %s', pod_id)
+                LOG.info('🔄 Scenario: POD REBUILT (asset_id changed)')
+                LOG.info('   Old UID: %s → New UID: %s', existing_asset_id, pod_id)
                 LOG.info('   Will update: asset_id + host_resource (if changed)')
                 LOG.info('   Reason: pod restart, node eviction, or manual deletion')
                 LOG.info('   ⚠️  This is a POD DRIFT/REBUILD - notification WILL be sent')
-            elif is_cluster_id_changed:
-                LOG.info('✅ Scenario: CLUSTER_ID CHANGED (Pod UID unchanged - NOT drift)')
-                LOG.info('   Old asset_id: %s (cluster_id: %s)', existing_asset_id, existing_asset_id.rsplit('_', 1)[0] if '_' in existing_asset_id else 'N/A')
-                LOG.info('   New asset_id: %s (cluster_id: %s)', pod_id, pod_id.rsplit('_', 1)[0] if '_' in pod_id else 'N/A')
-                LOG.info('   Pod UID: %s (UNCHANGED)', current_pod_uid)
-                LOG.info('   Reason: cluster_id configuration changed in watcher or CMDB')
-                LOG.info('   Will update: asset_id only')
-                LOG.info('   ℹ️  This is NOT a Pod drift - NO notification will be sent')
             else:
-                LOG.info('✅ Scenario: POD EXISTS with same asset_id')
-                LOG.info('   Checking for host_resource changes...')
+                LOG.info('Scenario: POD EXISTS with same asset_id, checking for drift')
             
             # Pod 重建时，清理重复记录
             if is_pod_rebuilt:
@@ -1299,18 +1278,14 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 LOG.info('='*60)
                 
                 # 【修复】判断是否需要发送通知
-                # 只有真正的 Pod 重建（UID 变化）才发送通知，cluster_id 变化不发送
+                # 如果是 Pod 重建场景（asset_id 变化），需要发送通知
                 if is_pod_rebuilt:
-                    LOG.info('🔔 Pod rebuild detected (Pod UID changed) - this is a REAL drift scenario')
+                    LOG.info('🔔 Pod rebuild detected (asset_id changed) - this is a drift scenario')
                     LOG.info('   Will send WeCube notification')
                     # 返回 (guid, is_pod_drift=True) 标记需要发送通知
                     return (pod_guid, True)
-                elif is_cluster_id_changed:
-                    LOG.info('ℹ️  cluster_id changed but Pod UID unchanged - this is NOT drift')
-                    LOG.info('   Will NOT send WeCube notification')
-                    return (pod_guid, False)
                 else:
-                    # 正常预创建更新场景或 asset_id 完全相同
+                    # 正常预创建更新场景，不需要发送通知
                     return (pod_guid, False)
             except Exception as update_err:
                 # 更新失败，可能是因为记录在查询后被 POD.DELETED 删除了（时序竞态）
@@ -2105,7 +2080,7 @@ def notify_pod(event, cluster_id, data):
 
 
 def watch_pod(cluster, event_stop):
-    """监听单个集群的 Pod 事件（带指数退避重试和资源版本续传）
+    """监听单个集群的 Pod 事件（带指数退避重试）
     
     多 watcher 安全性说明：
     - 多个 watcher 同时监听同一集群是安全的（通过 CMDB 唯一性约束 + 幂等操作保证）
@@ -2123,11 +2098,6 @@ def watch_pod(cluster, event_stop):
     - POD.DELETED：从 CMDB 删除旧 Pod 记录
     - POD.ADDED：重试查询（等待 apply API），找不到则创建新记录（从 StatefulSet 继承 app_instance）
     
-    重连和事件续传：
-    - Watch 连接会定期超时（1小时）或被中断（网络问题）
-    - 重连时会使用上次的 resourceVersion，确保不丢失事件
-    - 心跳机制（每3分钟）保持连接活跃，避免 4 分钟超时
-    
     建议：
     - 生产环境可以运行多个 watcher 实例（已确保安全性和一致性）
     - 建议 2-3 个实例，提供高可用性同时避免过多日志
@@ -2135,26 +2105,14 @@ def watch_pod(cluster, event_stop):
     """
     retry_delay = 0.5  # 初始延迟 0.5 秒
     max_retry_delay = 60  # 最大延迟 60 秒
-    last_resource_version = None  # 保存最后的资源版本，用于重连续传
     
     cluster_name = cluster.get('name', cluster['id'])
     LOG.info('Starting pod watcher for cluster: %s', cluster_name)
     
     while not event_stop.is_set():
         try:
-            # 调用 watch 方法，传入上次的 resourceVersion（如果有的话）
-            # 返回最后的 resourceVersion 供下次重连使用
-            last_resource_version = api.Pod().watch(
-                cluster, 
-                event_stop, 
-                notify_pod,
-                start_resource_version=last_resource_version
-            )
-            
-            # watch 正常结束（通常是超时），记录信息并准备重连
-            LOG.info('Watch ended normally for cluster %s, reconnecting...', cluster_name)
-            retry_delay = 0.5  # 正常结束后重置延迟
-            
+            api.Pod().watch(cluster, event_stop, notify_pod)
+            retry_delay = 0.5  # 成功后重置延迟
         except Exception as e:
             # 区分预期内的连接中断（ProtocolError）和真正的错误
             is_connection_error = isinstance(e, (
@@ -2165,17 +2123,12 @@ def watch_pod(cluster, event_stop):
             
             if is_connection_error:
                 # 连接中断是正常现象（超时重连），只记录 WARNING 级别
-                LOG.warning('Watch connection interrupted for cluster %s: %s (auto-retrying with rv=%s)', 
-                           cluster_name, str(e)[:150], last_resource_version)
+                LOG.warning('Watch connection interrupted for cluster %s: %s (auto-retrying)', 
+                           cluster_name, str(e)[:150])  # 只输出前150个字符
             else:
                 # 其他异常记录完整的错误信息
-                LOG.error('Exception raised while watching pod from cluster %s (rv=%s)', 
-                         cluster_name, last_resource_version)
+                LOG.error('Exception raised while watching pod from cluster %s', cluster_name)
                 LOG.exception(e)
-                # 严重错误时重置 resourceVersion，从当前版本重新开始
-                if 'resource version' in str(e).lower() or 'too old' in str(e).lower():
-                    LOG.warning('Resource version expired for cluster %s, resetting...', cluster_name)
-                    last_resource_version = None
             
             # 指数退避：0.5s -> 1s -> 2s -> 4s -> 8s -> ... -> 60s
             if not event_stop.is_set():
