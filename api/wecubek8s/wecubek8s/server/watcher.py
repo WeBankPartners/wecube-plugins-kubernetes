@@ -1177,20 +1177,41 @@ def sync_pod_to_cmdb_on_added(pod_data):
             
             # 判断场景
             is_pre_created = (not existing_asset_id or existing_asset_id == '')
-            is_pod_rebuilt = (existing_asset_id and existing_asset_id != pod_id)
+            
+            # 【修复】提取 Pod UID，只比较 UID 而不是完整的 asset_id
+            # asset_id 格式：{cluster_id}_{pod_uid}
+            existing_pod_uid = existing_asset_id.split('_', 1)[-1] if existing_asset_id and '_' in existing_asset_id else existing_asset_id
+            current_pod_uid = pod_id.split('_', 1)[-1] if pod_id and '_' in pod_id else pod_id
+            
+            # 只有当 Pod UID 真正不同时，才认为是 Pod 重建（漂移）
+            is_pod_rebuilt = (existing_asset_id and existing_pod_uid != current_pod_uid)
+            
+            # cluster_id 变更但 Pod UID 相同（配置变更，不是漂移）
+            is_cluster_id_changed = (existing_asset_id and existing_asset_id != pod_id and existing_pod_uid == current_pod_uid)
             
             if is_pre_created:
                 LOG.info('✅ Scenario: PRE-CREATED by apply API (asset_id empty)')
                 LOG.info('   app_instance already set by apply API: %s', existing_app_instance or 'NULL')
                 LOG.info('   Will update: asset_id + host_resource (if changed)')
             elif is_pod_rebuilt:
-                LOG.info('🔄 Scenario: POD REBUILT (asset_id changed)')
-                LOG.info('   Old UID: %s → New UID: %s', existing_asset_id, pod_id)
+                LOG.info('🔄 Scenario: POD REBUILT (Pod UID changed - REAL DRIFT)')
+                LOG.info('   Old Pod UID: %s → New Pod UID: %s', existing_pod_uid, current_pod_uid)
+                LOG.info('   Old asset_id: %s', existing_asset_id)
+                LOG.info('   New asset_id: %s', pod_id)
                 LOG.info('   Will update: asset_id + host_resource (if changed)')
                 LOG.info('   Reason: pod restart, node eviction, or manual deletion')
                 LOG.info('   ⚠️  This is a POD DRIFT/REBUILD - notification WILL be sent')
+            elif is_cluster_id_changed:
+                LOG.info('✅ Scenario: CLUSTER_ID CHANGED (Pod UID unchanged - NOT drift)')
+                LOG.info('   Old asset_id: %s (cluster_id: %s)', existing_asset_id, existing_asset_id.rsplit('_', 1)[0] if '_' in existing_asset_id else 'N/A')
+                LOG.info('   New asset_id: %s (cluster_id: %s)', pod_id, pod_id.rsplit('_', 1)[0] if '_' in pod_id else 'N/A')
+                LOG.info('   Pod UID: %s (UNCHANGED)', current_pod_uid)
+                LOG.info('   Reason: cluster_id configuration changed in watcher or CMDB')
+                LOG.info('   Will update: asset_id only')
+                LOG.info('   ℹ️  This is NOT a Pod drift - NO notification will be sent')
             else:
-                LOG.info('Scenario: POD EXISTS with same asset_id, checking for drift')
+                LOG.info('✅ Scenario: POD EXISTS with same asset_id')
+                LOG.info('   Checking for host_resource changes...')
             
             # Pod 重建时，清理重复记录
             if is_pod_rebuilt:
@@ -1278,14 +1299,18 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 LOG.info('='*60)
                 
                 # 【修复】判断是否需要发送通知
-                # 如果是 Pod 重建场景（asset_id 变化），需要发送通知
+                # 只有真正的 Pod 重建（UID 变化）才发送通知，cluster_id 变化不发送
                 if is_pod_rebuilt:
-                    LOG.info('🔔 Pod rebuild detected (asset_id changed) - this is a drift scenario')
+                    LOG.info('🔔 Pod rebuild detected (Pod UID changed) - this is a REAL drift scenario')
                     LOG.info('   Will send WeCube notification')
                     # 返回 (guid, is_pod_drift=True) 标记需要发送通知
                     return (pod_guid, True)
+                elif is_cluster_id_changed:
+                    LOG.info('ℹ️  cluster_id changed but Pod UID unchanged - this is NOT drift')
+                    LOG.info('   Will NOT send WeCube notification')
+                    return (pod_guid, False)
                 else:
-                    # 正常预创建更新场景，不需要发送通知
+                    # 正常预创建更新场景或 asset_id 完全相同
                     return (pod_guid, False)
             except Exception as update_err:
                 # 更新失败，可能是因为记录在查询后被 POD.DELETED 删除了（时序竞态）
