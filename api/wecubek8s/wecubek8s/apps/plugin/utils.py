@@ -349,7 +349,7 @@ def convert_container(images, envs, vols, resource_limit, deploy_script=None):
     container_template = {
         'name': '',
         'image': '',
-        'imagePullPolicy': 'IfNotPresent',
+        'imagePullPolicy': 'Always',
         'ports': [],
         'env': envs,
         'volumeMounts': vols,
