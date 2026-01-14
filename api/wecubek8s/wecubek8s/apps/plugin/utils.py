@@ -172,6 +172,21 @@ def convert_service_port(items):
                 if field in ('port', 'targetPort', 'nodePort'):
                     ret[field] = int(ret[field])
         rets.append(ret)
+    
+    # Kubernetes 要求：当 Service 有多个端口时，每个端口都必须有唯一的 name
+    # 自动为缺失 name 的端口生成名称
+    if len(rets) > 1:
+        for idx, port_config in enumerate(rets):
+            if 'name' not in port_config or not port_config['name']:
+                # 生成端口名称：协议-端口号（如 tcp-8080）
+                protocol = port_config.get('protocol', 'TCP').lower()
+                port = port_config.get('port', idx)
+                port_name = f'{protocol}-{port}'
+                # Kubernetes 要求端口名称最长 15 个字符
+                if len(port_name) > 15:
+                    port_name = f'port-{idx}'
+                port_config['name'] = port_name
+    
     return rets
 
 

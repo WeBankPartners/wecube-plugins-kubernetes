@@ -937,11 +937,11 @@ class StatefulSet:
 
     def _ensure_headless_service(self, k8s_client, data, resource_template):
         """确保 StatefulSet 关联的 Headless Service 存在"""
-        # 【修复】如果未指定 serviceName，使用规范化后的 name（移除端口号后缀）
-        if data.get('serviceName'):
-            service_name = data['serviceName']
-        else:
-            service_name = api_utils.normalize_statefulset_name(data['name'])
+        # 【修复】无论用户是否指定 serviceName，都要规范化（移除端口号后缀）
+        # 优先使用用户提供的 serviceName，其次使用 data['name']
+        raw_name = data.get('serviceName', data['name'])
+        # 规范化名称：移除可能的端口号后缀（如 :8080 或 -8080）
+        service_name = api_utils.normalize_statefulset_name(raw_name)
         # Service 名称必须符合 DNS-1035 规范（比 DNS-1123 更严格）
         service_name = api_utils.escape_service_name(service_name)
         namespace = data['namespace']
@@ -966,10 +966,19 @@ class StatefulSet:
             # 从 image_port 推断
             if data.get('image_port'):
                 container_ports = api_utils.convert_pod_ports(data.get('image_port', ''))
-                for port_info in container_ports:
+                for idx, port_info in enumerate(container_ports):
                     port = port_info.get('containerPort')
                     if port:
+                        protocol = port_info.get('protocol', 'TCP').lower()
+                        # 生成端口名称：协议-端口号（如 tcp-8080）
+                        # Kubernetes 要求端口名称最长 15 个字符，必须是小写字母、数字和 '-'
+                        port_name = f'{protocol}-{port}'
+                        # 如果名称太长，使用索引作为后缀（如 port-0, port-1）
+                        if len(port_name) > 15:
+                            port_name = f'port-{idx}'
+                        
                         service_ports.append({
+                            'name': port_name,
                             'port': port,
                             'targetPort': port,
                             'protocol': port_info.get('protocol', 'TCP')
@@ -1022,11 +1031,11 @@ class StatefulSet:
         这个 Service 用于提供 ClusterIP 给下游流程使用
         """
         # 负载均衡 Service 名称：原名称 + '-lb' 后缀
-        # 【修复】如果未指定 serviceName，使用规范化后的 name（移除端口号后缀）
-        if data.get('serviceName'):
-            base_service_name = data['serviceName']
-        else:
-            base_service_name = api_utils.normalize_statefulset_name(data['name'])
+        # 【修复】无论用户是否指定 serviceName，都要规范化（移除端口号后缀）
+        # 优先使用用户提供的 serviceName，其次使用 data['name']
+        raw_name = data.get('serviceName', data['name'])
+        # 规范化名称：移除可能的端口号后缀（如 :8080 或 -8080）
+        base_service_name = api_utils.normalize_statefulset_name(raw_name)
         lb_service_name = base_service_name + '-lb'
         lb_service_name = api_utils.escape_service_name(lb_service_name)
         namespace = data['namespace']
@@ -1527,11 +1536,9 @@ class StatefulSet:
         port_str = ""
         
         # 1. 尝试获取负载均衡 Service（带 -lb 后缀）
-        # 【修复】如果未指定 serviceName，使用规范化后的 name（移除端口号后缀）
-        if data.get('serviceName'):
-            base_service_name = data['serviceName']
-        else:
-            base_service_name = normalized_name  # 使用前面已经规范化的名称
+        # 【修复】无论用户是否指定 serviceName，都要规范化（移除端口号后缀）
+        raw_name = data.get('serviceName', data['name'])
+        base_service_name = api_utils.normalize_statefulset_name(raw_name)
         lb_service_name = api_utils.escape_service_name(base_service_name + '-lb')
         lb_svc = k8s_client.get_service(lb_service_name, data['namespace'])
         
@@ -1555,10 +1562,19 @@ class StatefulSet:
                 service_ports = api_utils.convert_service_port(data['servicePorts'])
             elif data.get('image_port'):
                 container_ports = api_utils.convert_pod_ports(data.get('image_port', ''))
-                for port_info in container_ports:
+                for idx, port_info in enumerate(container_ports):
                     port = port_info.get('containerPort')
                     if port:
+                        protocol = port_info.get('protocol', 'TCP').lower()
+                        # 生成端口名称：协议-端口号（如 tcp-8080）
+                        # Kubernetes 要求端口名称最长 15 个字符，必须是小写字母、数字和 '-'
+                        port_name = f'{protocol}-{port}'
+                        # 如果名称太长，使用索引作为后缀（如 port-0, port-1）
+                        if len(port_name) > 15:
+                            port_name = f'port-{idx}'
+                        
                         service_ports.append({
+                            'name': port_name,
                             'port': port,
                             'targetPort': port,
                             'protocol': port_info.get('protocol', 'TCP')
@@ -2134,11 +2150,9 @@ class StatefulSet:
             LOG.warning('StatefulSet %s not found in namespace: %s', resource_name, namespace)
         
         # 删除关联的 Headless Service（如果存在）
-        # 【修复】如果未指定 serviceName，使用规范化后的 name（移除端口号后缀）
-        if data.get('serviceName'):
-            base_service_name = data['serviceName']
-        else:
-            base_service_name = normalized_name  # 使用前面已经规范化的名称
+        # 【修复】无论用户是否指定 serviceName，都要规范化（移除端口号后缀）
+        raw_name = data.get('serviceName', data['name'])
+        base_service_name = api_utils.normalize_statefulset_name(raw_name)
         service_name = api_utils.escape_service_name(base_service_name)
         exists_service = k8s_client.get_service(service_name, namespace)
         if exists_service is not None:
