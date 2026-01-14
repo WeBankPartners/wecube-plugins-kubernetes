@@ -716,7 +716,9 @@ class StatefulSet:
         # 所以这里使用 escape_service_name 而不是 escape_name
         # 【关键】限制为 50 字符，预留空间给 Kubernetes 自动添加的后缀（controller-revision-hash 等）
         # 否则会导致 "metadata.labels: Invalid value: must be no more than 63 characters" 错误
-        resource_name = api_utils.escape_service_name(data['name'], max_length=50)
+        # 【修复】自动移除 name 中可能包含的端口号后缀，避免因端口变化导致创建多个 StatefulSet
+        normalized_name = api_utils.normalize_statefulset_name(data['name'])
+        resource_name = api_utils.escape_service_name(normalized_name, max_length=50)
         resource_namespace = data['namespace']
         resource_tags = api_utils.convert_tag(data.get('tags', []))
         resource_tags[const.Tag.STATEFULSET_ID_TAG] = resource_id
@@ -935,15 +937,20 @@ class StatefulSet:
 
     def _ensure_headless_service(self, k8s_client, data, resource_template):
         """确保 StatefulSet 关联的 Headless Service 存在"""
-        service_name = data.get('serviceName', data['name'])
+        # 【修复】如果未指定 serviceName，使用规范化后的 name（移除端口号后缀）
+        if data.get('serviceName'):
+            service_name = data['serviceName']
+        else:
+            service_name = api_utils.normalize_statefulset_name(data['name'])
         # Service 名称必须符合 DNS-1035 规范（比 DNS-1123 更严格）
         service_name = api_utils.escape_service_name(service_name)
         namespace = data['namespace']
         
         # 获取 Pod 标签作为 Service selector
         # 注意：标签值必须与创建 StatefulSet 时使用的值保持一致
-        # StatefulSet 的 resource_name 是通过 escape_service_name(data['name'], max_length=50) 生成的
-        resource_name = api_utils.escape_service_name(data['name'], max_length=50)
+        # StatefulSet 的 resource_name 是通过 normalize + escape_service_name 生成的
+        normalized_name = api_utils.normalize_statefulset_name(data['name'])
+        resource_name = api_utils.escape_service_name(normalized_name, max_length=50)
         pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
         # 使用 resource_name 作为标签值，与创建 StatefulSet 时保持一致
         pod_spec_tags[const.Tag.POD_AUTO_TAG] = resource_name
@@ -1015,7 +1022,12 @@ class StatefulSet:
         这个 Service 用于提供 ClusterIP 给下游流程使用
         """
         # 负载均衡 Service 名称：原名称 + '-lb' 后缀
-        lb_service_name = data.get('serviceName', data['name']) + '-lb'
+        # 【修复】如果未指定 serviceName，使用规范化后的 name（移除端口号后缀）
+        if data.get('serviceName'):
+            base_service_name = data['serviceName']
+        else:
+            base_service_name = api_utils.normalize_statefulset_name(data['name'])
+        lb_service_name = base_service_name + '-lb'
         lb_service_name = api_utils.escape_service_name(lb_service_name)
         namespace = data['namespace']
         
@@ -1413,7 +1425,9 @@ class StatefulSet:
         k8s_client.ensure_namespace(data['namespace'])
         # StatefulSet 的名称使用 escape_service_name（不允许点号），与 to_resource 方法保持一致
         # 【关键】限制为 50 字符，避免 Kubernetes 添加后缀后超过 63 字符限制
-        resource_name = api_utils.escape_service_name(data['name'], max_length=50)
+        # 【修复】自动移除 name 中可能包含的端口号后缀，避免因端口变化导致创建多个 StatefulSet
+        normalized_name = api_utils.normalize_statefulset_name(data['name'])
+        resource_name = api_utils.escape_service_name(normalized_name, max_length=50)
         
         # 生成 StatefulSet 资源模板
         resource_template = self.to_resource(k8s_client, data, cluster_info)
@@ -1513,7 +1527,12 @@ class StatefulSet:
         port_str = ""
         
         # 1. 尝试获取负载均衡 Service（带 -lb 后缀）
-        lb_service_name = api_utils.escape_service_name(data.get('serviceName', data['name']) + '-lb')
+        # 【修复】如果未指定 serviceName，使用规范化后的 name（移除端口号后缀）
+        if data.get('serviceName'):
+            base_service_name = data['serviceName']
+        else:
+            base_service_name = normalized_name  # 使用前面已经规范化的名称
+        lb_service_name = api_utils.escape_service_name(base_service_name + '-lb')
         lb_svc = k8s_client.get_service(lb_service_name, data['namespace'])
         
         if lb_svc and lb_svc.spec.cluster_ip and lb_svc.spec.cluster_ip != 'None':
@@ -1994,7 +2013,9 @@ class StatefulSet:
         k8s_client = k8s.Client(k8s_auth)
         # StatefulSet 的名称使用 escape_service_name（与创建时保持一致）
         # 【关键】限制为 50 字符，避免 Kubernetes 添加后缀后超过 63 字符限制
-        resource_name = api_utils.escape_service_name(data['name'], max_length=50)
+        # 【修复】自动移除 name 中可能包含的端口号后缀，避免因端口变化导致查询失败
+        normalized_name = api_utils.normalize_statefulset_name(data['name'])
+        resource_name = api_utils.escape_service_name(normalized_name, max_length=50)
         correlation_id = data['correlation_id']
         
         # 查询 Pod 列表，使用 resource_name 作为标签值（与创建时保持一致）
@@ -2069,7 +2090,9 @@ class StatefulSet:
         
         # 使用与 apply 时一致的名称转换方式（escape_service_name）
         # 【关键】限制为 50 字符，避免 Kubernetes 添加后缀后超过 63 字符限制
-        resource_name = api_utils.escape_service_name(data['name'], max_length=50)
+        # 【修复】自动移除 name 中可能包含的端口号后缀，确保能正确删除资源
+        normalized_name = api_utils.normalize_statefulset_name(data['name'])
+        resource_name = api_utils.escape_service_name(normalized_name, max_length=50)
         
         # 获取 correlation_id
         correlation_id = data.get('correlation_id', '')
@@ -2111,7 +2134,12 @@ class StatefulSet:
             LOG.warning('StatefulSet %s not found in namespace: %s', resource_name, namespace)
         
         # 删除关联的 Headless Service（如果存在）
-        service_name = api_utils.escape_service_name(data.get('serviceName', data['name']))
+        # 【修复】如果未指定 serviceName，使用规范化后的 name（移除端口号后缀）
+        if data.get('serviceName'):
+            base_service_name = data['serviceName']
+        else:
+            base_service_name = normalized_name  # 使用前面已经规范化的名称
+        service_name = api_utils.escape_service_name(base_service_name)
         exists_service = k8s_client.get_service(service_name, namespace)
         if exists_service is not None:
             LOG.info('Deleting Headless Service: %s in namespace: %s', service_name, namespace)
@@ -2121,7 +2149,8 @@ class StatefulSet:
             LOG.debug('Headless Service %s not found in namespace: %s', service_name, namespace)
         
         # 删除关联的负载均衡 Service（带 -lb 后缀，如果存在）
-        lb_service_name = api_utils.escape_service_name(data.get('serviceName', data['name']) + '-lb')
+        # 【修复】使用与 Headless Service 相同的 base_service_name
+        lb_service_name = api_utils.escape_service_name(base_service_name + '-lb')
         exists_lb_service = k8s_client.get_service(lb_service_name, namespace)
         if exists_lb_service is not None:
             LOG.info('Deleting Load Balancer Service: %s in namespace: %s', lb_service_name, namespace)
