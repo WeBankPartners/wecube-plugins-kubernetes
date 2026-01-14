@@ -576,6 +576,8 @@ class Deployment:
             k8s_client.create_service(namespace, service_body)
             LOG.info('Created Service %s/%s for Deployment %s', namespace, service_name, data['name'])
         else:
+            # 使用 replace 而不是 patch，需要保留 resourceVersion
+            service_body['metadata']['resourceVersion'] = exists_service.metadata.resource_version
             k8s_client.update_service(service_name, namespace, service_body)
             LOG.info('Updated Service %s/%s for Deployment %s', namespace, service_name, data['name'])
 
@@ -1025,6 +1027,8 @@ class StatefulSet:
             LOG.info('Created Headless Service %s/%s for StatefulSet %s/%s',
                      namespace, service_name, namespace, data['name'])
         else:
+            # 使用 replace 而不是 patch，需要保留 resourceVersion
+            service_template['metadata']['resourceVersion'] = exists_service.metadata.resource_version
             k8s_client.update_service(service_name, namespace, service_template)
             LOG.info('Updated Headless Service %s/%s for StatefulSet %s/%s',
                      namespace, service_name, namespace, data['name'])
@@ -1072,6 +1076,8 @@ class StatefulSet:
             LOG.info('Created LoadBalancer Service %s/%s for StatefulSet %s/%s',
                      namespace, lb_service_name, namespace, data['name'])
         else:
+            # 使用 replace 而不是 patch，需要保留 resourceVersion
+            lb_service_template['metadata']['resourceVersion'] = exists_lb_service.metadata.resource_version
             k8s_client.update_service(lb_service_name, namespace, lb_service_template)
             LOG.info('Updated LoadBalancer Service %s/%s for StatefulSet %s/%s',
                      namespace, lb_service_name, namespace, data['name'])
@@ -1539,71 +1545,59 @@ class StatefulSet:
         cluster_ip = None
         port_str = ""
         
-        # 1. 尝试获取负载均衡 Service（带 -lb 后缀）
-        # 【修复】无论用户是否指定 serviceName，都要规范化（移除端口号后缀）
-        raw_name = data.get('serviceName', data['name'])
-        base_service_name = api_utils.normalize_statefulset_name(raw_name)
-        lb_service_name = api_utils.escape_service_name(base_service_name + '-lb')
-        lb_svc = k8s_client.get_service(lb_service_name, data['namespace'])
+        # 【修复】无论 LoadBalancer Service 是否存在，都要确保它被创建/更新
+        # 这样端口变更时才能正确更新 Service，避免只在首次创建时设置端口
         
-        if lb_svc and lb_svc.spec.cluster_ip and lb_svc.spec.cluster_ip != 'None':
-            # 使用负载均衡 Service 的 ClusterIP
-            cluster_ip = lb_svc.spec.cluster_ip
+        # 1. 准备 Pod 标签和端口信息
+        pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
+        # 使用 resource_name（转换后的小写名称）作为标签值，与创建 StatefulSet 时保持一致
+        pod_spec_tags[const.Tag.POD_AUTO_TAG] = resource_name
+        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = resource_name
+        
+        # 2. 获取 Service 端口
+        service_ports = []
+        if data.get('servicePorts'):
+            service_ports = api_utils.convert_service_port(data['servicePorts'])
+        elif data.get('image_port'):
+            container_ports = api_utils.convert_pod_ports(data.get('image_port', ''))
+            for idx, port_info in enumerate(container_ports):
+                port = port_info.get('containerPort')
+                if port:
+                    protocol = port_info.get('protocol', 'TCP').lower()
+                    # 生成端口名称：协议-端口号（如 tcp-8080）
+                    # Kubernetes 要求端口名称最长 15 个字符，必须是小写字母、数字和 '-'
+                    port_name = f'{protocol}-{port}'
+                    # 如果名称太长，使用索引作为后缀（如 port-0, port-1）
+                    if len(port_name) > 15:
+                        port_name = f'port-{idx}'
+                    
+                    service_ports.append({
+                        'name': port_name,
+                        'port': port,
+                        'targetPort': port,
+                        'protocol': port_info.get('protocol', 'TCP')
+                    })
+        
+        if not service_ports:
+            service_ports = [{
+                'name': 'default',
+                'port': 80,
+                'targetPort': 80,
+                'protocol': 'TCP'
+            }]
+        
+        # 3. 确保负载均衡 Service 存在并更新（与 Headless Service 保持一致的逻辑）
+        lb_service_name = self._ensure_loadbalancer_service(k8s_client, data, service_ports, pod_spec_tags)
+        
+        # 4. 获取更新后的 Service 信息
+        lb_svc = k8s_client.get_service(lb_service_name, data['namespace'])
+        if lb_svc:
+            cluster_ip = lb_svc.spec.cluster_ip if lb_svc.spec.cluster_ip else None
+            if cluster_ip == 'None':
+                cluster_ip = None
             if getattr(lb_svc.spec, 'ports', None) and len(lb_svc.spec.ports) > 0:
                 port_str = str(lb_svc.spec.ports[0].port)
-            LOG.info('Using LoadBalancer Service %s ClusterIP: %s', lb_service_name, cluster_ip)
-        else:
-            # 2. 如果没有负载均衡 Service，尝试创建一个
-            # 先获取 Pod 标签和端口信息
-            pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
-            # 使用 resource_name（转换后的小写名称）作为标签值，与创建 StatefulSet 时保持一致
-            pod_spec_tags[const.Tag.POD_AUTO_TAG] = resource_name
-            pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = resource_name
-            
-            # 获取 Service 端口
-            service_ports = []
-            if data.get('servicePorts'):
-                service_ports = api_utils.convert_service_port(data['servicePorts'])
-            elif data.get('image_port'):
-                container_ports = api_utils.convert_pod_ports(data.get('image_port', ''))
-                for idx, port_info in enumerate(container_ports):
-                    port = port_info.get('containerPort')
-                    if port:
-                        protocol = port_info.get('protocol', 'TCP').lower()
-                        # 生成端口名称：协议-端口号（如 tcp-8080）
-                        # Kubernetes 要求端口名称最长 15 个字符，必须是小写字母、数字和 '-'
-                        port_name = f'{protocol}-{port}'
-                        # 如果名称太长，使用索引作为后缀（如 port-0, port-1）
-                        if len(port_name) > 15:
-                            port_name = f'port-{idx}'
-                        
-                        service_ports.append({
-                            'name': port_name,
-                            'port': port,
-                            'targetPort': port,
-                            'protocol': port_info.get('protocol', 'TCP')
-                        })
-            
-            if not service_ports:
-                service_ports = [{
-                    'name': 'default',
-                    'port': 80,
-                    'targetPort': 80,
-                    'protocol': 'TCP'
-                }]
-            
-            # 创建负载均衡 Service
-            lb_service_name = self._ensure_loadbalancer_service(k8s_client, data, service_ports, pod_spec_tags)
-            
-            # 重新获取创建的 Service
-            lb_svc = k8s_client.get_service(lb_service_name, data['namespace'])
-            if lb_svc:
-                cluster_ip = lb_svc.spec.cluster_ip if lb_svc.spec.cluster_ip else None
-                if cluster_ip == 'None':
-                    cluster_ip = None
-                if getattr(lb_svc.spec, 'ports', None) and len(lb_svc.spec.ports) > 0:
-                    port_str = str(lb_svc.spec.ports[0].port)
-                LOG.info('Created and using LoadBalancer Service %s ClusterIP: %s', lb_service_name, cluster_ip)
+            LOG.info('Using LoadBalancer Service %s ClusterIP: %s, Port: %s', lb_service_name, cluster_ip, port_str)
         
         # 3. 如果仍然没有 ClusterIP，记录警告
         if not cluster_ip:
@@ -2689,8 +2683,10 @@ class Service:
         if not exists_resource:
             exists_resource = k8s_client.create_service(data['namespace'], self.to_resource(k8s_client, data))
         else:
-            exists_resource = k8s_client.update_service(resource_name, data['namespace'],
-                                                        self.to_resource(k8s_client, data))
+            # 使用 replace 而不是 patch，需要保留 resourceVersion
+            resource_template = self.to_resource(k8s_client, data)
+            resource_template['metadata']['resourceVersion'] = exists_resource.metadata.resource_version
+            exists_resource = k8s_client.update_service(resource_name, data['namespace'], resource_template)
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
         
         # Extract clusterIP and ports from the created/updated service
@@ -3136,6 +3132,8 @@ class ClusterInterconnect:
         # 创建或更新Service
         existing_service = local_client.get_service(service_name, local_namespace)
         if existing_service:
+            # 使用 replace 而不是 patch，需要保留 resourceVersion
+            service_body['metadata']['resourceVersion'] = existing_service.metadata.resource_version
             local_client.update_service(service_name, local_namespace, service_body)
         else:
             local_client.create_service(local_namespace, service_body)

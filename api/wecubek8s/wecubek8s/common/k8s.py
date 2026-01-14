@@ -229,7 +229,9 @@ class Client:
         return self._action(self.core_client, 'create_namespaced_service', namespace, body, **kwargs)
 
     def update_service(self, name, namespace, body, **kwargs):
-        return self._action(self.core_client, 'patch_namespaced_service', name, namespace, body, **kwargs)
+        # 使用 replace 而不是 patch，完全替换 Service 定义
+        # 这样可以避免 patch 合并时保留旧字段的问题（如端口列表合并）
+        return self._action(self.core_client, 'replace_namespaced_service', name, namespace, body, **kwargs)
 
     def delete_service(self, name, namespace, **kwargs):
         return self._action(self.core_client, 'delete_namespaced_service', name, namespace, **kwargs)
