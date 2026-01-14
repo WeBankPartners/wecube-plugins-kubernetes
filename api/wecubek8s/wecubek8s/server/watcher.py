@@ -99,7 +99,7 @@ _expected_pod_window = 300  # 预期 Pod 缓存时间窗口：5分钟（Stateful
 # 时间窗口：60秒（足够长以覆盖大多数 Pod 漂移场景，StatefulSet 通常在 Pod 删除后几秒内重建）
 _recently_deleted_pods = {}
 _recently_deleted_pods_lock = threading.Lock()
-_recently_deleted_pods_window = 60  # 最近删除 Pod 缓存时间窗口：60秒
+_recently_deleted_pods_window = 40  # 最近删除 Pod 缓存时间窗口：60秒
 
 
 def get_wecube_client():
