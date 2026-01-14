@@ -2098,22 +2098,33 @@ def watch_pod(cluster, event_stop):
     - POD.DELETED：从 CMDB 删除旧 Pod 记录
     - POD.ADDED：重试查询（等待 apply API），找不到则创建新记录（从 StatefulSet 继承 app_instance）
     
+    重连策略：
+    - 稳定连接超时断开（如 TCP 4 分钟超时）：快速重连（0.5 秒）
+    - 持续连接失败（如 API Server 故障）：指数退避（最高 60 秒）
+    - 稳定运行阈值：60 秒（超过此时间断开视为正常超时，非故障）
+    
     建议：
     - 生产环境可以运行多个 watcher 实例（已确保安全性和一致性）
     - 建议 2-3 个实例，提供高可用性同时避免过多日志
     - 如需更高可用，使用 Kubernetes Deployment + HPA
     """
-    retry_delay = 0.5  # 初始延迟 0.5 秒
+    retry_delay = 0.1  # 初始延迟 0.1 秒
     max_retry_delay = 60  # 最大延迟 60 秒
+    stable_threshold = 60  # 稳定运行阈值：60 秒（超过此时间断开视为正常超时，非故障）
     
     cluster_name = cluster.get('name', cluster['id'])
     LOG.info('Starting pod watcher for cluster: %s', cluster_name)
     
     while not event_stop.is_set():
+        start_time = time.time()  # 记录连接开始时间
+        
         try:
             api.Pod().watch(cluster, event_stop, notify_pod)
-            retry_delay = 0.5  # 成功后重置延迟
+            retry_delay = 0.1  # 成功后重置延迟
         except Exception as e:
+            # 计算连接持续时间
+            connection_duration = time.time() - start_time
+            
             # 区分预期内的连接中断（ProtocolError）和真正的错误
             is_connection_error = isinstance(e, (
                 urllib3.exceptions.ProtocolError,
@@ -2123,14 +2134,22 @@ def watch_pod(cluster, event_stop):
             
             if is_connection_error:
                 # 连接中断是正常现象（超时重连），只记录 WARNING 级别
-                LOG.warning('Watch connection interrupted for cluster %s: %s (auto-retrying)', 
-                           cluster_name, str(e)[:150])  # 只输出前150个字符
+                LOG.warning('Watch connection interrupted for cluster %s after %.1fs: %s (auto-retrying)', 
+                           cluster_name, connection_duration, str(e)[:150])  # 只输出前150个字符
+                
+                # 如果连接稳定运行超过阈值，说明不是持续失败，重置延迟
+                if connection_duration >= stable_threshold:
+                    LOG.info('Connection was stable for %.1fs (>= %ds threshold), resetting retry delay to 0.1s', 
+                            connection_duration, stable_threshold)
+                    retry_delay = 0.1
             else:
                 # 其他异常记录完整的错误信息
-                LOG.error('Exception raised while watching pod from cluster %s', cluster_name)
+                LOG.error('Exception raised while watching pod from cluster %s after %.1fs', 
+                         cluster_name, connection_duration)
                 LOG.exception(e)
             
             # 指数退避：0.5s -> 1s -> 2s -> 4s -> 8s -> ... -> 60s
+            # 但如果上面检测到稳定连接，retry_delay 已被重置为 0.5s
             if not event_stop.is_set():
                 LOG.info('Retrying in %s seconds...', retry_delay)
                 time.sleep(retry_delay)

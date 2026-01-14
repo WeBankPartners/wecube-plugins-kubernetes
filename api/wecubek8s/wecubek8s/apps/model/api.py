@@ -4,9 +4,11 @@ from __future__ import absolute_import
 
 import logging
 import datetime
+import time
 from urllib.parse import urlparse
 
 from kubernetes import watch
+from kubernetes.client.rest import ApiException
 from talos.common import cache
 from talos.core import config
 from talos.core.i18n import _
@@ -14,9 +16,16 @@ from wecubek8s.common import jsonfilter
 from wecubek8s.common import k8s
 from wecubek8s.common import const
 from wecubek8s.db import resource as db_resource
+import threading
 
 CONF = config.CONF
 LOG = logging.getLogger(__name__)
+
+# resourceVersion 缓存（用于断连重连时继续监听，防止事件丢失）
+# Key: cluster_id, Value: {'resource_version': str, 'last_update': timestamp}
+# 多 watcher 场景：每个 watcher 进程维护自己的 resourceVersion，重连时从各自的缓存继续
+_resource_version_cache = {}
+_resource_version_lock = threading.Lock()
 
 
 class BaseEntity:
@@ -323,15 +332,33 @@ class Pod(BaseEntity):
     def watch(self, cluster, event_stop, notify):
         k8s_client = self.cluster_client(cluster)
         w = watch.Watch()
+        cluster_id = cluster['id']
+        cluster_name = cluster.get('name', cluster_id)
         
-        LOG.info('Starting watch for cluster %s', cluster.get('name', cluster['id']))
+        LOG.info('Starting watch for cluster %s', cluster_name)
         
         try:
-            # 获取当前的 resource_version，用于跳过现有的 Pod
-            # 只监听从此刻开始的新增和删除事件，不处理已存在的 Pod
-            pod_list = k8s_client.core_client.list_pod_for_all_namespaces(limit=1)
-            resource_version = pod_list.metadata.resource_version
-            LOG.info('Starting watch from resource_version: %s (skipping existing pods)', resource_version)
+            # 优先使用缓存的 resourceVersion（断连重连时从上次位置继续，防止丢失事件）
+            resource_version = None
+            with _resource_version_lock:
+                cached = _resource_version_cache.get(cluster_id)
+                if cached:
+                    resource_version = cached['resource_version']
+                    LOG.info('🔄 Resuming watch from cached resource_version: %s (preventing event loss)', 
+                            resource_version)
+            
+            # 首次启动：获取当前的 resource_version
+            if not resource_version:
+                pod_list = k8s_client.core_client.list_pod_for_all_namespaces(limit=1)
+                resource_version = pod_list.metadata.resource_version
+                LOG.info('🆕 Starting fresh watch from resource_version: %s (first time)', resource_version)
+                
+                # 缓存初始版本号
+                with _resource_version_lock:
+                    _resource_version_cache[cluster_id] = {
+                        'resource_version': resource_version,
+                        'last_update': time.time()
+                    }
             
             # 设置超时为 1 小时，避免 Kubernetes Python client 默认超时（2-5分钟）导致连接断开
             # 每小时自动重连一次，保持连接健康，符合 Kubernetes 官方最佳实践
@@ -357,6 +384,16 @@ class Pod(BaseEntity):
                 
                 LOG.debug('Watch event: type=%s, pod=%s, uid=%s', event_type, pod_name, pod_uid)
                 
+                # 更新 resourceVersion 缓存（每次事件都更新，确保重连时不丢失）
+                if hasattr(pod_obj.metadata, 'resource_version') and pod_obj.metadata.resource_version:
+                    current_rv = pod_obj.metadata.resource_version
+                    with _resource_version_lock:
+                        _resource_version_cache[cluster_id] = {
+                            'resource_version': current_rv,
+                            'last_update': time.time()
+                        }
+                    LOG.debug('📌 Updated cached resource_version to: %s', current_rv)
+                
                 if event_type == 'ADDED':
                     # 触发 POD.ADDED 通知（移除时间过滤以避免丢失重连期间的事件）
                     # CMDB 同步函数内部会处理去重（通过 code 字段查询已存在的 Pod）
@@ -373,12 +410,24 @@ class Pod(BaseEntity):
                     LOG.warning('Unknown watch event type: %s for pod %s', event_type, pod_name)
                 
                 if event_stop.is_set():
-                    LOG.info('Watch stop requested for cluster %s', cluster.get('name', cluster['id']))
+                    LOG.info('Watch stop requested for cluster %s', cluster_name)
                     w.stop()
                     break
+        except ApiException as e:
+            # 处理 410 Gone 错误：resourceVersion 过期（太旧，API Server 已清理历史）
+            # 此时需要清空缓存，下次重连时重新获取当前版本号
+            if e.status == 410:
+                LOG.warning('⚠️ Resource version expired (410 Gone) for cluster %s, will reset on next reconnection', 
+                           cluster_name)
+                LOG.warning('Expired resourceVersion was: %s', resource_version)
+                with _resource_version_lock:
+                    if cluster_id in _resource_version_cache:
+                        del _resource_version_cache[cluster_id]
+                        LOG.info('Cleared expired resourceVersion cache for cluster %s', cluster_name)
+            raise
         except Exception as e:
-            LOG.warning('Error in watch stream for cluster %s: %s', cluster.get('name', cluster['id']), str(e))
+            LOG.warning('Warning in watch stream for cluster %s: %s', cluster_name, str(e))
             raise
         finally:
             w.stop()
-            LOG.info('Watch stopped for cluster %s', cluster.get('name', cluster['id']))
+            LOG.info('Watch stopped for cluster %s', cluster_name)
