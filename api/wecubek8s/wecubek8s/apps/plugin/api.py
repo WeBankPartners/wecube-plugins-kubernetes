@@ -871,7 +871,11 @@ class StatefulSet:
                         existing_secret_names.add(secret['name'])
         
         # StatefulSet 的 serviceName 必须符合 DNS-1035 规范
-        service_name_for_sts = api_utils.escape_service_name(data.get('serviceName', resource_name))
+        # 【修复】必须先规范化 serviceName（移除端口号后缀），确保端口变化时不会导致 serviceName 改变
+        # 因为 StatefulSet 的 spec.serviceName 字段是不可变的（immutable）
+        raw_service_name = data.get('serviceName', data.get('name', ''))
+        normalized_service_name = api_utils.normalize_statefulset_name(raw_service_name)
+        service_name_for_sts = api_utils.escape_service_name(normalized_service_name)
         
         # 获取当前请求的用户 token，保存到 Pod annotations 中
         # 这样 watcher 可以从 Pod 读取 token 来访问 CMDB
