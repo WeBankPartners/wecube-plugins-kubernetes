@@ -31,8 +31,9 @@ def normalize_statefulset_name(name):
     此函数会自动检测并移除名称末尾的端口号部分。
     
     规则：
-    - 如果名称以 '-数字' 或 ':数字' 结尾，且数字为 1-5 位（端口号范围 1-65535），则移除该后缀
-    - 例如：'app-name-80' -> 'app-name', 'app-name:8080' -> 'app-name'
+    - 如果名称以 '-数字' 或 ':数字' 结尾，移除该后缀
+    - 支持单端口：'app-name-80' -> 'app-name', 'app-name:8080' -> 'app-name'
+    - 支持多端口：'app-name:80,81,82' -> 'app-name'
     - 保护性处理：只在明确匹配端口号模式时才移除，避免误删
     
     Args:
@@ -46,21 +47,46 @@ def normalize_statefulset_name(name):
         'sit-demo-core-app-vm-democore01-172-21-154-195'
         >>> normalize_statefulset_name('sit-demo-core-app-vm-democore01-172-21-154-195:8080')
         'sit-demo-core-app-vm-democore01-172-21-154-195'
+        >>> normalize_statefulset_name('sit-demo-core-app-vm-democore01-172-21-154-195:80,81,82')
+        'sit-demo-core-app-vm-democore01-172-21-154-195'
         >>> normalize_statefulset_name('my-app-v2')  # 不是端口号格式，保持原样
         'my-app-v2'
     '''
-    # 匹配末尾的 '-数字' 或 ':数字' 模式（1-5位数字，对应端口号范围 1-65535）
+    # 匹配末尾的 '-数字' 或 ':数字[,数字...]' 模式（支持单端口或多端口逗号分隔）
     # 使用贪婪匹配，只移除最后一个符合条件的后缀
     import re
-    match = re.match(r'^(.*)[-:](\d{1,5})$', name)
+    # 修改正则表达式以支持多端口格式：[\d,]+ 匹配数字和逗号的组合
+    match = re.match(r'^(.*)[-:]([\d,]+)$', name)
     
     if match:
         base_name, port_str = match.groups()
-        port = int(port_str)
-        # 验证是否在有效端口号范围内（1-65535）
-        if 1 <= port <= 65535 and base_name:
-            # 确保移除后的名称不为空
-            return base_name
+        
+        # 验证端口字符串格式：
+        # 1. 至少包含一个数字
+        # 2. 不能以逗号开头或结尾
+        # 3. 不能有连续的逗号
+        if not port_str or not re.search(r'\d', port_str):
+            # 没有数字，不是有效的端口格式
+            return name
+        
+        if port_str.startswith(',') or port_str.endswith(',') or ',,' in port_str:
+            # 格式不正确，保持原样
+            return name
+        
+        # 如果包含逗号，说明是多端口格式，直接移除
+        if ',' in port_str:
+            if base_name:
+                return base_name
+            else:
+                return name
+        
+        # 单端口格式：验证是否在有效端口号范围内（1-65535）
+        try:
+            port = int(port_str)
+            if 1 <= port <= 65535 and base_name:
+                return base_name
+        except ValueError:
+            pass
     
     # 如果不匹配端口号模式，返回原始名称
     return name
