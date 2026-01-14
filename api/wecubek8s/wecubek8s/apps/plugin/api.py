@@ -566,7 +566,7 @@ class Deployment:
             }
         }
         if headless:
-            service_body['spec']['clusterIP'] = None
+            service_body['spec']['clusterIP'] = 'None'  # Headless Service (必须是字符串 "None")
         elif cluster_ip:
             service_body['spec']['clusterIP'] = cluster_ip
 
@@ -940,12 +940,6 @@ class StatefulSet:
         service_name = api_utils.escape_service_name(service_name)
         namespace = data['namespace']
         
-        # 检查 Service 是否已存在
-        exists_service = k8s_client.get_service(service_name, namespace)
-        if exists_service is not None:
-            # Service 已存在，无需创建
-            return
-        
         # 获取 Pod 标签作为 Service selector
         # 注意：标签值必须与创建 StatefulSet 时使用的值保持一致
         # StatefulSet 的 resource_name 是通过 escape_service_name(data['name'], max_length=50) 生成的
@@ -984,7 +978,7 @@ class StatefulSet:
                 'protocol': 'TCP'
             }]
         
-        # 创建 Headless Service
+        # 构建 Headless Service 模板
         service_resource_id = data.get('service_correlation_id', data['correlation_id'] + '-service')
         service_tags = api_utils.convert_tag(data.get('service_tags', data.get('tags', [])))
         service_tags[const.Tag.SERVICE_ID_TAG] = service_resource_id
@@ -998,16 +992,22 @@ class StatefulSet:
             },
             'spec': {
                 'type': 'ClusterIP',
-                'clusterIP': None,  # Headless Service
+                'clusterIP': 'None',  # Headless Service (必须是字符串 "None")
                 'selector': pod_spec_tags,
                 'ports': service_ports
             }
         }
         
-        # 创建 Headless Service
-        k8s_client.create_service(namespace, service_template)
-        LOG.info('Created Headless Service %s/%s for StatefulSet %s/%s',
-                 namespace, service_name, namespace, data['name'])
+        # 创建或更新 Headless Service
+        exists_service = k8s_client.get_service(service_name, namespace)
+        if exists_service is None:
+            k8s_client.create_service(namespace, service_template)
+            LOG.info('Created Headless Service %s/%s for StatefulSet %s/%s',
+                     namespace, service_name, namespace, data['name'])
+        else:
+            k8s_client.update_service(service_name, namespace, service_template)
+            LOG.info('Updated Headless Service %s/%s for StatefulSet %s/%s',
+                     namespace, service_name, namespace, data['name'])
     
     def _ensure_loadbalancer_service(self, k8s_client, data, service_ports, pod_spec_tags):
         """
@@ -1019,13 +1019,7 @@ class StatefulSet:
         lb_service_name = api_utils.escape_service_name(lb_service_name)
         namespace = data['namespace']
         
-        # 检查负载均衡 Service 是否已存在
-        exists_lb_service = k8s_client.get_service(lb_service_name, namespace)
-        if exists_lb_service is not None:
-            # Service 已存在，返回其信息
-            return lb_service_name
-        
-        # 创建负载均衡 Service（普通 ClusterIP Service）
+        # 构建负载均衡 Service 模板（普通 ClusterIP Service）
         lb_service_resource_id = data['correlation_id'] + '-lb-service'
         lb_service_tags = api_utils.convert_tag(data.get('service_tags', data.get('tags', [])))
         lb_service_tags[const.Tag.SERVICE_ID_TAG] = lb_service_resource_id
@@ -1046,10 +1040,16 @@ class StatefulSet:
             }
         }
         
-        # 创建负载均衡 Service
-        k8s_client.create_service(namespace, lb_service_template)
-        LOG.info('Created LoadBalancer Service %s/%s for StatefulSet %s/%s',
-                 namespace, lb_service_name, namespace, data['name'])
+        # 创建或更新负载均衡 Service
+        exists_lb_service = k8s_client.get_service(lb_service_name, namespace)
+        if exists_lb_service is None:
+            k8s_client.create_service(namespace, lb_service_template)
+            LOG.info('Created LoadBalancer Service %s/%s for StatefulSet %s/%s',
+                     namespace, lb_service_name, namespace, data['name'])
+        else:
+            k8s_client.update_service(lb_service_name, namespace, lb_service_template)
+            LOG.info('Updated LoadBalancer Service %s/%s for StatefulSet %s/%s',
+                     namespace, lb_service_name, namespace, data['name'])
         
         return lb_service_name
 
@@ -2607,7 +2607,7 @@ class Service:
             }
         }
         if resource_headless:
-            template['spec']['clusterIP'] = None
+            template['spec']['clusterIP'] = 'None'  # Headless Service (必须是字符串 "None")
         elif resource_cluster_ip:
             # not headless & user specific cluster ip, use it
             template['spec']['clusterIP'] = resource_cluster_ip
