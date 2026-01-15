@@ -601,7 +601,7 @@ class Deployment:
         if deployment_path:
             # 使用 package-init-container 镜像来修复 logs 目录权限
             # 构建完整的 init-container 镜像地址
-            init_image = const.INIT_CONTAINER_IMAGE
+            init_image = const.Registry.INIT_CONTAINER_IMAGE
             if private_registry:
                 init_image = f"{private_registry}/{init_image}"
             
@@ -1052,7 +1052,7 @@ class StatefulSet:
         if deployment_path:
             # 使用 package-init-container 镜像来修复 logs 目录权限
             # 构建完整的 init-container 镜像地址
-            init_image = const.INIT_CONTAINER_IMAGE
+            init_image = const.Registry.INIT_CONTAINER_IMAGE
             if private_registry:
                 init_image = f"{private_registry}/{init_image}"
             
