@@ -597,6 +597,38 @@ class Deployment:
         # 处理 packageUrl：添加 initContainer 和共享 volume（复用公共函数）
         init_containers = api_utils.setup_package_init_container(data, containers, pod_spec_src_vols, cluster_info)
         
+        # 如果配置了 logs volume，添加权限修复 initContainer
+        if deployment_path:
+            # 使用 package-init-container 镜像来修复 logs 目录权限
+            # 构建完整的 init-container 镜像地址
+            init_image = const.INIT_CONTAINER_IMAGE
+            if private_registry:
+                init_image = f"{private_registry}/{init_image}"
+            
+            logs_permission_init = {
+                'name': 'fix-logs-permissions',
+                'image': init_image,
+                'command': ['/bin/sh', '-c'],
+                'args': [
+                    'mkdir -p /logs && chown -R 10001:10001 /logs && chmod -R 775 /logs && echo "✓ Logs directory permissions fixed"'
+                ],
+                'volumeMounts': [{
+                    'name': 'instance-logs',
+                    'mountPath': '/logs'
+                }],
+                'securityContext': {
+                    'runAsUser': 0  # 以 root 运行来修改权限
+                }
+            }
+            
+            # 将 logs 权限修复 initContainer 插入到列表开头（优先执行）
+            if init_containers:
+                init_containers.insert(0, logs_permission_init)
+            else:
+                init_containers = [logs_permission_init]
+            
+            LOG.info('Added logs permission fix initContainer using image: %s', init_image)
+        
         # 为 initContainer 镜像也创建 registry secret（如果提供了认证信息）
         if init_containers and image_pull_username and image_pull_password:
             # 收集所有 initContainer 的镜像
@@ -1015,6 +1047,38 @@ class StatefulSet:
         
         # 处理 packageUrl：添加 initContainer 和共享 volume（复用公共函数）
         init_containers = api_utils.setup_package_init_container(data, containers, pod_spec_src_vols, cluster_info)
+        
+        # 如果配置了 logs volume，添加权限修复 initContainer
+        if deployment_path:
+            # 使用 package-init-container 镜像来修复 logs 目录权限
+            # 构建完整的 init-container 镜像地址
+            init_image = const.INIT_CONTAINER_IMAGE
+            if private_registry:
+                init_image = f"{private_registry}/{init_image}"
+            
+            logs_permission_init = {
+                'name': 'fix-logs-permissions',
+                'image': init_image,
+                'command': ['/bin/sh', '-c'],
+                'args': [
+                    'mkdir -p /logs && chown -R 10001:10001 /logs && chmod -R 775 /logs && echo "✓ Logs directory permissions fixed"'
+                ],
+                'volumeMounts': [{
+                    'name': 'instance-logs',
+                    'mountPath': '/logs'
+                }],
+                'securityContext': {
+                    'runAsUser': 0  # 以 root 运行来修改权限
+                }
+            }
+            
+            # 将 logs 权限修复 initContainer 插入到列表开头（优先执行）
+            if init_containers:
+                init_containers.insert(0, logs_permission_init)
+            else:
+                init_containers = [logs_permission_init]
+            
+            LOG.info('Added logs permission fix initContainer using image: %s', init_image)
         
         # 为 initContainer 镜像也创建 registry secret（如果提供了认证信息）
         if init_containers and image_pull_username and image_pull_password:
