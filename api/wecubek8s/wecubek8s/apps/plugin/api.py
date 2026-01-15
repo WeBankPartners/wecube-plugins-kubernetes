@@ -633,7 +633,13 @@ class Deployment:
                     'spec': {
                         'affinity': pod_spec_affinity,
                         'containers': containers,
-                        'volumes': pod_spec_src_vols
+                        'volumes': pod_spec_src_vols,
+                        # 设置 Pod 级别的 securityContext，使挂载的 volumes 使用 appuser 的 GID
+                        # 这样 appuser (UID:10001, GID:10001) 可以写入挂载的目录（如 /logs）
+                        'securityContext': {
+                            'fsGroup': 10001,  # appuser 的组 ID
+                            'fsGroupChangePolicy': 'OnRootMismatch'  # 只在根目录权限不匹配时才改变，提高性能
+                        }
                     }
                 }
             }
@@ -1078,7 +1084,13 @@ class StatefulSet:
                     'spec': {
                         'affinity': pod_spec_affinity,
                         'containers': containers,
-                        'volumes': pod_spec_src_vols
+                        'volumes': pod_spec_src_vols,
+                        # 设置 Pod 级别的 securityContext，使挂载的 volumes 使用 appuser 的 GID
+                        # 这样 appuser (UID:10001, GID:10001) 可以写入挂载的目录（如 /logs）
+                        'securityContext': {
+                            'fsGroup': 10001,  # appuser 的组 ID
+                            'fsGroupChangePolicy': 'OnRootMismatch'  # 只在根目录权限不匹配时才改变，提高性能
+                        }
                     }
                 }
             }
