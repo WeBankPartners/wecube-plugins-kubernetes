@@ -27,10 +27,14 @@ def _generate_liveness_probe(container, process_name=None, process_keyword=None,
         container: 容器配置字典（包含 name、ports、image 等信息）
         process_name: 进程名称
         process_keyword: 进程关键字
-        probe_type: 探针类型 ('auto', 'http', 'tcp', 'exec', 'pidof', 'none')
+        probe_type: 探针类型 ('auto', 'tcp', 'exec', 'pidof', 'none')
     
     Returns:
         dict: Liveness Probe 配置，如果返回 None 则不添加探针
+    
+    简化逻辑：
+        - 有端口 → TCP 探针
+        - 无端口 → 进程检测（pidof 或 exec）
     """
     
     # 如果明确指定不使用探针
@@ -50,10 +54,8 @@ def _generate_liveness_probe(container, process_name=None, process_keyword=None,
         probe_type = _auto_detect_probe_type(container_name, ports, process_name, image)
         LOG.info('[PROBE DEBUG] Auto-detected probe type for %s: %s', container_name, probe_type)
     
-    # 根据探针类型生成配置
-    if probe_type == 'http':
-        return _generate_http_probe(ports, image)
-    elif probe_type == 'tcp':
+    # 根据探针类型生成配置（仅支持 TCP 和进程检测）
+    if probe_type == 'tcp':
         return _generate_tcp_probe(ports)
     elif probe_type == 'pidof':
         return _generate_pidof_probe(process_name, process_keyword)
@@ -68,195 +70,182 @@ def _auto_detect_probe_type(container_name, ports, process_name, image=None):
     """
     自动检测最合适的探针类型
     
-    优先级：
-    1. 如果有 HTTP 服务端口 (80, 8080, 3000 等) → HTTP 探针
-    2. 如果有任意端口 → TCP 探针
-    3. 如果镜像是已知的 Web 服务器（nginx、apache、tomcat 等）→ HTTP 探针 + 推断默认端口
-    4. 如果只有进程名 → pidof 探针（兼容性好）
-    5. 其他情况 → TCP 探针（最通用）
+    简化逻辑：
+    1. 如果有端口配置 → TCP 探针（检查端口连接性，最可靠）
+    2. 如果没有端口，但有进程名 → pidof 探针（进程检测）
+    3. 其他情况 → pidof 探针（兜底方案）
     """
     
-    # 常见的 HTTP 服务端口
-    HTTP_PORTS = {80, 443, 8080, 8000, 8008, 3000, 5000, 9000}
-    
-    if ports:
-        for port_config in ports:
-            port = port_config.get('containerPort')
-            if port in HTTP_PORTS:
-                LOG.info('Auto-detected HTTP service on port %s, using HTTP probe', port)
-                return 'http'
-        
-        # 有端口但不是常见 HTTP 端口，使用 TCP 探针
-        LOG.info('Detected service ports, using TCP probe')
+    # 如果配置了端口，直接使用 TCP 探针
+    if ports and len(ports) > 0:
+        LOG.info('Detected service ports (%d port(s)), using TCP probe', len(ports))
         return 'tcp'
     
-    # 没有端口配置，尝试从镜像名称推断服务类型
-    if image:
-        image_lower = image.lower()
-        
-        # 检测常见的 Web 服务器镜像
-        WEB_SERVER_PATTERNS = [
-            'nginx', 'httpd', 'apache', 'tomcat', 'jetty',
-            'caddy', 'traefik', 'haproxy', 'lighttpd'
-        ]
-        
-        for pattern in WEB_SERVER_PATTERNS:
-            if pattern in image_lower:
-                LOG.info('Detected web server image (%s), using HTTP probe with inferred port', pattern)
-                return 'http'
-    
-    # 没有端口配置，但有进程名
+    # 没有端口配置，使用进程检测
     if process_name:
         LOG.info('No ports configured, using pidof probe for process: %s', process_name)
         return 'pidof'
     
-    # 默认使用 TCP 探针（如果有端口）
-    return 'tcp'
+    # 兜底：没有端口也没有进程名，使用 pidof 探针
+    LOG.warning('No ports or process_name configured, using pidof probe as fallback')
+    return 'pidof'
 
 
-def _generate_http_probe(ports, image=None):
-    """
-    生成 HTTP 探针（最可靠，适用于 Web 服务）
-    
-    如果没有配置端口，会尝试从镜像名推断默认端口
-    """
-    port = None
-    
-    # 1. 优先使用配置的端口
-    if ports and len(ports) > 0:
-        # 智能选择最合适的 HTTP 端口
-        port = _select_best_http_port(ports)
-        LOG.info('[HTTP PROBE] Selected port %s from %d available ports', port, len(ports))
-    
-    # 2. 如果没有配置端口，从镜像名推断
-    if not port and image:
-        port = _infer_default_port_from_image(image)
-    
-    # 3. 仍然没有端口，使用默认的 80
-    if not port:
-        LOG.warning('No port configured for HTTP probe, using default port 80')
-        port = 80
-    
-    LOG.info('Using HTTP probe on port %s (image: %s)', port, image or 'unknown')
-    
-    return {
-        'httpGet': {
-            'path': '/',
-            'port': port,
-            'scheme': 'HTTP'
-        },
-        'initialDelaySeconds': 60,      # 增加到60秒，给足启动时间
-        'periodSeconds': 10,             # 每10秒检查一次
-        'timeoutSeconds': 5,             # 5秒超时
-        'successThreshold': 1,           # 成功1次即认为健康
-        'failureThreshold': 6            # 失败6次才重启（60秒容错窗口）
-    }
+# ============================================================================
+# HTTP 探针相关函数（已弃用，保留代码以备将来使用）
+# 原因：HTTP 探针依赖应用实现健康检查接口，容易出现 404 等问题
+# 当前策略：有端口用 TCP 探针，无端口用进程检测
+# ============================================================================
+
+# def _generate_http_probe(ports, image=None):
+#     """
+#     生成 HTTP 探针（最可靠，适用于 Web 服务）
+#     
+#     【已弃用】改用 TCP 探针，避免 HTTP 404 等问题
+#     
+#     如果没有配置端口，会尝试从镜像名推断默认端口
+#     """
+#     port = None
+#     
+#     # 1. 优先使用配置的端口
+#     if ports and len(ports) > 0:
+#         # 智能选择最合适的 HTTP 端口
+#         port = _select_best_http_port(ports)
+#         LOG.info('[HTTP PROBE] Selected port %s from %d available ports', port, len(ports))
+#     
+#     # 2. 如果没有配置端口，从镜像名推断
+#     if not port and image:
+#         port = _infer_default_port_from_image(image)
+#     
+#     # 3. 仍然没有端口，使用默认的 80
+#     if not port:
+#         LOG.warning('No port configured for HTTP probe, using default port 80')
+#         port = 80
+#     
+#     LOG.info('Using HTTP probe on port %s (image: %s)', port, image or 'unknown')
+#     
+#     return {
+#         'httpGet': {
+#             'path': '/',
+#             'port': port,
+#             'scheme': 'HTTP'
+#         },
+#         'initialDelaySeconds': 60,      # 增加到60秒，给足启动时间
+#         'periodSeconds': 10,             # 每10秒检查一次
+#         'timeoutSeconds': 5,             # 5秒超时
+#         'successThreshold': 1,           # 成功1次即认为健康
+#         'failureThreshold': 6            # 失败6次才重启（60秒容错窗口）
+#     }
 
 
-def _infer_default_port_from_image(image):
-    """
-    从镜像名称推断默认端口
-    
-    Args:
-        image: 镜像名称（例如：nginx, tomcat:9.0, registry.io/apache:latest）
-    
-    Returns:
-        int: 推断的端口号，如果无法推断则返回 None
-    """
-    if not image:
-        return None
-    
-    image_lower = image.lower()
-    
-    # 常见服务的默认端口映射
-    PORT_MAPPINGS = {
-        'nginx': 80,
-        'httpd': 80,
-        'apache': 80,
-        'tomcat': 8080,
-        'jetty': 8080,
-        'wildfly': 8080,
-        'jboss': 8080,
-        'caddy': 80,
-        'traefik': 80,
-        'haproxy': 80,
-        'lighttpd': 80,
-        'redis': 6379,
-        'mysql': 3306,
-        'mariadb': 3306,
-        'postgres': 5432,
-        'postgresql': 5432,
-        'mongodb': 27017,
-        'mongo': 27017
-    }
-    
-    for service_name, default_port in PORT_MAPPINGS.items():
-        if service_name in image_lower:
-            LOG.info('Inferred port %d for image containing "%s"', default_port, service_name)
-            return default_port
-    
-    return None
+# def _infer_default_port_from_image(image):
+#     """
+#     从镜像名称推断默认端口
+#     
+#     【已弃用】改用 TCP 探针，避免 HTTP 404 等问题
+#     
+#     Args:
+#         image: 镜像名称（例如：nginx, tomcat:9.0, registry.io/apache:latest）
+#     
+#     Returns:
+#         int: 推断的端口号，如果无法推断则返回 None
+#     """
+#     if not image:
+#         return None
+#     
+#     image_lower = image.lower()
+#     
+#     # 常见服务的默认端口映射
+#     PORT_MAPPINGS = {
+#         'nginx': 80,
+#         'httpd': 80,
+#         'apache': 80,
+#         'tomcat': 8080,
+#         'jetty': 8080,
+#         'wildfly': 8080,
+#         'jboss': 8080,
+#         'caddy': 80,
+#         'traefik': 80,
+#         'haproxy': 80,
+#         'lighttpd': 80,
+#         'redis': 6379,
+#         'mysql': 3306,
+#         'mariadb': 3306,
+#         'postgres': 5432,
+#         'postgresql': 5432,
+#         'mongodb': 27017,
+#         'mongo': 27017
+#     }
+#     
+#     for service_name, default_port in PORT_MAPPINGS.items():
+#         if service_name in image_lower:
+#             LOG.info('Inferred port %d for image containing "%s"', default_port, service_name)
+#             return default_port
+#     
+#     return None
 
 
-def _select_best_http_port(ports):
-    """
-    从多个端口中智能选择最适合 HTTP 探针的端口
-    
-    优先级：
-    1. 常见的 Web 服务端口 (80, 443, 8080, 8000, 3000, 5000, 9000 等)
-    2. 8xxx 系列端口（通常是 Web 应用）
-    3. 3xxx、5xxx、9xxx 系列端口
-    4. 第一个大于 1024 的端口
-    5. 第一个端口
-    
-    Args:
-        ports: 端口配置列表，每个元素是 {'containerPort': xxx, 'protocol': 'TCP'}
-    
-    Returns:
-        int: 选中的端口号
-    """
-    if not ports:
-        return None
-    
-    # 提取所有端口号
-    port_numbers = [p.get('containerPort') for p in ports if p.get('containerPort')]
-    
-    if not port_numbers:
-        return None
-    
-    LOG.info('[PORT SELECTION] Available ports for HTTP probe: %s', port_numbers)
-    
-    # 常见的 HTTP 服务端口（按优先级排序）
-    HTTP_PRIORITY_PORTS = [8080, 80, 8000, 8008, 443, 3000, 5000, 9000, 8888]
-    
-    # 1. 优先选择常见的 HTTP 端口
-    for priority_port in HTTP_PRIORITY_PORTS:
-        if priority_port in port_numbers:
-            LOG.info('[PORT SELECTION] Selected priority HTTP port: %d', priority_port)
-            return priority_port
-    
-    # 2. 选择 8xxx 系列端口（8000-8999，通常是 Web 应用）
-    for port in port_numbers:
-        if 8000 <= port <= 8999:
-            LOG.info('[PORT SELECTION] Selected 8xxx series port: %d', port)
-            return port
-    
-    # 3. 选择其他常见 Web 端口范围（3000-3999, 5000-5999, 9000-9999）
-    for port in port_numbers:
-        if 3000 <= port <= 3999 or 5000 <= port <= 5999 or 9000 <= port <= 9999:
-            LOG.info('[PORT SELECTION] Selected common web port: %d', port)
-            return port
-    
-    # 4. 选择第一个大于 1024 的端口（非特权端口）
-    for port in port_numbers:
-        if port > 1024:
-            LOG.info('[PORT SELECTION] Selected first non-privileged port: %d', port)
-            return port
-    
-    # 5. 默认返回第一个端口
-    selected_port = port_numbers[0]
-    LOG.info('[PORT SELECTION] Selected first available port: %d', selected_port)
-    return selected_port
+# def _select_best_http_port(ports):
+#     """
+#     从多个端口中智能选择最适合 HTTP 探针的端口
+#     
+#     【已弃用】改用 TCP 探针，避免 HTTP 404 等问题
+#     
+#     优先级：
+#     1. 常见的 Web 服务端口 (80, 443, 8080, 8000, 3000, 5000, 9000 等)
+#     2. 8xxx 系列端口（通常是 Web 应用）
+#     3. 3xxx、5xxx、9xxx 系列端口
+#     4. 第一个大于 1024 的端口
+#     5. 第一个端口
+#     
+#     Args:
+#         ports: 端口配置列表，每个元素是 {'containerPort': xxx, 'protocol': 'TCP'}
+#     
+#     Returns:
+#         int: 选中的端口号
+#     """
+#     if not ports:
+#         return None
+#     
+#     # 提取所有端口号
+#     port_numbers = [p.get('containerPort') for p in ports if p.get('containerPort')]
+#     
+#     if not port_numbers:
+#         return None
+#     
+#     LOG.info('[PORT SELECTION] Available ports for HTTP probe: %s', port_numbers)
+#     
+#     # 常见的 HTTP 服务端口（按优先级排序）
+#     HTTP_PRIORITY_PORTS = [8080, 80, 8000, 8008, 443, 3000, 5000, 9000, 8888]
+#     
+#     # 1. 优先选择常见的 HTTP 端口
+#     for priority_port in HTTP_PRIORITY_PORTS:
+#         if priority_port in port_numbers:
+#             LOG.info('[PORT SELECTION] Selected priority HTTP port: %d', priority_port)
+#             return priority_port
+#     
+#     # 2. 选择 8xxx 系列端口（8000-8999，通常是 Web 应用）
+#     for port in port_numbers:
+#         if 8000 <= port <= 8999:
+#             LOG.info('[PORT SELECTION] Selected 8xxx series port: %d', port)
+#             return port
+#     
+#     # 3. 选择其他常见 Web 端口范围（3000-3999, 5000-5999, 9000-9999）
+#     for port in port_numbers:
+#         if 3000 <= port <= 3999 or 5000 <= port <= 5999 or 9000 <= port <= 9999:
+#             LOG.info('[PORT SELECTION] Selected common web port: %d', port)
+#             return port
+#     
+#     # 4. 选择第一个大于 1024 的端口（非特权端口）
+#     for port in port_numbers:
+#         if port > 1024:
+#             LOG.info('[PORT SELECTION] Selected first non-privileged port: %d', port)
+#             return port
+#     
+#     # 5. 默认返回第一个端口
+#     selected_port = port_numbers[0]
+#     LOG.info('[PORT SELECTION] Selected first available port: %d', selected_port)
+#     return selected_port
 
 
 def _select_best_tcp_port(ports):
