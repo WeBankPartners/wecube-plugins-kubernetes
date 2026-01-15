@@ -41,9 +41,14 @@ def _generate_liveness_probe(container, process_name=None, process_keyword=None,
     ports = container.get('ports', [])
     image = container.get('image', '')
     
+    # 添加调试日志：查看容器的端口配置
+    LOG.info('[PROBE DEBUG] Container: %s, Ports: %s, Image: %s, ProbeType: %s', 
+             container_name, ports, image, probe_type)
+    
     # 自动模式：智能选择最合适的探针类型
     if probe_type == 'auto':
         probe_type = _auto_detect_probe_type(container_name, ports, process_name, image)
+        LOG.info('[PROBE DEBUG] Auto-detected probe type for %s: %s', container_name, probe_type)
     
     # 根据探针类型生成配置
     if probe_type == 'http':
@@ -119,7 +124,9 @@ def _generate_http_probe(ports, image=None):
     
     # 1. 优先使用配置的端口
     if ports and len(ports) > 0:
-        port = ports[0].get('containerPort')
+        # 智能选择最合适的 HTTP 端口
+        port = _select_best_http_port(ports)
+        LOG.info('[HTTP PROBE] Selected port %s from %d available ports', port, len(ports))
     
     # 2. 如果没有配置端口，从镜像名推断
     if not port and image:
@@ -191,13 +198,150 @@ def _infer_default_port_from_image(image):
     return None
 
 
-def _generate_tcp_probe(ports):
-    """生成 TCP 探针（通用，只检查端口是否开放）"""
+def _select_best_http_port(ports):
+    """
+    从多个端口中智能选择最适合 HTTP 探针的端口
+    
+    优先级：
+    1. 常见的 Web 服务端口 (80, 443, 8080, 8000, 3000, 5000, 9000 等)
+    2. 8xxx 系列端口（通常是 Web 应用）
+    3. 3xxx、5xxx、9xxx 系列端口
+    4. 第一个大于 1024 的端口
+    5. 第一个端口
+    
+    Args:
+        ports: 端口配置列表，每个元素是 {'containerPort': xxx, 'protocol': 'TCP'}
+    
+    Returns:
+        int: 选中的端口号
+    """
     if not ports:
         return None
     
-    # 使用第一个端口
-    port = ports[0].get('containerPort')
+    # 提取所有端口号
+    port_numbers = [p.get('containerPort') for p in ports if p.get('containerPort')]
+    
+    if not port_numbers:
+        return None
+    
+    LOG.info('[PORT SELECTION] Available ports for HTTP probe: %s', port_numbers)
+    
+    # 常见的 HTTP 服务端口（按优先级排序）
+    HTTP_PRIORITY_PORTS = [8080, 80, 8000, 8008, 443, 3000, 5000, 9000, 8888]
+    
+    # 1. 优先选择常见的 HTTP 端口
+    for priority_port in HTTP_PRIORITY_PORTS:
+        if priority_port in port_numbers:
+            LOG.info('[PORT SELECTION] Selected priority HTTP port: %d', priority_port)
+            return priority_port
+    
+    # 2. 选择 8xxx 系列端口（8000-8999，通常是 Web 应用）
+    for port in port_numbers:
+        if 8000 <= port <= 8999:
+            LOG.info('[PORT SELECTION] Selected 8xxx series port: %d', port)
+            return port
+    
+    # 3. 选择其他常见 Web 端口范围（3000-3999, 5000-5999, 9000-9999）
+    for port in port_numbers:
+        if 3000 <= port <= 3999 or 5000 <= port <= 5999 or 9000 <= port <= 9999:
+            LOG.info('[PORT SELECTION] Selected common web port: %d', port)
+            return port
+    
+    # 4. 选择第一个大于 1024 的端口（非特权端口）
+    for port in port_numbers:
+        if port > 1024:
+            LOG.info('[PORT SELECTION] Selected first non-privileged port: %d', port)
+            return port
+    
+    # 5. 默认返回第一个端口
+    selected_port = port_numbers[0]
+    LOG.info('[PORT SELECTION] Selected first available port: %d', selected_port)
+    return selected_port
+
+
+def _select_best_tcp_port(ports):
+    """
+    从多个端口中智能选择最适合 TCP 探针的端口
+    
+    对于 TCP 探针，我们更倾向于选择应用的主服务端口，而不是依赖服务端口（如数据库）
+    
+    优先级：
+    1. 应用服务端口 (8xxx, 3xxx, 5xxx, 9xxx)
+    2. 排除已知的依赖服务端口（Redis 6379, MySQL 3306, PostgreSQL 5432, MongoDB 27017）
+    3. 第一个大于 1024 的端口
+    4. 第一个端口
+    
+    Args:
+        ports: 端口配置列表
+    
+    Returns:
+        int: 选中的端口号
+    """
+    if not ports:
+        return None
+    
+    port_numbers = [p.get('containerPort') for p in ports if p.get('containerPort')]
+    
+    if not port_numbers:
+        return None
+    
+    LOG.info('[PORT SELECTION] Available ports for TCP probe: %s', port_numbers)
+    
+    # 已知的依赖服务端口（通常不应该作为应用探针的目标）
+    DEPENDENCY_PORTS = {
+        6379,   # Redis
+        3306,   # MySQL
+        5432,   # PostgreSQL
+        27017,  # MongoDB
+        5672,   # RabbitMQ
+        9092,   # Kafka
+        2181,   # Zookeeper
+        11211,  # Memcached
+        9200,   # Elasticsearch
+        6380,   # Redis Sentinel
+    }
+    
+    # 1. 优先选择常见的应用服务端口（排除依赖服务端口）
+    APPLICATION_PRIORITY_PORTS = [8080, 8000, 8008, 8888, 3000, 5000, 9000]
+    
+    for priority_port in APPLICATION_PRIORITY_PORTS:
+        if priority_port in port_numbers:
+            LOG.info('[PORT SELECTION] Selected priority application port: %d', priority_port)
+            return priority_port
+    
+    # 2. 选择应用服务端口范围，排除依赖服务端口
+    for port in port_numbers:
+        if port not in DEPENDENCY_PORTS:
+            if 8000 <= port <= 8999 or 3000 <= port <= 3999 or 5000 <= port <= 5999 or 9000 <= port <= 9999:
+                LOG.info('[PORT SELECTION] Selected application port (non-dependency): %d', port)
+                return port
+    
+    # 3. 选择第一个非依赖服务端口
+    for port in port_numbers:
+        if port not in DEPENDENCY_PORTS and port > 1024:
+            LOG.info('[PORT SELECTION] Selected first non-dependency port: %d', port)
+            return port
+    
+    # 4. 实在没有，选择第一个端口（即使是依赖服务端口）
+    selected_port = port_numbers[0]
+    if selected_port in DEPENDENCY_PORTS:
+        LOG.warning('[PORT SELECTION] Selected dependency service port %d - this may not be ideal for application health checks', selected_port)
+    else:
+        LOG.info('[PORT SELECTION] Selected first available port: %d', selected_port)
+    return selected_port
+
+
+def _generate_tcp_probe(ports):
+    """生成 TCP 探针（通用，只检查端口是否开放）"""
+    LOG.info('[TCP PROBE DEBUG] Generating TCP probe, ports: %s', ports)
+    
+    if not ports:
+        LOG.warning('[TCP PROBE DEBUG] No ports provided, returning None')
+        return None
+    
+    # 智能选择最合适的端口
+    port = _select_best_tcp_port(ports)
+    LOG.info('[TCP PROBE DEBUG] Selected port %s from %d available ports', port, len(ports))
     
     return {
         'tcpSocket': {
@@ -436,8 +580,19 @@ class Deployment:
             )
             if liveness_probe:
                 container['livenessProbe'] = liveness_probe
-                LOG.info('Added liveness probe for container "%s" (type: %s)', 
-                        container.get('name'), probe_type)
+                # 检测实际使用的探针类型
+                actual_probe_type = 'unknown'
+                if 'httpGet' in liveness_probe:
+                    actual_probe_type = 'http'
+                elif 'tcpSocket' in liveness_probe:
+                    actual_probe_type = 'tcp'
+                elif 'exec' in liveness_probe:
+                    actual_probe_type = 'exec/pidof'
+                LOG.info('Added liveness probe for container "%s" (requested: %s, actual: %s, config: %s)', 
+                        container.get('name'), probe_type, actual_probe_type, liveness_probe)
+            else:
+                LOG.warning('No liveness probe generated for container "%s" (requested type: %s)', 
+                           container.get('name'), probe_type)
         
         # 从数据库的 cluster_info 中读取镜像拉取认证信息
         image_pull_username = cluster_info.get('image_pull_username', '')
@@ -838,8 +993,19 @@ class StatefulSet:
             )
             if liveness_probe:
                 container['livenessProbe'] = liveness_probe
-                LOG.info('Added liveness probe for container "%s" (type: %s)', 
-                        container.get('name'), probe_type)
+                # 检测实际使用的探针类型
+                actual_probe_type = 'unknown'
+                if 'httpGet' in liveness_probe:
+                    actual_probe_type = 'http'
+                elif 'tcpSocket' in liveness_probe:
+                    actual_probe_type = 'tcp'
+                elif 'exec' in liveness_probe:
+                    actual_probe_type = 'exec/pidof'
+                LOG.info('Added liveness probe for container "%s" (requested: %s, actual: %s, config: %s)', 
+                        container.get('name'), probe_type, actual_probe_type, liveness_probe)
+            else:
+                LOG.warning('No liveness probe generated for container "%s" (requested type: %s)', 
+                           container.get('name'), probe_type)
         
         # 从数据库的 cluster_info 中读取镜像拉取认证信息
         image_pull_username = cluster_info.get('image_pull_username', '')
