@@ -554,7 +554,7 @@ class Deployment:
         
         containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit, deploy_script)
         
-        # 智能添加存活探针（基于容器端口和进程信息自动选择最佳探针类型）
+        # 智能添加存活探针和就绪探针（基于容器端口和进程信息自动选择最佳探针类型）
         process_name = data.get('process_name')
         process_keyword = data.get('process_keyword')
         probe_type = data.get('probe_type', 'auto')  # 支持手动指定探针类型
@@ -569,6 +569,14 @@ class Deployment:
             )
             if liveness_probe:
                 container['livenessProbe'] = liveness_probe
+                
+                # 同时添加 readiness probe（配置更激进，更快发现问题）
+                readiness_probe = liveness_probe.copy()
+                readiness_probe['initialDelaySeconds'] = 10   # 10秒就开始检查（vs liveness的60秒）
+                readiness_probe['failureThreshold'] = 3       # 失败3次就标记为NotReady（vs liveness的6次）
+                readiness_probe['periodSeconds'] = 10         # 保持10秒检查一次
+                container['readinessProbe'] = readiness_probe
+                
                 # 检测实际使用的探针类型
                 actual_probe_type = 'unknown'
                 if 'httpGet' in liveness_probe:
@@ -577,10 +585,12 @@ class Deployment:
                     actual_probe_type = 'tcp'
                 elif 'exec' in liveness_probe:
                     actual_probe_type = 'exec/pidof'
-                LOG.info('Added liveness probe for container "%s" (requested: %s, actual: %s, config: %s)', 
-                        container.get('name'), probe_type, actual_probe_type, liveness_probe)
+                LOG.info('Added liveness and readiness probes for container "%s" (requested: %s, actual: %s)', 
+                        container.get('name'), probe_type, actual_probe_type)
+                LOG.info('  - Liveness probe config: %s', liveness_probe)
+                LOG.info('  - Readiness probe config: %s', readiness_probe)
             else:
-                LOG.warning('No liveness probe generated for container "%s" (requested type: %s)', 
+                LOG.warning('No liveness/readiness probe generated for container "%s" (requested type: %s)', 
                            container.get('name'), probe_type)
         
         # 从数据库的 cluster_info 中读取镜像拉取认证信息
@@ -1005,7 +1015,7 @@ class StatefulSet:
         
         containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit, deploy_script)
         
-        # 智能添加存活探针（基于容器端口和进程信息自动选择最佳探针类型）
+        # 智能添加存活探针和就绪探针（基于容器端口和进程信息自动选择最佳探针类型）
         process_name = data.get('process_name')
         process_keyword = data.get('process_keyword')
         probe_type = data.get('probe_type', 'auto')  # 支持手动指定探针类型
@@ -1020,6 +1030,14 @@ class StatefulSet:
             )
             if liveness_probe:
                 container['livenessProbe'] = liveness_probe
+                
+                # 同时添加 readiness probe（配置更激进，更快发现问题）
+                readiness_probe = liveness_probe.copy()
+                readiness_probe['initialDelaySeconds'] = 10   # 10秒就开始检查（vs liveness的60秒）
+                readiness_probe['failureThreshold'] = 3       # 失败3次就标记为NotReady（vs liveness的6次）
+                readiness_probe['periodSeconds'] = 10         # 保持10秒检查一次
+                container['readinessProbe'] = readiness_probe
+                
                 # 检测实际使用的探针类型
                 actual_probe_type = 'unknown'
                 if 'httpGet' in liveness_probe:
@@ -1028,10 +1046,12 @@ class StatefulSet:
                     actual_probe_type = 'tcp'
                 elif 'exec' in liveness_probe:
                     actual_probe_type = 'exec/pidof'
-                LOG.info('Added liveness probe for container "%s" (requested: %s, actual: %s, config: %s)', 
-                        container.get('name'), probe_type, actual_probe_type, liveness_probe)
+                LOG.info('Added liveness and readiness probes for container "%s" (requested: %s, actual: %s)', 
+                        container.get('name'), probe_type, actual_probe_type)
+                LOG.info('  - Liveness probe config: %s', liveness_probe)
+                LOG.info('  - Readiness probe config: %s', readiness_probe)
             else:
-                LOG.warning('No liveness probe generated for container "%s" (requested type: %s)', 
+                LOG.warning('No liveness/readiness probe generated for container "%s" (requested type: %s)', 
                            container.get('name'), probe_type)
         
         # 从数据库的 cluster_info 中读取镜像拉取认证信息
