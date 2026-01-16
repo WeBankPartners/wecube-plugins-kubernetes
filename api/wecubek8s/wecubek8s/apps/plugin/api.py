@@ -1444,6 +1444,9 @@ class StatefulSet:
             k8s_client: Kubernetes 客户端
             statefulset_name: StatefulSet 名称
             namespace: 命名空间
+        
+        Returns:
+            tuple: (has_fatal_error: bool, error_message: str or None)
         """
         try:
             label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
@@ -1451,30 +1454,63 @@ class StatefulSet:
             
             if not pod_list or not pod_list.items:
                 LOG.warning('No pods found for StatefulSet %s, may still be creating', statefulset_name)
-                return
+                return False, None
+            
+            # 定义致命错误状态（需要立即退出的）
+            FATAL_REASONS = {
+                'ImagePullBackOff': 'Image cannot be pulled',
+                'ErrImagePull': 'Failed to pull image',
+                'CreateContainerConfigError': 'Container configuration error',
+            }
+            
+            # CrashLoopBackOff 需要检查重启次数（避免误判暂时性失败）
+            CRASH_THRESHOLD = 3  # 重启3次以上才判定为致命错误
             
             for pod in pod_list.items:
                 pod_name = pod.metadata.name
                 phase = pod.status.phase if pod.status else 'Unknown'
                 
-                # 检查失败状态
-                if phase in ['Failed', 'Unknown']:
-                    LOG.error('❌ Pod %s is in %s state', pod_name, phase)
+                # 检查 Pod Phase 失败状态
+                if phase == 'Failed':
+                    error_msg = f"Pod {pod_name} is in Failed state"
+                    LOG.error('❌ %s - exiting immediately', error_msg)
+                    return True, error_msg
                 
                 # 检查容器状态
                 if pod.status and pod.status.container_statuses:
                     for container_status in pod.status.container_statuses:
+                        container_name = container_status.name
+                        
+                        # 检查 Waiting 状态
                         if container_status.state and container_status.state.waiting:
                             reason = container_status.state.waiting.reason
-                            if reason in ['ImagePullBackOff', 'ErrImagePull', 'CrashLoopBackOff', 'CreateContainerConfigError']:
-                                LOG.error('❌ Pod %s, Container %s: %s - %s',
-                                        pod_name,
-                                        container_status.name,
-                                        reason,
-                                        container_status.state.waiting.message or '')
+                            message = container_status.state.waiting.message or ''
+                            
+                            # 检查是否是致命错误（镜像拉取失败、配置错误等）
+                            if reason in FATAL_REASONS:
+                                error_msg = (f"Pod {pod_name}, Container {container_name}: "
+                                           f"{reason} - {message}")
+                                LOG.error('❌ %s - exiting immediately', error_msg)
+                                return True, error_msg
+                            
+                            # 检查 CrashLoopBackOff（需要验证重启次数）
+                            if reason == 'CrashLoopBackOff':
+                                restart_count = container_status.restart_count or 0
+                                LOG.error('❌ Pod %s, Container %s: %s (restarts: %d) - %s',
+                                        pod_name, container_name, reason, restart_count, message)
+                                
+                                # 重启次数达到阈值，判定为致命错误
+                                if restart_count >= CRASH_THRESHOLD:
+                                    error_msg = (f"Pod {pod_name}, Container {container_name}: "
+                                               f"CrashLoopBackOff with {restart_count} restarts - {message}")
+                                    LOG.error('🔥 Fatal: %s - exiting immediately', error_msg)
+                                    return True, error_msg
         
         except Exception as e:
             LOG.warning('Failed to check pod failures: %s', str(e))
+            return False, None
+        
+        return False, None  # 没有致命错误
     
     def _get_pod_failure_details(self, k8s_client, statefulset_name, namespace):
         """获取 Pod 失败的详细信息
@@ -1761,8 +1797,27 @@ class StatefulSet:
                             
                             # 检查是否有 Pod 创建失败（30秒后开始检查）
                             if attempt > 6:
-                                self._check_pod_failures(k8s_client, resource_name, data['namespace'])
+                                has_fatal_error, error_message = self._check_pod_failures(
+                                    k8s_client, resource_name, data['namespace']
+                                )
+                                
+                                # 检测到致命错误，立即退出
+                                if has_fatal_error:
+                                    elapsed_time = attempt * check_interval
+                                    LOG.error('❌ Fatal Pod error detected after %d seconds: %s', 
+                                            elapsed_time, error_message)
+                                    raise exceptions.PluginError(
+                                        message=_('StatefulSet Pod failed to start: %(error)s '
+                                                '(detected after %(time)ds, max wait: %(timeout)ds)') % {
+                                            'error': error_message,
+                                            'time': elapsed_time,
+                                            'timeout': pod_ready_timeout
+                                        }
+                                    )
                 
+                except exceptions.PluginError:
+                    # 重新抛出 PluginError（不要被下面的 except 捕获）
+                    raise
                 except Exception as e:
                     LOG.warning('[Wait %d/%d] Failed to check StatefulSet status: %s', 
                                attempt, max_attempts, str(e))
