@@ -3,6 +3,8 @@
 from __future__ import absolute_import
 
 import logging
+import json
+import ast
 from talos.db import crud
 from talos.core import config
 from talos.core.i18n import _
@@ -126,7 +128,81 @@ class StatefulSet(controller.Plugin):
         if not item.get('serviceName'):
             item['serviceName'] = item.get('name', '')
 
+    def parse_envs_if_string(self, item):
+        """
+        解析 envs 参数，如果是字符串则转换为数组
+        支持的格式：
+        1. "[{name: 'sdf', value: 'we'}, {name: '44', value: '66'}]" (类Python字面量)
+        2. '[{"name": "sdf", "value": "we"}, {"name": "44", "value": "66"}]' (标准JSON)
+        """
+        if 'envs' not in item or item['envs'] is None:
+            return
+        
+        envs = item['envs']
+        
+        # 如果已经是列表，直接返回
+        if isinstance(envs, list):
+            return
+        
+        # 如果是字符串，尝试解析
+        if isinstance(envs, str):
+            envs = envs.strip()
+            if not envs:
+                item['envs'] = []
+                return
+            
+            # 尝试多种解析方式
+            parse_error = None
+            
+            # 方法1: 尝试标准 JSON 解析
+            try:
+                parsed_envs = json.loads(envs)
+                if isinstance(parsed_envs, list):
+                    item['envs'] = parsed_envs
+                    LOG.info('[StatefulSet] Successfully parsed envs using json.loads for %s', 
+                             item.get('name'))
+                    return
+                else:
+                    raise exceptions.ValidationError(
+                        attribute='envs',
+                        msg=_('envs must be an array, got: %(type)s') % {'type': type(parsed_envs).__name__}
+                    )
+            except (json.JSONDecodeError, ValueError) as e:
+                parse_error = str(e)
+                LOG.debug('[StatefulSet] json.loads failed for envs: %s', parse_error)
+            
+            # 方法2: 尝试 Python 字面量解析 (支持单引号和无引号的key)
+            try:
+                parsed_envs = ast.literal_eval(envs)
+                if isinstance(parsed_envs, list):
+                    item['envs'] = parsed_envs
+                    LOG.info('[StatefulSet] Successfully parsed envs using ast.literal_eval for %s', 
+                             item.get('name'))
+                    return
+                else:
+                    raise exceptions.ValidationError(
+                        attribute='envs',
+                        msg=_('envs must be an array, got: %(type)s') % {'type': type(parsed_envs).__name__}
+                    )
+            except (SyntaxError, ValueError) as e:
+                LOG.debug('[StatefulSet] ast.literal_eval failed for envs: %s', str(e))
+            
+            # 如果两种方法都失败，抛出错误
+            raise exceptions.ValidationError(
+                attribute='envs',
+                msg=_('Failed to parse envs string. Expected array format like "[{name: \'key\', value: \'val\'}]". Original error: %(error)s') % {'error': parse_error}
+            )
+        else:
+            # 如果既不是字符串也不是列表，抛出错误
+            raise exceptions.ValidationError(
+                attribute='envs',
+                msg=_('envs must be a string or array, got: %(type)s') % {'type': type(envs).__name__}
+            )
+
     def validate_item_apply(self, item_index, item):
+        # 先解析 envs 字符串（如果需要）
+        self.parse_envs_if_string(item)
+        
         clean_item = crud.ColumnValidator.get_clean_data(rules.deployment_rules, item, 'check')
         self.set_item_default(clean_item)
         return clean_item
