@@ -213,9 +213,42 @@ class StatefulSet(controller.Plugin):
                 msg=_('envs must be a string or array, got: %(type)s') % {'type': type(envs).__name__}
             )
 
+    def add_default_envs(self, item):
+        """
+        为 envs 添加默认的环境变量
+        如果 envs 中不存在 CONTAINER 和 DOCKER，则添加默认值
+        """
+        # 确保 envs 是列表格式
+        if 'envs' not in item or item['envs'] is None:
+            item['envs'] = []
+        
+        envs = item['envs']
+        
+        # 如果不是列表，不处理（应该在 parse_envs_if_string 中已经处理过了）
+        if not isinstance(envs, list):
+            return
+        
+        # 获取已存在的环境变量名称
+        existing_env_names = {env.get('name') for env in envs if isinstance(env, dict) and 'name' in env}
+        
+        # 添加默认环境变量（如果不存在）
+        default_envs = [
+            {'name': 'CONTAINER', 'value': 'true'},
+            {'name': 'DOCKER', 'value': 'true'}
+        ]
+        
+        for default_env in default_envs:
+            if default_env['name'] not in existing_env_names:
+                envs.append(default_env)
+                LOG.info('[StatefulSet] Added default env: %s=%s for %s', 
+                         default_env['name'], default_env['value'], item.get('name'))
+
     def validate_item_apply(self, item_index, item):
         # 先解析 envs 字符串（如果需要）
         self.parse_envs_if_string(item)
+        
+        # 添加默认环境变量
+        self.add_default_envs(item)
         
         clean_item = crud.ColumnValidator.get_clean_data(rules.deployment_rules, item, 'check')
         self.set_item_default(clean_item)
