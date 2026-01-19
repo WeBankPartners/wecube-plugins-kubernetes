@@ -1753,6 +1753,57 @@ class StatefulSet:
             # 注意: replace 需要保留 resourceVersion
             resource_template['metadata']['resourceVersion'] = exists_resource.metadata.resource_version
             exists_resource = k8s_client.replace_statefulset(resource_name, data['namespace'], resource_template)
+            
+            # ==================== 触发 Pod 滚动重启（StatefulSet 更新后需要手动重启 Pod）====================
+            # StatefulSet 不像 Deployment 那样会自动滚动更新 Pod
+            # 当修改 Pod 模板（如 image_deploy_script）后，需要手动删除 Pod 才会使用新模板重建
+            # 这里我们从最大序号到最小序号依次删除 Pod（StatefulSet 的标准滚动更新顺序）
+            try:
+                replicas = int(data.get('replicas', 1))
+                LOG.info('Triggering Pod restart for StatefulSet %s/%s (replicas: %d)', 
+                         data['namespace'], resource_name, replicas)
+                
+                # 从最大序号开始删除（StatefulSet 的标准做法：反向滚动）
+                for i in range(replicas - 1, -1, -1):
+                    pod_name = f"{resource_name}-{i}"
+                    try:
+                        # 检查 Pod 是否存在
+                        existing_pod = k8s_client.get_pod(pod_name, data['namespace'])
+                        if existing_pod:
+                            LOG.info('Deleting Pod %s/%s to trigger recreation with new template', 
+                                   data['namespace'], pod_name)
+                            k8s_client.delete_pod(pod_name, data['namespace'])
+                            
+                            # 等待 Pod 删除并重建完成（可选，更安全但更慢）
+                            # 这样可以避免同时删除所有 Pod 导致服务不可用
+                            if data.get('rolling_restart', 'true').lower() == 'true':
+                                LOG.info('Waiting for Pod %s to be recreated before deleting next Pod...', pod_name)
+                                pod_recreate_timeout = 60  # 60秒超时
+                                check_interval = 3
+                                max_attempts = pod_recreate_timeout // check_interval
+                                
+                                for attempt in range(max_attempts):
+                                    time.sleep(check_interval)
+                                    pod = k8s_client.get_pod(pod_name, data['namespace'])
+                                    if pod and pod.status and pod.status.phase == 'Running':
+                                        # 检查容器是否就绪
+                                        if pod.status.container_statuses:
+                                            all_ready = all(cs.ready for cs in pod.status.container_statuses)
+                                            if all_ready:
+                                                LOG.info('Pod %s is ready, proceeding to next Pod', pod_name)
+                                                break
+                                else:
+                                    LOG.warning('Pod %s did not become ready within %d seconds, proceeding anyway', 
+                                              pod_name, pod_recreate_timeout)
+                        else:
+                            LOG.debug('Pod %s does not exist, skipping deletion', pod_name)
+                    except Exception as e:
+                        LOG.warning('Failed to delete Pod %s: %s (continuing with remaining Pods)', pod_name, str(e))
+                
+                LOG.info('Completed Pod restart trigger for StatefulSet %s/%s', data['namespace'], resource_name)
+            except Exception as e:
+                LOG.error('Failed to trigger Pod restart: %s (StatefulSet update completed, but Pods may not reflect changes)', str(e))
+                # 不影响主流程，继续执行
         
         # ==================== 等待 Pod 就绪（解决异步创建问题）====================
         replicas = int(data.get('replicas', 1))

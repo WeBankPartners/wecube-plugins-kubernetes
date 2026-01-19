@@ -223,6 +223,9 @@ class Client:
     
     def get_pod(self, name, namespace, **kwargs):
         return self._action_detail(self.core_client, 'read_namespaced_pod', name, namespace, **kwargs)
+    
+    def delete_pod(self, name, namespace, **kwargs):
+        return self._action(self.core_client, 'delete_namespaced_pod', name, namespace, **kwargs)
 
     # Service
     def create_service(self, namespace, body, **kwargs):
