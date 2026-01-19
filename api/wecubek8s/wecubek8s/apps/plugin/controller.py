@@ -132,8 +132,10 @@ class StatefulSet(controller.Plugin):
         """
         解析 envs 参数，如果是字符串则转换为数组
         支持的格式：
-        1. "[{name: 'sdf', value: 'we'}, {name: '44', value: '66'}]" (类Python字面量)
-        2. '[{"name": "sdf", "value": "we"}, {"name": "44", "value": "66"}]' (标准JSON)
+        1. "[{name: 'sdf', value: 'we'}, {name: '44', value: '66'}]" (类Python字面量数组)
+        2. '[{"name": "sdf", "value": "we"}, {"name": "44", "value": "66"}]' (标准JSON数组)
+        3. "{key1: 'value1', key2: 'value2'}" (字典格式，会转换为数组)
+        4. '{"key1": "value1", "key2": "value2"}' (标准JSON字典，会转换为数组)
         """
         if 'envs' not in item or item['envs'] is None:
             return
@@ -159,13 +161,19 @@ class StatefulSet(controller.Plugin):
                 parsed_envs = json.loads(envs)
                 if isinstance(parsed_envs, list):
                     item['envs'] = parsed_envs
-                    LOG.info('[StatefulSet] Successfully parsed envs using json.loads for %s', 
+                    LOG.info('[StatefulSet] Successfully parsed envs using json.loads (array) for %s', 
+                             item.get('name'))
+                    return
+                elif isinstance(parsed_envs, dict):
+                    # 将字典转换为数组格式 [{name: key, value: value}, ...]
+                    item['envs'] = [{'name': k, 'value': v} for k, v in parsed_envs.items()]
+                    LOG.info('[StatefulSet] Successfully parsed envs using json.loads (dict) for %s', 
                              item.get('name'))
                     return
                 else:
                     raise exceptions.ValidationError(
                         attribute='envs',
-                        msg=_('envs must be an array, got: %(type)s') % {'type': type(parsed_envs).__name__}
+                        msg=_('envs must be an array or dict, got: %(type)s') % {'type': type(parsed_envs).__name__}
                     )
             except (json.JSONDecodeError, ValueError) as e:
                 parse_error = str(e)
@@ -176,13 +184,19 @@ class StatefulSet(controller.Plugin):
                 parsed_envs = ast.literal_eval(envs)
                 if isinstance(parsed_envs, list):
                     item['envs'] = parsed_envs
-                    LOG.info('[StatefulSet] Successfully parsed envs using ast.literal_eval for %s', 
+                    LOG.info('[StatefulSet] Successfully parsed envs using ast.literal_eval (array) for %s', 
+                             item.get('name'))
+                    return
+                elif isinstance(parsed_envs, dict):
+                    # 将字典转换为数组格式 [{name: key, value: value}, ...]
+                    item['envs'] = [{'name': k, 'value': v} for k, v in parsed_envs.items()]
+                    LOG.info('[StatefulSet] Successfully parsed envs using ast.literal_eval (dict) for %s', 
                              item.get('name'))
                     return
                 else:
                     raise exceptions.ValidationError(
                         attribute='envs',
-                        msg=_('envs must be an array, got: %(type)s') % {'type': type(parsed_envs).__name__}
+                        msg=_('envs must be an array or dict, got: %(type)s') % {'type': type(parsed_envs).__name__}
                     )
             except (SyntaxError, ValueError) as e:
                 LOG.debug('[StatefulSet] ast.literal_eval failed for envs: %s', str(e))
@@ -190,7 +204,7 @@ class StatefulSet(controller.Plugin):
             # 如果两种方法都失败，抛出错误
             raise exceptions.ValidationError(
                 attribute='envs',
-                msg=_('Failed to parse envs string. Expected array format like "[{name: \'key\', value: \'val\'}]". Original error: %(error)s') % {'error': parse_error}
+                msg=_('Failed to parse envs string. Expected array format like "[{name: \'key\', value: \'val\'}]" or dict format like "{key: \'value\'}". Original error: %(error)s') % {'error': parse_error}
             )
         else:
             # 如果既不是字符串也不是列表，抛出错误
