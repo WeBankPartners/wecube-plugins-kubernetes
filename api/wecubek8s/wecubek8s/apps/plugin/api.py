@@ -615,29 +615,31 @@ class Deployment:
             if private_registry:
                 init_image = f"{private_registry}/{init_image}"
             
-            logs_permission_init = {
-                'name': 'fix-logs-permissions',
-                'image': init_image,
-                'command': ['/bin/sh', '-c'],
-                'args': [
-                    'mkdir -p /logs && chown -R 10001:10001 /logs && chmod -R 775 /logs && echo "✓ Logs directory permissions fixed"'
-                ],
-                'volumeMounts': [{
-                    'name': 'instance-logs',
-                    'mountPath': '/logs'
-                }],
-                'securityContext': {
-                    'runAsUser': 0  # 以 root 运行来修改权限
-                }
-            }
+            # 注释掉 fix-logs-permissions init-container（暂时不使用）
+            # logs_permission_init = {
+            #     'name': 'fix-logs-permissions',
+            #     'image': init_image,
+            #     'command': ['/bin/sh', '-c'],
+            #     'args': [
+            #         'mkdir -p /logs && chown -R 10001:10001 /logs && chmod -R 775 /logs && echo "✓ Logs directory permissions fixed"'
+            #     ],
+            #     'volumeMounts': [{
+            #         'name': 'instance-logs',
+            #         'mountPath': '/logs'
+            #     }],
+            #     'securityContext': {
+            #         'runAsUser': 0  # 以 root 运行来修改权限
+            #     }
+            # }
             
-            # 将 logs 权限修复 initContainer 插入到列表开头（优先执行）
-            if init_containers:
-                init_containers.insert(0, logs_permission_init)
-            else:
-                init_containers = [logs_permission_init]
+            # # 将 logs 权限修复 initContainer 插入到列表开头（优先执行）
+            # if init_containers:
+            #     init_containers.insert(0, logs_permission_init)
+            # else:
+            #     init_containers = [logs_permission_init]
             
-            LOG.info('Added logs permission fix initContainer using image: %s', init_image)
+            # LOG.info('Added logs permission fix initContainer using image: %s', init_image)
+            pass  # 占位符，保持代码结构
         
         # 为 initContainer 镜像也创建 registry secret（如果提供了认证信息）
         if init_containers and image_pull_username and image_pull_password:
@@ -1076,29 +1078,31 @@ class StatefulSet:
             if private_registry:
                 init_image = f"{private_registry}/{init_image}"
             
-            logs_permission_init = {
-                'name': 'fix-logs-permissions',
-                'image': init_image,
-                'command': ['/bin/sh', '-c'],
-                'args': [
-                    'mkdir -p /logs && chown -R 10001:10001 /logs && chmod -R 775 /logs && echo "✓ Logs directory permissions fixed"'
-                ],
-                'volumeMounts': [{
-                    'name': 'instance-logs',
-                    'mountPath': '/logs'
-                }],
-                'securityContext': {
-                    'runAsUser': 0  # 以 root 运行来修改权限
-                }
-            }
+            # 注释掉 fix-logs-permissions init-container（暂时不使用）
+            # logs_permission_init = {
+            #     'name': 'fix-logs-permissions',
+            #     'image': init_image,
+            #     'command': ['/bin/sh', '-c'],
+            #     'args': [
+            #         'mkdir -p /logs && chown -R 10001:10001 /logs && chmod -R 775 /logs && echo "✓ Logs directory permissions fixed"'
+            #     ],
+            #     'volumeMounts': [{
+            #         'name': 'instance-logs',
+            #         'mountPath': '/logs'
+            #     }],
+            #     'securityContext': {
+            #         'runAsUser': 0  # 以 root 运行来修改权限
+            #     }
+            # }
             
-            # 将 logs 权限修复 initContainer 插入到列表开头（优先执行）
-            if init_containers:
-                init_containers.insert(0, logs_permission_init)
-            else:
-                init_containers = [logs_permission_init]
+            # # 将 logs 权限修复 initContainer 插入到列表开头（优先执行）
+            # if init_containers:
+            #     init_containers.insert(0, logs_permission_init)
+            # else:
+            #     init_containers = [logs_permission_init]
             
-            LOG.info('Added logs permission fix initContainer using image: %s', init_image)
+            # LOG.info('Added logs permission fix initContainer using image: %s', init_image)
+            pass  # 占位符，保持代码结构
         
         # 为 initContainer 镜像也创建 registry secret（如果提供了认证信息）
         if init_containers and image_pull_username and image_pull_password:
