@@ -250,6 +250,7 @@
                     <parameter datatype="string" mappingType="constant" required="N" description="process name for liveness probe">process_name</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="process keyword for liveness probe">process_keyword</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="deploy script to run before container starts">image_deploy_script</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="logs path for container">log_path</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>

@@ -96,10 +96,30 @@ class Deployment(controller.Plugin):
         for key, value in defaults.items():
             if not item.get(key):
                 item[key] = value
+    
+    def validate_log_path(self, item):
+        """
+        校验 log_path 参数
+        如果 log_path 为空字符串或只包含空白字符，则移除该字段（使用默认值）
+        如果 log_path 有值但不以 / 开头，则抛出验证错误
+        """
+        if 'log_path' in item:
+            log_path = item['log_path']
+            if log_path is None or (isinstance(log_path, str) and log_path.strip() == ''):
+                # 空值，移除该字段，将使用默认值 /logs
+                del item['log_path']
+                LOG.info('[Deployment] log_path is empty, will use default /logs for %s', item.get('name'))
+            elif not log_path.startswith('/'):
+                # 非空值但格式不正确
+                raise exceptions.ValidationError(
+                    attribute='log_path',
+                    msg=_('log_path must be an absolute path starting with /, got: %(path)s') % {'path': log_path}
+                )
 
     def validate_item_apply(self, item_index, item):
         clean_item = crud.ColumnValidator.get_clean_data(rules.deployment_rules, item, 'check')
         self.set_item_default(clean_item)
+        self.validate_log_path(clean_item)
         return clean_item
 
     def validate_item_destroy(self, item_index, item):
@@ -127,6 +147,25 @@ class StatefulSet(controller.Plugin):
         # StatefulSet 默认 serviceName 为资源名称
         if not item.get('serviceName'):
             item['serviceName'] = item.get('name', '')
+    
+    def validate_log_path(self, item):
+        """
+        校验 log_path 参数
+        如果 log_path 为空字符串或只包含空白字符，则移除该字段（使用默认值）
+        如果 log_path 有值但不以 / 开头，则抛出验证错误
+        """
+        if 'log_path' in item:
+            log_path = item['log_path']
+            if log_path is None or (isinstance(log_path, str) and log_path.strip() == ''):
+                # 空值，移除该字段，将使用默认值 /logs
+                del item['log_path']
+                LOG.info('[StatefulSet] log_path is empty, will use default /logs for %s', item.get('name'))
+            elif not log_path.startswith('/'):
+                # 非空值但格式不正确
+                raise exceptions.ValidationError(
+                    attribute='log_path',
+                    msg=_('log_path must be an absolute path starting with /, got: %(path)s') % {'path': log_path}
+                )
 
     def parse_envs_if_string(self, item):
         """
@@ -252,6 +291,7 @@ class StatefulSet(controller.Plugin):
         
         clean_item = crud.ColumnValidator.get_clean_data(rules.deployment_rules, item, 'check')
         self.set_item_default(clean_item)
+        self.validate_log_path(clean_item)
         return clean_item
 
     def validate_item_destroy(self, item_index, item):

@@ -186,6 +186,10 @@ deployment_rules = [
                          rule=validator.LengthValidator(0, 8192),
                          validate_on=['check:O'],
                          nullable=True),
+    crud.ColumnValidator(field='log_path',
+                         rule=validator.RegexValidator(r'^(/[a-zA-Z0-9_\-./]*)?$'),
+                         validate_on=['check:O'],
+                         nullable=True),
 ]
 
 # DaemonSet 规则（类似 deployment_rules，但不需要 replicas 和 affinity）

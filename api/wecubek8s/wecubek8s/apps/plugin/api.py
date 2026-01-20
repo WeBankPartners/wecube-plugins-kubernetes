@@ -510,6 +510,9 @@ class Deployment:
             # 构建宿主机日志路径：deployment_path + logs
             host_log_path = deployment_path + 'logs'
             
+            # 获取容器内日志挂载路径（支持自定义，默认 /logs）
+            log_path = data.get('log_path', '/logs')
+            
             # 添加 hostPath volume
             log_volume_name = 'instance-logs'
             pod_spec_src_vols.append({
@@ -520,14 +523,14 @@ class Deployment:
                 }
             })
             
-            # 添加 volume mount 到容器的 /logs
+            # 添加 volume mount 到容器（使用 log_path 参数）
             pod_spec_mnt_vols.append({
                 'name': log_volume_name,
-                'mountPath': '/logs',
+                'mountPath': log_path,
                 'readOnly': False
             })
             
-            LOG.info('Auto-mounted host path %s to /logs', host_log_path)
+            LOG.info('Auto-mounted host path %s to %s', host_log_path, log_path)
         
         pod_spec_limit = api_utils.convert_resource_limit(data.get('cpu', None), data.get('memory', None))
         
@@ -973,6 +976,9 @@ class StatefulSet:
             # 构建宿主机日志路径：deployment_path + logs
             host_log_path = deployment_path + 'logs'
             
+            # 获取容器内日志挂载路径（支持自定义，默认 /logs）
+            log_path = data.get('log_path', '/logs')
+            
             # 添加 hostPath volume
             log_volume_name = 'instance-logs'
             pod_spec_src_vols.append({
@@ -983,14 +989,14 @@ class StatefulSet:
                 }
             })
             
-            # 添加 volume mount 到容器的 /logs
+            # 添加 volume mount 到容器（使用 log_path 参数）
             pod_spec_mnt_vols.append({
                 'name': log_volume_name,
-                'mountPath': '/logs',
+                'mountPath': log_path,
                 'readOnly': False
             })
             
-            LOG.info('Auto-mounted host path %s to /logs', host_log_path)
+            LOG.info('Auto-mounted host path %s to %s', host_log_path, log_path)
         
         pod_spec_limit = api_utils.convert_resource_limit(data.get('cpu', None), data.get('memory', None))
         
