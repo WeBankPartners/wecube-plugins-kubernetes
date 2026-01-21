@@ -1758,6 +1758,33 @@ class StatefulSet:
         else:
             LOG.info('Updating existing StatefulSet: %s/%s', data['namespace'], resource_name)
 
+            # ==================== 处理 volumeClaimTemplates 不可变限制 ====================
+            # Kubernetes StatefulSet 的 volumeClaimTemplates 字段一旦创建就不能修改
+            # 更新时必须保留原有的 volumeClaimTemplates，否则会报错：
+            # "Forbidden: updates to statefulset spec for fields other than 'replicas', 'template', and 'updateStrategy' are forbidden"
+            
+            old_vct = exists_resource.spec.volume_claim_templates
+            new_vct = resource_template.get('spec', {}).get('volumeClaimTemplates')
+            
+            if old_vct:
+                # 原有 StatefulSet 有 volumeClaimTemplates，必须保留
+                LOG.info('Preserving existing volumeClaimTemplates (immutable field, count: %d)', len(old_vct))
+                resource_template['spec']['volumeClaimTemplates'] = [
+                    vct.to_dict() for vct in old_vct
+                ]
+                
+                # 如果用户尝试修改 volumeClaimTemplates，记录警告
+                if new_vct:
+                    LOG.warning('volumeClaimTemplates cannot be modified on existing StatefulSet. '
+                              'The new volumeClaimTemplates configuration will be IGNORED. '
+                              'To change storage config, you must delete and recreate the StatefulSet.')
+            elif new_vct:
+                # 原有 StatefulSet 没有 volumeClaimTemplates，但新请求想要添加
+                # 这也是不允许的，需要删除这个字段
+                LOG.warning('Cannot add volumeClaimTemplates to existing StatefulSet (immutable field). '
+                          'The volumeClaimTemplates configuration will be IGNORED.')
+                del resource_template['spec']['volumeClaimTemplates']
+
             # 使用 replace 而不是 patch,完全替换资源定义
             # 这样可以避免 patch 合并时保留旧字段的问题
             # 注意: replace 需要保留 resourceVersion
