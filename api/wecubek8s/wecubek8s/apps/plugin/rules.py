@@ -190,6 +190,14 @@ deployment_rules = [
                          rule=validator.RegexValidator(r'^(/[a-zA-Z0-9_\-./]*)?$'),
                          validate_on=['check:O'],
                          nullable=True),
+    crud.ColumnValidator(field='block_storage',
+                         rule=validator.LengthValidator(0, 2048),
+                         validate_on=['check:O'],
+                         nullable=True),
+    crud.ColumnValidator(field='mount_path',
+                         rule=validator.LengthValidator(0, 2048),
+                         validate_on=['check:O'],
+                         nullable=True),
 ]
 
 # DaemonSet 规则（类似 deployment_rules，但不需要 replicas 和 affinity）

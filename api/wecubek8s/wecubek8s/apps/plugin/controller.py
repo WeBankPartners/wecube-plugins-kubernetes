@@ -148,6 +148,190 @@ class StatefulSet(controller.Plugin):
         if not item.get('serviceName'):
             item['serviceName'] = item.get('name', '')
     
+    def _query_block_storage_from_cmdb(self, guid):
+        """
+        从 CMDB 查询 block_storage CI 的详细信息
+        
+        Args:
+            guid: block_storage 的 GUID
+            
+        Returns:
+            dict: 包含 name, accessModes, storageClassName, storage 的字典，失败时返回 None
+        """
+        try:
+            from wecubek8s.common import wecmdb
+            cmdb_server = CONF.wecube.base_url
+            if not cmdb_server:
+                LOG.warning('CMDB base_url not configured, cannot query block_storage')
+                return None
+            
+            # 获取 CMDB 客户端
+            cmdb_client = wecmdb.EntityClient(cmdb_server)
+            
+            # 通过 GUID 查询 block_storage
+            query_data = {
+                "criteria": {
+                    "attrName": "guid",
+                    "op": "eq",
+                    "condition": guid
+                }
+            }
+            
+            LOG.info('Querying pvc from CMDB with guid: %s', guid)
+            response = cmdb_client.query('wecmdb', 'pvc', query_data)
+            
+            if response and response.get('data') and len(response['data']) > 0:
+                pvc_data = response['data'][0]
+                # 从 CMDB 获取存储容量，默认单位为 Gi
+                storage_amount = pvc_data.get('storage_amount', '10')
+                # 如果 storage_amount 是纯数字字符串，添加 Gi 单位
+                if storage_amount and not any(unit in storage_amount for unit in ['Gi', 'Mi', 'Ti', 'G', 'M', 'T']):
+                    storage_amount = f'{storage_amount}Gi'
+                
+                result = {
+                    'name': pvc_data.get('key_name', 'data'),
+                    'accessModes': pvc_data.get('access_mode', 'ReadWriteOnce'),
+                    'storageClassName': pvc_data.get('storage_class', 'standard'),
+                    'storage': storage_amount
+                }
+                LOG.info('Found pvc: name=%s, accessModes=%s, storageClassName=%s, storage=%s',
+                        result['name'], result['accessModes'], result['storageClassName'], result['storage'])
+                return result
+            else:
+                LOG.warning('No pvc found in CMDB for guid: %s', guid)
+                return None
+        except Exception as e:
+            LOG.error('Failed to query block_storage from CMDB for guid %s: %s', guid, str(e), exc_info=True)
+            return None
+    
+    def parse_and_build_volume_claim_templates(self, item):
+        """
+        解析 block_storage 和 mount_path 参数，构建 volumeClaimTemplates
+        
+        Args:
+            item: 请求数据字典
+            
+        处理逻辑：
+        1. 从 item 中获取 block_storage 和 mount_path 参数
+        2. 解析逗号分隔的字符串
+        3. 验证两个列表长度是否一致
+        4. 对每个 block_storage GUID 查询 CMDB 获取配置信息
+        5. 构建 volumeClaimTemplates 和 volumes 配置
+        """
+        block_storage_str = item.get('block_storage', '').strip()
+        mount_path_str = item.get('mount_path', '').strip()
+        
+        # 如果两个参数都为空，不处理
+        if not block_storage_str and not mount_path_str:
+            LOG.info('No block_storage or mount_path provided, skipping volume claim template generation')
+            return
+        
+        # 如果只提供了其中一个参数，抛出错误
+        if not block_storage_str or not mount_path_str:
+            raise exceptions.ValidationError(
+                attribute='block_storage/mount_path',
+                msg=_('block_storage and mount_path must be provided together')
+            )
+        
+        # 解析逗号分隔的字符串
+        block_storage_guids = [guid.strip() for guid in block_storage_str.split(',') if guid.strip()]
+        mount_paths = [path.strip() for path in mount_path_str.split(',') if path.strip()]
+        
+        LOG.info('Parsed block_storage guids: %s', block_storage_guids)
+        LOG.info('Parsed mount_paths: %s', mount_paths)
+        
+        # 验证数量是否匹配
+        if len(block_storage_guids) != len(mount_paths):
+            raise exceptions.ValidationError(
+                attribute='block_storage/mount_path',
+                msg=_('block_storage and mount_path count mismatch: %(bs_count)d vs %(mp_count)d') % {
+                    'bs_count': len(block_storage_guids),
+                    'mp_count': len(mount_paths)
+                }
+            )
+        
+        # 验证 mount_path 格式（必须是绝对路径）
+        for mount_path in mount_paths:
+            if not mount_path.startswith('/'):
+                raise exceptions.ValidationError(
+                    attribute='mount_path',
+                    msg=_('mount_path must be an absolute path starting with /, got: %(path)s') % {'path': mount_path}
+                )
+        
+        # 查询 CMDB 并构建 volumeClaimTemplates
+        volume_claim_templates = []
+        volumes = []
+        
+        for idx, (guid, mount_path) in enumerate(zip(block_storage_guids, mount_paths)):
+            LOG.info('Processing block_storage [%d/%d]: guid=%s, mount_path=%s', 
+                    idx + 1, len(block_storage_guids), guid, mount_path)
+            
+            # 从 CMDB 查询 block_storage 信息
+            block_storage_info = self._query_block_storage_from_cmdb(guid)
+            
+            if not block_storage_info:
+                # 查询失败，使用默认值并记录警告
+                LOG.warning('Failed to query block_storage info for guid %s, using default values', guid)
+                block_storage_info = {
+                    'name': f'data-{idx}',
+                    'accessModes': 'ReadWriteOnce',
+                    'storageClassName': 'standard',
+                    'storage': '10Gi'
+                }
+            
+            # 确保 accessModes 是数组格式
+            access_modes = block_storage_info['accessModes']
+            if isinstance(access_modes, str):
+                # 如果是字符串，转换为数组
+                access_modes = [access_modes]
+            elif not isinstance(access_modes, list):
+                LOG.warning('Invalid accessModes type: %s, using default [ReadWriteOnce]', type(access_modes))
+                access_modes = ['ReadWriteOnce']
+            
+            # 构建 volumeClaimTemplate
+            volume_name = block_storage_info['name']
+            volume_claim_template = {
+                'metadata': {
+                    'name': volume_name
+                },
+                'spec': {
+                    'accessModes': access_modes,
+                    'storageClassName': block_storage_info['storageClassName'],
+                    'resources': {
+                        'requests': {
+                            'storage': block_storage_info['storage']
+                        }
+                    }
+                }
+            }
+            
+            volume_claim_templates.append(volume_claim_template)
+            
+            # 构建 volume mount 配置（用于 Pod 容器挂载）
+            volume_mount = {
+                'name': volume_name,
+                'mountPath': mount_path
+            }
+            volumes.append(volume_mount)
+            
+            LOG.info('Created volumeClaimTemplate: name=%s, accessModes=%s, storageClass=%s, storage=%s, mountPath=%s',
+                    volume_name, access_modes, block_storage_info['storageClassName'], 
+                    block_storage_info['storage'], mount_path)
+        
+        # 将生成的配置保存到 item 中
+        item['volumeClaimTemplates'] = volume_claim_templates
+        
+        # 将 volumes 合并到现有的 volumes 配置中
+        # 注意：这里的 volumes 是 volumeMount 配置，需要添加到容器的 volumeMounts 中
+        if 'volumes' not in item:
+            item['volumes'] = []
+        
+        # 添加持久卷挂载到 volumes 列表
+        item['volumes'].extend(volumes)
+        
+        LOG.info('Successfully built %d volumeClaimTemplates and %d volume mounts',
+                len(volume_claim_templates), len(volumes))
+    
     def validate_log_path(self, item):
         """
         校验 log_path 参数
@@ -288,6 +472,9 @@ class StatefulSet(controller.Plugin):
         
         # 添加默认环境变量
         self.add_default_envs(item)
+        
+        # 解析并构建 volumeClaimTemplates（基于 block_storage 和 mount_path）
+        self.parse_and_build_volume_claim_templates(item)
         
         clean_item = crud.ColumnValidator.get_clean_data(rules.deployment_rules, item, 'check')
         self.set_item_default(clean_item)
