@@ -233,8 +233,8 @@ class StatefulSet(controller.Plugin):
             item: 请求数据字典
             
         处理逻辑：
-        1. 从 item 中获取 block_storage 参数（字符串数组格式，如 "['guid1', 'guid2']"）
-        2. 解析字符串数组
+        1. 从 item 中获取 block_storage 参数（数组或字符串数组格式）
+        2. 解析为列表
         3. 对每个 block_storage GUID 查询 CMDB 获取配置信息（包括 mount_path）
         4. 构建 volumeClaimTemplates 和 volumes 配置
         """
@@ -244,22 +244,36 @@ class StatefulSet(controller.Plugin):
         
         import ast
         
-        block_storage_str = item.get('block_storage', '').strip()
-        LOG.debug('Raw block_storage parameter from item: "%s" (type: %s)', block_storage_str, type(block_storage_str))
+        block_storage_value = item.get('block_storage', '')
+        LOG.debug('Raw block_storage parameter from item: "%s" (type: %s)', block_storage_value, type(block_storage_value))
         
         # 如果 block_storage 为空，不处理
-        if not block_storage_str:
+        if not block_storage_value:
             LOG.info('No block_storage provided, skipping volume claim template generation')
             LOG.info('=== [parse_and_build_volume_claim_templates] End (no block_storage) ===')
             return
         
-        # 解析字符串数组格式，如 "['guid1', 'guid2']"
+        # 处理 block_storage 参数（支持列表或字符串格式）
         try:
-            LOG.info('Attempting to parse block_storage string: "%s"', block_storage_str)
-            
-            # 尝试将字符串解析为 Python 列表
-            block_storage_guids = ast.literal_eval(block_storage_str)
-            LOG.debug('Parsed result: %s (type: %s)', block_storage_guids, type(block_storage_guids))
+            # 如果已经是列表，直接使用（WeCube multiple="Y" 会传入列表）
+            if isinstance(block_storage_value, list):
+                LOG.info('block_storage is already a list: %s', block_storage_value)
+                block_storage_guids = block_storage_value
+            # 如果是字符串，尝试解析（向后兼容）
+            elif isinstance(block_storage_value, str):
+                block_storage_str = block_storage_value.strip()
+                if not block_storage_str:
+                    LOG.info('block_storage is empty string, skipping volume claim template generation')
+                    LOG.info('=== [parse_and_build_volume_claim_templates] End (empty string) ===')
+                    return
+                
+                LOG.info('Attempting to parse block_storage string: "%s"', block_storage_str)
+                # 尝试将字符串解析为 Python 列表
+                block_storage_guids = ast.literal_eval(block_storage_str)
+                LOG.debug('Parsed result: %s (type: %s)', block_storage_guids, type(block_storage_guids))
+            else:
+                LOG.error('block_storage must be a list or string, but got: %s', type(block_storage_value).__name__)
+                raise ValueError(f'block_storage must be a list or string, got: {type(block_storage_value).__name__}')
             
             # 确保解析结果是列表
             if not isinstance(block_storage_guids, list):
@@ -268,8 +282,8 @@ class StatefulSet(controller.Plugin):
             
             LOG.debug('Before filtering: %d items: %s', len(block_storage_guids), block_storage_guids)
             
-            # 过滤空字符串并去除空白
-            block_storage_guids = [guid.strip() for guid in block_storage_guids if guid and guid.strip()]
+            # 过滤空字符串并去除空白（确保每个元素都是字符串）
+            block_storage_guids = [str(guid).strip() for guid in block_storage_guids if guid and str(guid).strip()]
             LOG.debug('After filtering: %d items: %s', len(block_storage_guids), block_storage_guids)
             
             if not block_storage_guids:
@@ -278,10 +292,10 @@ class StatefulSet(controller.Plugin):
                 return
                 
         except (ValueError, SyntaxError) as e:
-            LOG.error('Failed to parse block_storage string: %s, error: %s', block_storage_str, str(e), exc_info=True)
+            LOG.error('Failed to parse block_storage: %s, error: %s', block_storage_value, str(e), exc_info=True)
             raise exceptions.ValidationError(
                 attribute='block_storage',
-                msg=_('block_storage must be a valid string array format like "[\'guid1\', \'guid2\']", error: %(error)s') % {'error': str(e)}
+                msg=_('block_storage must be a list or valid string array format like "[\'guid1\', \'guid2\']", error: %(error)s') % {'error': str(e)}
             )
         
         LOG.info('✓ Successfully parsed %d block_storage guids: %s', len(block_storage_guids), block_storage_guids)
