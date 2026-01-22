@@ -385,15 +385,13 @@ class StatefulSet(controller.Plugin):
             LOG.debug('Appended to volume_claim_templates list (current count: %d)', len(volume_claim_templates))
             
             # 构建 volume mount 配置（用于 Pod 容器挂载）
-            # 注意：对于 StatefulSet，volumeClaimTemplate 会自动创建和挂载 PVC
-            # 但为了通过验证，我们需要提供 type 和 typeSpec 字段
+            # 注意：对于 StatefulSet + volumeClaimTemplates：
+            # - volumeClaimTemplate 会自动创建 PVC 并使其对 Pod 可用
+            # - 我们只需要提供容器的 volumeMount 配置（name + mountPath）
+            # - 不需要在 Pod 的 volumes 中显式引用 PVC（这会导致 PVC not found 错误）
             volume_mount = {
                 'name': volume_name,
-                'mountPath': mount_path,
-                'type': 'persistentVolumeClaim',
-                'typeSpec': {
-                    'name': volume_name  # claimName 引用 volumeClaimTemplate 创建的 PVC
-                }
+                'mountPath': mount_path
             }
             LOG.debug('volumeMount created: %s', volume_mount)
             
@@ -414,27 +412,19 @@ class StatefulSet(controller.Plugin):
         item['volumeClaimTemplates'] = volume_claim_templates
         LOG.debug('item["volumeClaimTemplates"] = %s', volume_claim_templates)
         
-        # 将 volumes 合并到现有的 volumes 配置中
-        # 注意：这里的 volumes 是 volumeMount 配置，需要添加到容器的 volumeMounts 中
-        # 确保 item['volumes'] 是一个列表（可能是空字符串或不存在）
-        if 'volumes' not in item or not item['volumes'] or isinstance(item['volumes'], str):
-            LOG.debug('Initializing item["volumes"] as empty list (was: %s)', item.get('volumes', 'NOT_SET'))
-            item['volumes'] = []
-        elif not isinstance(item['volumes'], list):
-            LOG.warning('item["volumes"] is not a list (type: %s), converting to list', type(item['volumes']).__name__)
-            item['volumes'] = []
-        else:
-            LOG.debug('item["volumes"] already exists as list with %d items', len(item['volumes']))
-        
-        # 添加持久卷挂载到 volumes 列表
-        LOG.debug('Extending item["volumes"] with %d new volume mounts', len(volumes))
-        item['volumes'].extend(volumes)
-        LOG.debug('item["volumes"] now has %d items total', len(item['volumes']))
-        LOG.debug('Final item["volumes"] = %s', item['volumes'])
+        # 将 volumeClaimTemplate 的挂载信息保存到单独的字段
+        # 注意：对于 StatefulSet，volumeClaimTemplates 会自动创建 PVC 并使其对 Pod 可用
+        # 我们不应该在 Pod 的 volumes 中引用这些 PVC（会导致 "PVC not found" 错误）
+        # 而是应该将挂载信息单独保存，在 api.py 中直接添加到容器的 volumeMounts
+        LOG.debug('Setting item["volumeClaimMounts"] with %d mounts', len(volumes))
+        item['volumeClaimMounts'] = volumes
+        LOG.debug('item["volumeClaimMounts"] = %s', volumes)
         
         LOG.info('========================================')
-        LOG.info('✓ Successfully built %d volumeClaimTemplates and %d volume mounts',
+        LOG.info('✓ Successfully built %d volumeClaimTemplates and %d volumeClaimMounts',
                 len(volume_claim_templates), len(volumes))
+        LOG.info('✓ volumeClaimTemplates will be used by StatefulSet to auto-create PVCs')
+        LOG.info('✓ volumeClaimMounts will be added to container volumeMounts (NOT to Pod volumes)')
         LOG.info('=== [parse_and_build_volume_claim_templates] End successfully ===')
         LOG.info('========================================')
     

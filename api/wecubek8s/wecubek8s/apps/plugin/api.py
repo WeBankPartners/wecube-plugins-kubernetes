@@ -1023,6 +1023,27 @@ class StatefulSet:
         
         containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit, deploy_script)
         
+        # 处理 volumeClaimTemplates 的挂载配置
+        # 对于 StatefulSet，volumeClaimTemplates 会自动创建 PVC 并使其对 Pod 可用
+        # 我们需要将 volumeClaimMounts 中的挂载信息添加到每个容器的 volumeMounts 中
+        volume_claim_mounts = data.get('volumeClaimMounts', [])
+        if volume_claim_mounts:
+            LOG.info('[StatefulSet] Adding %d volumeClaimMounts to containers', len(volume_claim_mounts))
+            for container in containers:
+                # 确保容器有 volumeMounts 字段
+                if 'volumeMounts' not in container:
+                    container['volumeMounts'] = []
+                # 添加 volumeClaimMounts
+                for mount in volume_claim_mounts:
+                    mount_config = {
+                        'name': mount['name'],
+                        'mountPath': mount['mountPath'],
+                        'readOnly': False
+                    }
+                    container['volumeMounts'].append(mount_config)
+                    LOG.info('[StatefulSet] Added volumeMount to container "%s": %s -> %s',
+                            container.get('name'), mount['name'], mount['mountPath'])
+        
         # 智能添加存活探针和就绪探针（基于容器端口和进程信息自动选择最佳探针类型）
         process_name = data.get('process_name')
         process_keyword = data.get('process_keyword')
