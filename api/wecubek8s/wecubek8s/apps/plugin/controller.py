@@ -410,11 +410,15 @@ class StatefulSet(controller.Plugin):
         
         # 将 volumes 合并到现有的 volumes 配置中
         # 注意：这里的 volumes 是 volumeMount 配置，需要添加到容器的 volumeMounts 中
-        if 'volumes' not in item:
-            LOG.debug('Creating new item["volumes"] list')
+        # 确保 item['volumes'] 是一个列表（可能是空字符串或不存在）
+        if 'volumes' not in item or not item['volumes'] or isinstance(item['volumes'], str):
+            LOG.debug('Initializing item["volumes"] as empty list (was: %s)', item.get('volumes', 'NOT_SET'))
+            item['volumes'] = []
+        elif not isinstance(item['volumes'], list):
+            LOG.warning('item["volumes"] is not a list (type: %s), converting to list', type(item['volumes']).__name__)
             item['volumes'] = []
         else:
-            LOG.debug('item["volumes"] already exists with %d items', len(item['volumes']))
+            LOG.debug('item["volumes"] already exists as list with %d items', len(item['volumes']))
         
         # 添加持久卷挂载到 volumes 列表
         LOG.debug('Extending item["volumes"] with %d new volume mounts', len(volumes))
