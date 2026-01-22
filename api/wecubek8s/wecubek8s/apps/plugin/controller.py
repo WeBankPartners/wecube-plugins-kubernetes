@@ -206,9 +206,9 @@ class StatefulSet(controller.Plugin):
                     LOG.warning('No mount_path found in CMDB for guid: %s', guid)
                 
                 result = {
-                    'name': pvc_data.get('key_name', 'data'),
-                    'accessModes': pvc_data.get('access_mode', 'ReadWriteOnce'),
-                    'storageClassName': pvc_data.get('storage_class', 'standard'),
+                    'name': pvc_data.get('key_name', '').strip() or 'data',
+                    'accessModes': pvc_data.get('access_mode', '').strip() or 'ReadWriteOnce',
+                    'storageClassName': pvc_data.get('storage_class', '').strip() or 'standard',
                     'storage': storage_amount,
                     'mountPath': mount_path
                 }
@@ -385,9 +385,15 @@ class StatefulSet(controller.Plugin):
             LOG.debug('Appended to volume_claim_templates list (current count: %d)', len(volume_claim_templates))
             
             # 构建 volume mount 配置（用于 Pod 容器挂载）
+            # 注意：对于 StatefulSet，volumeClaimTemplate 会自动创建和挂载 PVC
+            # 但为了通过验证，我们需要提供 type 和 typeSpec 字段
             volume_mount = {
                 'name': volume_name,
-                'mountPath': mount_path
+                'mountPath': mount_path,
+                'type': 'persistentVolumeClaim',
+                'typeSpec': {
+                    'name': volume_name  # claimName 引用 volumeClaimTemplate 创建的 PVC
+                }
             }
             LOG.debug('volumeMount created: %s', volume_mount)
             
