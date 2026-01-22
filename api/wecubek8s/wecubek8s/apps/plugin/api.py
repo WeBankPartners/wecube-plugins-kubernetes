@@ -1779,19 +1779,44 @@ class StatefulSet:
         else:
             LOG.info('Updating existing StatefulSet: %s/%s', data['namespace'], resource_name)
 
-            # ==================== 处理 volumeClaimTemplates 不可变限制 ====================
-            # Kubernetes StatefulSet 的 volumeClaimTemplates 字段一旦创建就不能修改
-            # 更新时必须保留原有的 volumeClaimTemplates，否则会报错：
-            # "Forbidden: updates to statefulset spec for fields other than 'replicas', 'template', and 'updateStrategy' are forbidden"
+            # ==================== 处理不可变字段（immutable fields）====================
+            # Kubernetes StatefulSet 的以下字段一旦创建就不能修改：
+            # - volumeClaimTemplates
+            # - serviceName
+            # - selector
+            # - podManagementPolicy
+            # 更新时必须保留原有值，否则会报错：
+            # "Forbidden: updates to statefulset spec for fields other than 'replicas', 'ordinals', 
+            #  'template', 'updateStrategy', 'persistentVolumeClaimRetentionPolicy' and 'minReadySeconds' are forbidden"
             
+            from kubernetes import client
+            import json
+            
+            # 1. 处理 volumeClaimTemplates
             old_vct = exists_resource.spec.volume_claim_templates
             new_vct = resource_template.get('spec', {}).get('volumeClaimTemplates')
+            
+            # 【调试日志】记录新旧 volumeClaimTemplates 对比
+            if old_vct or new_vct:
+                LOG.info('========== StatefulSet volumeClaimTemplates Comparison ==========')
+                LOG.info('Old volumeClaimTemplates (count: %d):', len(old_vct) if old_vct else 0)
+                if old_vct:
+                    for i, vct in enumerate(old_vct):
+                        LOG.info('  [%d] %s', i, json.dumps(client.ApiClient().sanitize_for_serialization(vct), indent=4))
+                LOG.info('New volumeClaimTemplates (count: %d):', len(new_vct) if new_vct else 0)
+                if new_vct:
+                    for i, vct in enumerate(new_vct):
+                        LOG.info('  [%d] %s', i, json.dumps(vct, indent=4))
+                LOG.info('================================================================')
             
             if old_vct:
                 # 原有 StatefulSet 有 volumeClaimTemplates，必须保留
                 LOG.info('Preserving existing volumeClaimTemplates (immutable field, count: %d)', len(old_vct))
+                
+                # 【修复】使用 sanitize_for_serialization 而不是 to_dict()
+                # to_dict() 可能会引入字段顺序变化或默认值，导致 Kubernetes 认为内容被修改
                 resource_template['spec']['volumeClaimTemplates'] = [
-                    vct.to_dict() for vct in old_vct
+                    client.ApiClient().sanitize_for_serialization(vct) for vct in old_vct
                 ]
                 
                 # 如果用户尝试修改 volumeClaimTemplates，记录警告
@@ -1805,6 +1830,30 @@ class StatefulSet:
                 LOG.warning('Cannot add volumeClaimTemplates to existing StatefulSet (immutable field). '
                           'The volumeClaimTemplates configuration will be IGNORED.')
                 del resource_template['spec']['volumeClaimTemplates']
+            
+            # 2. 处理 selector（不可变字段）
+            old_selector = exists_resource.spec.selector
+            if old_selector:
+                LOG.info('Preserving existing selector (immutable field): %s', old_selector.match_labels)
+                resource_template['spec']['selector'] = {
+                    'matchLabels': dict(old_selector.match_labels) if old_selector.match_labels else {}
+                }
+            
+            # 3. 处理 serviceName（不可变字段）
+            old_service_name = exists_resource.spec.service_name
+            if old_service_name:
+                new_service_name = resource_template.get('spec', {}).get('serviceName')
+                if new_service_name and new_service_name != old_service_name:
+                    LOG.warning('serviceName cannot be modified on existing StatefulSet. '
+                              'Old: %s, New: %s. Using old value.', old_service_name, new_service_name)
+                LOG.info('Preserving existing serviceName (immutable field): %s', old_service_name)
+                resource_template['spec']['serviceName'] = old_service_name
+            
+            # 4. 处理 podManagementPolicy（不可变字段，如果存在）
+            old_pod_mgmt_policy = exists_resource.spec.pod_management_policy
+            if old_pod_mgmt_policy:
+                LOG.info('Preserving existing podManagementPolicy (immutable field): %s', old_pod_mgmt_policy)
+                resource_template['spec']['podManagementPolicy'] = old_pod_mgmt_policy
 
             # 使用 replace 而不是 patch,完全替换资源定义
             # 这样可以避免 patch 合并时保留旧字段的问题
