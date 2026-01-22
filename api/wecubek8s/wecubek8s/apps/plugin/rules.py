@@ -194,6 +194,14 @@ deployment_rules = [
                          rule=validator.TypeValidator(list),
                          validate_on=['check:O'],
                          nullable=True),
+    crud.ColumnValidator(field='volumeClaimTemplates',
+                         rule=validator.TypeValidator(list),
+                         validate_on=['check:O'],
+                         nullable=True),
+    crud.ColumnValidator(field='volumeClaimMounts',
+                         rule=validator.TypeValidator(list),
+                         validate_on=['check:O'],
+                         nullable=True),
 ]
 
 # DaemonSet 规则（类似 deployment_rules，但不需要 replicas 和 affinity）
