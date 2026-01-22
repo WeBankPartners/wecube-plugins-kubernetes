@@ -191,11 +191,7 @@ deployment_rules = [
                          validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='block_storage',
-                         rule=validator.LengthValidator(0, 2048),
-                         validate_on=['check:O'],
-                         nullable=True),
-    crud.ColumnValidator(field='mount_path',
-                         rule=validator.LengthValidator(0, 2048),
+                         rule=validator.TypeValidator(list),
                          validate_on=['check:O'],
                          nullable=True),
 ]
