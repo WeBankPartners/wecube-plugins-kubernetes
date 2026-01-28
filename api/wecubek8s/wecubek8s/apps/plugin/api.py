@@ -532,6 +532,17 @@ class Deployment:
             
             LOG.info('Auto-mounted host path %s to %s', host_log_path, log_path)
         
+        # 自动注入日志文件路径环境变量（无论是否有 deployment_path 都添加）
+        # 获取日志路径（如果上面的 deployment_path 块设置了 log_path 变量，使用该值；否则使用默认值）
+        log_path_for_env = data.get('log_path', '/logs')
+        import os
+        log_file_path = os.path.join(log_path_for_env, "*.log")
+        pod_spec_envs.append({
+            'name': '__FILE_LOG_PATH__',
+            'value': log_file_path
+        })
+        LOG.info('Auto-injected __FILE_LOG_PATH__ environment variable: %s', log_file_path)
+        
         pod_spec_limit = api_utils.convert_resource_limit(data.get('cpu', None), data.get('memory', None))
         
         # 从数据库的 cluster_info 中读取私有仓库地址
@@ -997,6 +1008,17 @@ class StatefulSet:
             })
             
             LOG.info('Auto-mounted host path %s to %s', host_log_path, log_path)
+        
+        # 自动注入日志文件路径环境变量（无论是否有 deployment_path 都添加）
+        # 获取日志路径（如果上面的 deployment_path 块设置了 log_path 变量，使用该值；否则使用默认值）
+        log_path_for_env = data.get('log_path', '/logs')
+        import os
+        log_file_path = os.path.join(log_path_for_env, "*.log")
+        pod_spec_envs.append({
+            'name': '__FILE_LOG_PATH__',
+            'value': log_file_path
+        })
+        LOG.info('Auto-injected __FILE_LOG_PATH__ environment variable: %s', log_file_path)
         
         pod_spec_limit = api_utils.convert_resource_limit(data.get('cpu', None), data.get('memory', None))
         
