@@ -301,8 +301,8 @@ class Client:
         has_namespace = self.get_namespace(name)
         if has_namespace is None:
             self.create_namespace(body, **kwargs)
-        else:
-            self.update_namespace(name, body)
+        # else:
+        #     self.update_namespace(name, body)
         return True
 
     # Endpoint
