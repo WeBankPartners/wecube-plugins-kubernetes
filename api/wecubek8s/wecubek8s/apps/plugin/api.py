@@ -549,7 +549,15 @@ class Deployment:
         private_registry = cluster_info.get('private_registry', '')
         
         # 构建完整的镜像地址（拼接私有仓库地址）
-        image_name = data['image_name'].strip()
+        image_name = data.get('image_name', '').strip()
+        
+        # 防御性检查：确保 image_name 不为空
+        if not image_name:
+            raise exceptions.ValidationError(
+                attribute='image_name',
+                message=_('image_name cannot be empty')
+            )
+        
         if private_registry:
             # 如果配置了私有仓库，拼接私有仓库地址
             full_image_name = f"{private_registry}/{image_name}"
@@ -1026,7 +1034,15 @@ class StatefulSet:
         private_registry = cluster_info.get('private_registry', '')
         
         # 构建完整的镜像地址（拼接私有仓库地址）
-        image_name = data['image_name'].strip()
+        image_name = data.get('image_name', '').strip()
+        
+        # 防御性检查：确保 image_name 不为空
+        if not image_name:
+            raise exceptions.ValidationError(
+                attribute='image_name',
+                message=_('image_name cannot be empty')
+            )
+        
         if private_registry:
             # 如果配置了私有仓库，拼接私有仓库地址
             full_image_name = f"{private_registry}/{image_name}"

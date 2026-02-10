@@ -19,6 +19,12 @@ def escape_name(name):
     '-' or '.', and must start and end with an alphanumeric character 
     (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')
     '''
+    # 防御性检查：确保 name 不是 None 或空字符串
+    if name is None:
+        raise ValueError('escape_name: name cannot be None')
+    if not name or not name.strip():
+        raise ValueError(f'escape_name: name cannot be empty, got: {repr(name)}')
+    
     rule = r'[^.a-z0-9]'
     return re.sub(rule, '-', name.lower())
 
@@ -104,6 +110,12 @@ def escape_service_name(name, max_length=63):
         max_length: 最大长度限制（默认 63）。对于 StatefulSet，建议使用更小的值（如 50）
                    以预留空间给 Kubernetes 自动添加的后缀（如 controller-revision-hash）
     '''
+    # 防御性检查：确保 name 不是 None 或空字符串
+    if name is None:
+        raise ValueError('escape_service_name: name cannot be None')
+    if not name or not name.strip():
+        raise ValueError(f'escape_service_name: name cannot be empty, got: {repr(name)}')
+    
     # 1. 转换为小写并替换所有非字母数字字符为 '-'
     result = re.sub(r'[^a-z0-9]', '-', name.lower())
     
