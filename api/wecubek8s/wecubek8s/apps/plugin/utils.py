@@ -478,6 +478,20 @@ def convert_container(images, envs, vols, resource_limit, deploy_script=None):
         LOG.error('[DEBUG convert_container] parse_image_url result: server=%s, namespace=%s, image=%s, tag=%s', 
                  repr(registry_server), repr(registry_namespace), repr(image_name), repr(image_tag))
         
+        # 防御性检查：确保 image_name 不为 None
+        if image_name is None:
+            import traceback
+            stack = traceback.format_stack()
+            error_msg = (
+                f'parse_image_url returned None for image_name!\n'
+                f'  Input image_url: {repr(image_url)}\n'
+                f'  image_info: {image_info}\n'
+                f'  parse_image_url result: server={repr(registry_server)}, namespace={repr(registry_namespace)}, '
+                f'image={repr(image_name)}, tag={repr(image_tag)}\n'
+                f'  Called from:\n{"".join(stack[-3:-1])}'
+            )
+            raise ValueError(error_msg)
+        
         # 使用 escape_name 确保容器名称符合 RFC 1123 规范（将下划线转换为连字符）
         container['name'] = escape_name(image_name)
         container['image'] = image_info['name'].strip()
