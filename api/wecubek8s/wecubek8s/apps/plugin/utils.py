@@ -21,9 +21,16 @@ def escape_name(name):
     '''
     # 防御性检查：确保 name 不是 None 或空字符串
     if name is None:
-        raise ValueError('escape_name: name cannot be None')
+        # 获取调用堆栈，看看是谁传入了 None
+        import traceback
+        stack = traceback.format_stack()
+        caller_info = ''.join(stack[-3:-1])  # 获取调用者信息（最近2层）
+        raise ValueError(f'escape_name: name cannot be None. Called from:\n{caller_info}')
     if not name or not name.strip():
-        raise ValueError(f'escape_name: name cannot be empty, got: {repr(name)}')
+        import traceback
+        stack = traceback.format_stack()
+        caller_info = ''.join(stack[-3:-1])
+        raise ValueError(f'escape_name: name cannot be empty, got: {repr(name)}. Called from:\n{caller_info}')
     
     rule = r'[^.a-z0-9]'
     return re.sub(rule, '-', name.lower())
@@ -112,9 +119,15 @@ def escape_service_name(name, max_length=63):
     '''
     # 防御性检查：确保 name 不是 None 或空字符串
     if name is None:
-        raise ValueError('escape_service_name: name cannot be None')
+        import traceback
+        stack = traceback.format_stack()
+        caller_info = ''.join(stack[-3:-1])  # 获取调用者信息
+        raise ValueError(f'escape_service_name: name cannot be None. Called from:\n{caller_info}')
     if not name or not name.strip():
-        raise ValueError(f'escape_service_name: name cannot be empty, got: {repr(name)}')
+        import traceback
+        stack = traceback.format_stack()
+        caller_info = ''.join(stack[-3:-1])
+        raise ValueError(f'escape_service_name: name cannot be empty, got: {repr(name)}. Called from:\n{caller_info}')
     
     # 1. 转换为小写并替换所有非字母数字字符为 '-'
     result = re.sub(r'[^a-z0-9]', '-', name.lower())
@@ -453,7 +466,18 @@ def convert_container(images, envs, vols, resource_limit, deploy_script=None):
     }
     for image_info in images:
         container = container_template.copy()
-        registry_server, registry_namespace, image_name, image_tag = parse_image_url(image_info['name'].strip())
+        
+        # 调试日志：记录传入的 image_info
+        LOG.error('[DEBUG convert_container] image_info: %s', image_info)
+        
+        # 解析镜像 URL
+        image_url = image_info['name'].strip()
+        LOG.error('[DEBUG convert_container] image_url after strip: %s (type: %s)', repr(image_url), type(image_url))
+        
+        registry_server, registry_namespace, image_name, image_tag = parse_image_url(image_url)
+        LOG.error('[DEBUG convert_container] parse_image_url result: server=%s, namespace=%s, image=%s, tag=%s', 
+                 repr(registry_server), repr(registry_namespace), repr(image_name), repr(image_tag))
+        
         # 使用 escape_name 确保容器名称符合 RFC 1123 规范（将下划线转换为连字符）
         container['name'] = escape_name(image_name)
         container['image'] = image_info['name'].strip()

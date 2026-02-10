@@ -550,6 +550,7 @@ class Deployment:
         
         # 构建完整的镜像地址（拼接私有仓库地址）
         image_name = data.get('image_name', '').strip()
+        LOG.error('[DEBUG] Original image_name from data: %s (type: %s)', repr(image_name), type(image_name))
         
         # 防御性检查：确保 image_name 不为空
         if not image_name:
@@ -565,11 +566,15 @@ class Deployment:
             # 否则直接使用原始镜像名
             full_image_name = image_name
         
+        LOG.error('[DEBUG] full_image_name: %s, private_registry: %s', repr(full_image_name), repr(private_registry))
+        
         # 构建 images 数组格式（兼容原有的 convert_container 函数）
         images_data = [{
             'name': full_image_name,
             'ports': data.get('image_port', '')
         }]
+        
+        LOG.error('[DEBUG] images_data before convert_container: %s', images_data)
         
         # 获取部署脚本（如果提供）
         deploy_script = data.get('image_deploy_script')
@@ -1035,6 +1040,7 @@ class StatefulSet:
         
         # 构建完整的镜像地址（拼接私有仓库地址）
         image_name = data.get('image_name', '').strip()
+        LOG.error('[DEBUG] Original image_name from data: %s (type: %s)', repr(image_name), type(image_name))
         
         # 防御性检查：确保 image_name 不为空
         if not image_name:
@@ -1050,11 +1056,15 @@ class StatefulSet:
             # 否则直接使用原始镜像名
             full_image_name = image_name
         
+        LOG.error('[DEBUG] full_image_name: %s, private_registry: %s', repr(full_image_name), repr(private_registry))
+        
         # 构建 images 数组格式（兼容原有的 convert_container 函数）
         images_data = [{
             'name': full_image_name,
             'ports': data.get('image_port', '')
         }]
+        
+        LOG.error('[DEBUG] images_data before convert_container: %s', images_data)
         
         # 获取部署脚本（如果提供）
         deploy_script = data.get('image_deploy_script')
