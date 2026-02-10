@@ -419,9 +419,9 @@ def parse_image_url(image_url):
     ccr.ccs.tencentyun.com/a.b.c.namespace/d.e.f.name:tag1
     ccr.ccs.tencentyun.com/a.b.c.namespace/d.e.f.name
     '''
-    url_rule = r'^((?P<server>([a-zA-Z0-9]+(\.[-_a-zA-Z0-9]+)+?))(:(?P<port>\d+))?/)?((?P<namespace>([-_a-zA-Z0-9]+?))/)?(?P<image>([-_a-zA-Z0-9]+?))(:(?P<tag>[-_.a-zA-Z0-9]+))?$'
+    url_rule = r'^((?P<server>([-a-zA-Z0-9]+(\.[-_a-zA-Z0-9]+)+?))(:(?P<port>\d+))?/)?((?P<namespace>([-_a-zA-Z0-9]+?))/)?(?P<image>([-_a-zA-Z0-9]+?))(:(?P<tag>[-_.a-zA-Z0-9]+))?$'
     # private url like: server/namespace/image[:tag]
-    private_url_rule = r'^((?P<server>([a-zA-Z0-9]+(\.[-_a-zA-Z0-9]+)+?))(:(?P<port>\d+))?/)((?P<namespace>([-_.a-zA-Z0-9]+?))/)(?P<image>([-_.a-zA-Z0-9]+?))(:(?P<tag>[-_.a-zA-Z0-9]+))?$'
+    private_url_rule = r'^((?P<server>([-a-zA-Z0-9]+(\.[-_a-zA-Z0-9]+)+?))(:(?P<port>\d+))?/)((?P<namespace>([-_.a-zA-Z0-9]+?))/)(?P<image>([-_.a-zA-Z0-9]+?))(:(?P<tag>[-_.a-zA-Z0-9]+))?$'
     ret = re.search(url_rule, image_url)
     if ret:
         server_with_port = None
