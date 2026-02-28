@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: wecube-portal-headless
+  name: wecube-portal
   namespace: demo-myapp
   labels:
     app: wecube-portal
@@ -12,25 +12,6 @@ spec:
   - port: 8080
     name: web
   clusterIP: None
-  selector:
-    app: wecube-portal
-
----
-# NodePort Service for external access
-apiVersion: v1
-kind: Service
-metadata:
-  name: wecube-portal-service
-  namespace: demo-myapp
-  labels:
-    app: wecube-portal
-spec:
-  type: NodePort
-  ports:
-  - port: 8080
-    targetPort: 8080
-    nodePort: 30808  # WeCube Portal 端口
-    name: web
   selector:
     app: wecube-portal
 
@@ -44,7 +25,7 @@ metadata:
   labels:
     app: wecube-portal
 spec:
-  serviceName: "wecube-portal-headless"
+  serviceName: "wecube-portal"
   replicas: 1  # Portal 单实例
   selector:
     matchLabels:

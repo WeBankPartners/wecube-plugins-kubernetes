@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: wecube-minio-headless
+  name: wecube-minio
   namespace: demo-myapp
   labels:
     app: wecube-minio
@@ -12,25 +12,6 @@ spec:
   - port: 9000
     name: api
   clusterIP: None
-  selector:
-    app: wecube-minio
-
----
-# NodePort Service for external access
-apiVersion: v1
-kind: Service
-metadata:
-  name: wecube-minio-service
-  namespace: demo-myapp
-  labels:
-    app: wecube-minio
-spec:
-  type: NodePort
-  ports:
-  - port: 9000
-    targetPort: 9000
-    nodePort: 30900
-    name: api
   selector:
     app: wecube-minio
 
@@ -44,7 +25,7 @@ metadata:
   labels:
     app: wecube-minio
 spec:
-  serviceName: "wecube-minio-headless"
+  serviceName: "wecube-minio"
   replicas: 1
   selector:
     matchLabels:
@@ -66,6 +47,12 @@ spec:
           echo "Initializing minio data directory permissions..."
           mkdir -p /data
           mkdir -p /root/.minio
+          mkdir -p /data/wecube-plugin-package-bucket
+          mkdir -p /data/salt-tmp
+          mkdir -p /data/taskman-file
+          mkdir -p /data/terminal
+          mkdir -p /data/wecube-agent
+          mkdir -p /data/wecube-artifacts
           chown -R 1000:1000 /data
           chown -R 1000:1000 /root/.minio
           chmod -R 755 /data

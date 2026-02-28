@@ -1,23 +1,5 @@
 ---
-# 1. Headless Service for StatefulSet（StatefulSet 要求必须有 serviceName 对应的 Service）
-apiVersion: v1
-kind: Service
-metadata:
-  name: wecube-platform-core-headless
-  namespace: demo-myapp
-  labels:
-    app: wecube-platform-core
-spec:
-  ports:
-  - port: 8000
-    name: http
-  clusterIP: None
-  selector:
-    app: wecube-platform-core
-
----
-# 2. ClusterIP Service（供 gateway 等内部服务通过 wecube-platform-core:8000 访问）
-# gateway.yml 中 GATEWAY_ROUTE_CONFIG_SERVER / WECUBE_CORE_ADDRESS 使用此 Service
+# ClusterIP Service（供 gateway 等内部服务通过 wecube-platform-core:8000 访问）
 apiVersion: v1
 kind: Service
 metadata:
@@ -35,25 +17,6 @@ spec:
     app: wecube-platform-core
 
 ---
-# 3. NodePort Service for external access
-apiVersion: v1
-kind: Service
-metadata:
-  name: wecube-platform-core-service
-  namespace: demo-myapp
-  labels:
-    app: wecube-platform-core
-spec:
-  type: NodePort
-  ports:
-  - port: 8000
-    targetPort: 8000
-    nodePort: 30800
-    name: http
-  selector:
-    app: wecube-platform-core
-
----
 # 4. StatefulSet for wecube-platform-core
 apiVersion: apps/v1
 kind: StatefulSet
@@ -63,7 +26,7 @@ metadata:
   labels:
     app: wecube-platform-core
 spec:
-  serviceName: "wecube-platform-core-headless"
+  serviceName: "wecube-platform-core"
   replicas: 1
   selector:
     matchLabels:
@@ -209,7 +172,7 @@ spec:
         emptyDir: {}
       # 与 portal 共享的 UI 资源 PVC：引用 portal StatefulSet 自动创建的 PVC
       # PVC 名称格式：<volumeClaimTemplate.name>-<statefulset.name>-<ordinal>
-      # 即 portal 的 volumeClaimTemplates name=ui-resources → ui-resources-wecube-portal-0
+      # 即 portal 的 volumeClaimTemplates name=ui-resources → ui-resource-wecube-portal-0
       - name: ui-resources-shared
         persistentVolumeClaim:
-          claimName: ui-resources-wecube-portal-0
+          claimName: ui-resource-wecube-portal-0
