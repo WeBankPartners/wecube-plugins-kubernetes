@@ -1,0 +1,215 @@
+---
+# 1. Headless Service for StatefulSet（StatefulSet 要求必须有 serviceName 对应的 Service）
+apiVersion: v1
+kind: Service
+metadata:
+  name: wecube-platform-core-headless
+  namespace: demo-myapp
+  labels:
+    app: wecube-platform-core
+spec:
+  ports:
+  - port: 8000
+    name: http
+  clusterIP: None
+  selector:
+    app: wecube-platform-core
+
+---
+# 2. ClusterIP Service（供 gateway 等内部服务通过 wecube-platform-core:8000 访问）
+# gateway.yml 中 GATEWAY_ROUTE_CONFIG_SERVER / WECUBE_CORE_ADDRESS 使用此 Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: wecube-platform-core
+  namespace: demo-myapp
+  labels:
+    app: wecube-platform-core
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+  selector:
+    app: wecube-platform-core
+
+---
+# 3. NodePort Service for external access
+apiVersion: v1
+kind: Service
+metadata:
+  name: wecube-platform-core-service
+  namespace: demo-myapp
+  labels:
+    app: wecube-platform-core
+spec:
+  type: NodePort
+  ports:
+  - port: 8000
+    targetPort: 8000
+    nodePort: 30800
+    name: http
+  selector:
+    app: wecube-platform-core
+
+---
+# 4. StatefulSet for wecube-platform-core
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wecube-platform-core
+  namespace: demo-myapp
+  labels:
+    app: wecube-platform-core
+spec:
+  serviceName: "wecube-platform-core-headless"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wecube-platform-core
+  template:
+    metadata:
+      labels:
+        app: wecube-platform-core
+    spec:
+      initContainers:
+      - name: init-ui-resources
+        image: 192.168.150.6:30816/library/busybox:latest
+        command:
+        - sh
+        - -c
+        - |
+          chmod -R 777 /app/ui-resources
+        volumeMounts:
+        - name: ui-resources-shared
+          mountPath: /app/ui-resources
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: wecube-platform-core
+        image: 192.168.150.6:30816/library/platform-core:v4.5.7.7
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: version
+          value: "v4.5.8"
+        - name: log_level
+          value: "debug"
+        - name: password_private_key_path
+          value: ""
+        - name: https_enable
+          value: "false"
+        - name: http_port
+          value: "8000"
+        # MySQL 连接配置 - 指向集群内 wecube-mysql service
+        - name: db_server
+          value: "wecube-mysql"
+        - name: db_port
+          value: "3306"
+        - name: db_user
+          value: "root"
+        - name: db_pass
+          value: "WeCube@1234"
+        - name: db_database
+          value: "wecube"
+        # 认证服务 URL - 指向集群内 wecube-auth-server service
+        - name: auth_server_url
+          value: "http://wecube-auth-server:8002"
+        - name: jwt_signing_key
+          value: "Platform+Auth+Server+Secret"
+        # MinIO / S3 对象存储 - 指向集群内 wecube-minio-service
+        - name: s3_address
+          value: "wecube-minio-service:9000"
+        - name: s3_access_key
+          value: "access_key"
+        - name: s3_secret_key
+          value: "secret_key"
+        # 静态资源服务器配置
+        # 使用 local 模式，直接写入挂载的 PVC（与 portal 共享同一 PVC）
+        - name: static_resource_server_as_local
+          value: "true"
+        # 静态资源写入路径，指向与 portal 共享的 PVC 挂载点
+        - name: static_resource_server_path
+          value: "/app/ui-resources"
+        # 以下 SSH 相关配置在 local 模式下不生效，保留占位
+        - name: static_resource_server_ips
+          value: ""
+        - name: static_resource_server_user
+          value: ""
+        - name: static_resource_server_password
+          value: ""
+        - name: static_resource_server_port
+          value: "22"
+        # 插件部署路径
+        - name: plugin_base_mount_path
+          value: "/data"
+        - name: plugin_deploy_path
+          value: "/data/app/plugin-image"
+        - name: plugin_password_pub_key_path
+          value: ""
+        - name: resource_server_password_seed
+          value: "defaultSeed"
+        # Gateway 配置 - 指向集群内 wecube-gateway service
+        - name: gateway_url
+          value: "wecube-gateway:8005"
+        - name: gateway_host_ports
+          value: "wecube-gateway:8005"
+        - name: sub_system_private_key
+          value: ""
+        - name: cron_keep_batch_exec_days
+          value: "20"
+        - name: host_ip
+          value: ""
+        - name: encrypt_seed
+          value: "defaultEncryptSeed"
+        - name: menu_api_map_enable
+          value: "Y"
+        - name: TZ
+          value: "Asia/Shanghai"
+        volumeMounts:
+        - name: localtime
+          mountPath: /etc/localtime
+          readOnly: true
+        - name: log-storage
+          mountPath: /app/platform-core/logs
+        # 与 portal 共享的 UI 资源 PVC（引用 portal StatefulSet 自动创建的 PVC）
+        # portal 挂载 /root/app/ui-resources，core 写入 /app/ui-resources，同一个 PVC
+        - name: ui-resources-shared
+          mountPath: /app/ui-resources
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: localtime
+        hostPath:
+          path: /etc/localtime
+          type: File
+      - name: log-storage
+        emptyDir: {}
+      # 与 portal 共享的 UI 资源 PVC：引用 portal StatefulSet 自动创建的 PVC
+      # PVC 名称格式：<volumeClaimTemplate.name>-<statefulset.name>-<ordinal>
+      # 即 portal 的 volumeClaimTemplates name=ui-resources → ui-resources-wecube-portal-0
+      - name: ui-resources-shared
+        persistentVolumeClaim:
+          claimName: ui-resources-wecube-portal-0

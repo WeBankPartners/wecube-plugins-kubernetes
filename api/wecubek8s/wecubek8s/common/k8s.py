@@ -44,39 +44,18 @@ class Client:
         configuration = client.Configuration()
         auth(configuration)
         self.auth = auth
-        
-        # 创建 API 客户端
+
+        # 配置重试策略，不替换底层 PoolManager（kubernetes 28.x 禁止两者同时使用）
+        # Watch 的长超时通过调用侧传递 timeout_seconds 参数控制
+        configuration.retries = urllib3.Retry(
+            total=3,
+            read=3,
+            connect=3,
+            backoff_factor=0.3,
+            status_forcelist=(500, 502, 503, 504)
+        )
+
         api_client = client.ApiClient(configuration)
-        
-        # 配置长时间 Watch 的超时参数，避免连接过早断开
-        # 默认的 urllib3 超时是 5 分钟，会导致 Watch 连接频繁断开
-        # 设置连接超时10秒，读取超时3660秒（61分钟）
-        try:
-            # 创建自定义的 PoolManager，直接设置超时参数
-            timeout = urllib3.util.Timeout(connect=10.0, read=3660.0)
-            
-            # 替换 rest_client 的 pool_manager
-            api_client.rest_client.pool_manager = urllib3.PoolManager(
-                num_pools=4,
-                maxsize=4,
-                cert_reqs='CERT_NONE',  # 因为 verify_ssl=False
-                ca_certs=None,
-                cert_file=None,
-                key_file=None,
-                timeout=timeout,
-                retries=urllib3.Retry(
-                    total=3,
-                    read=3,
-                    connect=3,
-                    backoff_factor=0.3,
-                    status_forcelist=(500, 502, 503, 504)
-                )
-            )
-            LOG.info('Successfully configured urllib3 PoolManager with timeout: connect=10s, read=3660s')
-        except Exception as e:
-            LOG.error('Failed to configure urllib3 timeout: %s', e)
-            LOG.exception(e)
-        
         self.core_client = client.CoreV1Api(api_client)
         self.app_client = client.AppsV1Api(api_client)
         self.networking_client = client.NetworkingV1Api(api_client)

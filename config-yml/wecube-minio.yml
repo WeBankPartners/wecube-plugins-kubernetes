@@ -1,0 +1,148 @@
+---
+# Headless Service for StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: wecube-minio-headless
+  namespace: demo-myapp
+  labels:
+    app: wecube-minio
+spec:
+  ports:
+  - port: 9000
+    name: api
+  clusterIP: None
+  selector:
+    app: wecube-minio
+
+---
+# NodePort Service for external access
+apiVersion: v1
+kind: Service
+metadata:
+  name: wecube-minio-service
+  namespace: demo-myapp
+  labels:
+    app: wecube-minio
+spec:
+  type: NodePort
+  ports:
+  - port: 9000
+    targetPort: 9000
+    nodePort: 30900
+    name: api
+  selector:
+    app: wecube-minio
+
+---
+# StatefulSet for MinIO
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wecube-minio
+  namespace: demo-myapp
+  labels:
+    app: wecube-minio
+spec:
+  serviceName: "wecube-minio-headless"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wecube-minio
+  template:
+    metadata:
+      labels:
+        app: wecube-minio
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+      - name: init-minio-data
+        image: 192.168.150.6:30816/library/busybox:latest
+        command:
+        - sh
+        - -c
+        - |
+          echo "Initializing minio data directory permissions..."
+          mkdir -p /data
+          mkdir -p /root/.minio
+          chown -R 1000:1000 /data
+          chown -R 1000:1000 /root/.minio
+          chmod -R 755 /data
+          chmod -R 755 /root/.minio
+          echo "Permissions initialized successfully"
+          ls -la /data
+        volumeMounts:
+        - name: wecube-minio-data
+          mountPath: /data
+        - name: wecube-minio-config
+          mountPath: /root/.minio
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: wecube-minio
+        image: 192.168.150.6:30816/library/minio:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - minio
+        - server
+        - /data
+        securityContext:
+          runAsUser: 1000
+        ports:
+        - containerPort: 9000
+          name: api
+        env:
+        - name: MINIO_ACCESS_KEY
+          value: "access_key"
+        - name: MINIO_SECRET_KEY
+          value: "secret_key"
+        volumeMounts:
+        - name: wecube-minio-data
+          mountPath: /data
+        - name: wecube-minio-config
+          mountPath: /root/.minio
+        - name: localtime
+          mountPath: /etc/localtime
+          readOnly: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          tcpSocket:
+            port: 9000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 9000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: localtime
+        hostPath:
+          path: /etc/localtime
+          type: File
+  volumeClaimTemplates:
+  - metadata:
+      name: wecube-minio-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "nfs"
+      resources:
+        requests:
+          storage: 50Gi
+  - metadata:
+      name: wecube-minio-config
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "nfs"
+      resources:
+        requests:
+          storage: 1Gi

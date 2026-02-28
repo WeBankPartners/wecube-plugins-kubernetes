@@ -1,0 +1,119 @@
+---
+# Headless Service for StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: wecube-portal-headless
+  namespace: demo-myapp
+  labels:
+    app: wecube-portal
+spec:
+  ports:
+  - port: 8080
+    name: web
+  clusterIP: None
+  selector:
+    app: wecube-portal
+
+---
+# NodePort Service for external access
+apiVersion: v1
+kind: Service
+metadata:
+  name: wecube-portal-service
+  namespace: demo-myapp
+  labels:
+    app: wecube-portal
+spec:
+  type: NodePort
+  ports:
+  - port: 8080
+    targetPort: 8080
+    nodePort: 30808  # WeCube Portal 端口
+    name: web
+  selector:
+    app: wecube-portal
+
+---
+# StatefulSet for WeCube Portal
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wecube-portal
+  namespace: demo-myapp
+  labels:
+    app: wecube-portal
+spec:
+  serviceName: "wecube-portal-headless"
+  replicas: 1  # Portal 单实例
+  selector:
+    matchLabels:
+      app: wecube-portal
+  template:
+    metadata:
+      labels:
+        app: wecube-portal
+    spec:
+      containers:
+      - name: wecube-portal
+        image: 192.168.150.6:30816/library/wecube-portal:v4.5.8
+        imagePullPolicy: IfNotPresent  # 使用私有仓库镜像
+        command:
+        - /bin/bash
+        - -c
+        - /etc/nginx/start_platform_portal.sh
+        ports:
+        - containerPort: 8080
+          name: web
+        env:
+        - name: GATEWAY_HOST
+          value: "wecube-gateway"
+        - name: GATEWAY_PORT
+          value: "8005"
+        - name: PUBLIC_DOMAIN
+          value: "wecube.portal.acp.com:37107"  # 需要替换为实际的访问域名
+        - name: TZ
+          value: "Asia/Shanghai"
+        volumeMounts:
+        - name: localtime
+          mountPath: /etc/localtime
+          readOnly: true
+        - name: log-storage
+          mountPath: /var/log/nginx/
+        - name: ui-resource
+          mountPath: /root/app/ui-resources
+        resources:
+          requests:
+            memory: "256Mi"  # Portal 相对轻量
+            cpu: "100m"
+          limits:
+            memory: "1Gi"    # 最大 1Gi
+            cpu: "500m"      # 0.5 核 CPU
+        livenessProbe:
+          tcpSocket:
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: localtime
+        hostPath:
+          path: /etc/localtime
+          type: File
+      - name: log-storage
+        emptyDir: {}  # 临时存储，Pod 重启后丢失
+  volumeClaimTemplates:
+  - metadata:
+      name: ui-resource
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "nfs"  # 使用 NFS 存储
+      resources:
+        requests:
+          storage: 5Gi  # UI 资源存储大小
