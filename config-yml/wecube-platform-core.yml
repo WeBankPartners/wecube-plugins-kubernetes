@@ -51,7 +51,7 @@ spec:
           runAsUser: 0
       containers:
       - name: wecube-platform-core
-        image: 192.168.150.6:30816/library/platform-core:v4.5.7.7
+        image: 192.168.150.6:30816/library/platform-core:v4.5.7.9
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8000
@@ -85,7 +85,7 @@ spec:
           value: "Platform+Auth+Server+Secret"
         # MinIO / S3 对象存储 - 指向集群内 wecube-minio-service
         - name: s3_address
-          value: "wecube-minio-service:9000"
+          value: "wecube-minio:9000"
         - name: s3_access_key
           value: "access_key"
         - name: s3_secret_key
