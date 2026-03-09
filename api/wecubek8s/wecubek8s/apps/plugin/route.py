@@ -25,6 +25,10 @@ def add_routes(api):
     api.add_route('/kubernetes/v1/nodes/label', controller.Node(action='label'))
     api.add_route('/kubernetes/v1/nodes/remove_label', controller.Node(action='remove_label'))
     
+    # 共享 PVC 接口（支持多 Pod 共用一个 PVC，accessMode 推荐 ReadWriteMany）
+    api.add_route('/kubernetes/v1/pvcs/apply', controller.SharedPVC(action='apply'))
+    api.add_route('/kubernetes/v1/pvcs/destroy', controller.SharedPVC(action='destroy'))
+
     # 跨集群互联接口
     api.add_route('/kubernetes/v1/interconnect/external_service',
                   controller.ClusterInterconnect(action='create_external_service'))

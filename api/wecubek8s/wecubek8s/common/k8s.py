@@ -297,6 +297,16 @@ class Client:
     def get_endpoint(self, name, namespace, **kwargs):
         return self._action_detail(self.core_client, 'read_namespaced_endpoints', name, namespace, **kwargs)
 
+    # PersistentVolumeClaim
+    def create_pvc(self, namespace, body, **kwargs):
+        return self._action(self.core_client, 'create_namespaced_persistent_volume_claim', namespace, body, **kwargs)
+
+    def delete_pvc(self, name, namespace, **kwargs):
+        return self._action(self.core_client, 'delete_namespaced_persistent_volume_claim', name, namespace, **kwargs)
+
+    def get_pvc(self, name, namespace, **kwargs):
+        return self._action_detail(self.core_client, 'read_namespaced_persistent_volume_claim', name, namespace, **kwargs)
+
     # NetworkPolicy
     def create_network_policy(self, namespace, body, **kwargs):
         return self._action(self.networking_client, 'create_namespaced_network_policy', namespace, body, **kwargs)

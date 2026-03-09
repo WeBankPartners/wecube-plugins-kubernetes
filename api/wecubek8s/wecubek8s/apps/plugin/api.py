@@ -1091,6 +1091,28 @@ class StatefulSet:
                     container['volumeMounts'].append(mount_config)
                     LOG.info('[StatefulSet] Added volumeMount to container "%s": %s -> %s',
                             container.get('name'), mount['name'], mount['mountPath'])
+
+        # 处理共享 PVC 挂载（shared_block_storage）
+        # 与 volumeClaimTemplates 不同：共享 PVC 需要在 Pod-level volumes 中显式引用（claimName），
+        # 所有 Pod 挂载同一个已存在的 PVC，实现多 Pod 数据共享
+        shared_pvc_volumes = data.get('sharedPvcVolumes', [])
+        shared_pvc_mounts = data.get('sharedPvcMounts', [])
+        if shared_pvc_volumes:
+            LOG.info('[StatefulSet] Adding %d shared PVC volumes to pod spec', len(shared_pvc_volumes))
+            pod_spec_src_vols.extend(shared_pvc_volumes)
+        if shared_pvc_mounts:
+            LOG.info('[StatefulSet] Adding %d shared PVC mounts to containers', len(shared_pvc_mounts))
+            for container in containers:
+                if 'volumeMounts' not in container:
+                    container['volumeMounts'] = []
+                for mount in shared_pvc_mounts:
+                    container['volumeMounts'].append({
+                        'name': mount['name'],
+                        'mountPath': mount['mountPath'],
+                        'readOnly': False
+                    })
+                    LOG.info('[StatefulSet] Added shared PVC mount to container "%s": %s -> %s',
+                             container.get('name'), mount['name'], mount['mountPath'])
         
         # 智能添加存活探针和就绪探针（基于容器端口和进程信息自动选择最佳探针类型）
         process_name = data.get('process_name')
@@ -3817,4 +3839,158 @@ class ClusterInterconnect:
                 LOG.warning('Failed to create network policy: %s', str(e))
                 # 不阻止service创建，只记录警告
 
+        return result
+
+
+class SharedPVC:
+    """
+    共享 PVC 管理：创建可供多个 Pod 共用的 PersistentVolumeClaim。
+    共享的核心在于 accessMode=ReadWriteMany，要求后端 StorageClass 支持该模式（如 NFS、CephFS）。
+    """
+
+    def _get_k8s_client(self, data):
+        cluster_name = data['cluster']
+        LOG.info('[SharedPVC] Looking up cluster info for cluster=%s', cluster_name)
+        cluster_info = db_resource.Cluster().list({'name': cluster_name})
+        if not cluster_info:
+            LOG.error('[SharedPVC] Cluster not found: %s', cluster_name)
+            raise exceptions.ValidationError(
+                attribute='cluster',
+                message=_('name of cluster(%(name)s) not found') % {'name': cluster_name}
+            )
+        cluster_info = cluster_info[0]
+        api_server = cluster_info['api_server']
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            api_server = 'https://' + api_server
+            LOG.warning('[SharedPVC] api_server missing protocol prefix, auto-added https://: %s', api_server)
+        LOG.info('[SharedPVC] Cluster found: name=%s, api_server=%s', cluster_name, api_server)
+        k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
+        return k8s.Client(k8s_auth), cluster_info
+
+    def to_resource(self, data):
+        pvc_name = api_utils.escape_name(data['name'])
+        LOG.debug('[SharedPVC] to_resource: original name=%s -> escaped name=%s', data['name'], pvc_name)
+        labels = {const.Tag.PVC_ID_TAG: data['correlation_id']}
+        if data.get('instanceId'):
+            labels['instanceId'] = api_utils.escape_label_value(data['instanceId'])
+            LOG.debug('[SharedPVC] to_resource: instanceId label added: %s', labels['instanceId'])
+        manifest = {
+            'apiVersion': 'v1',
+            'kind': 'PersistentVolumeClaim',
+            'metadata': {
+                'name': pvc_name,
+                'namespace': data['namespace'],
+                'labels': labels
+            },
+            'spec': {
+                # 共享 PVC 的核心：accessModes 决定多 Pod 并发访问能力
+                # ReadWriteMany  — 多节点多 Pod 同时读写（共享场景首选，需 StorageClass 支持）
+                # ReadOnlyMany   — 多节点多 Pod 只读共享
+                # ReadWriteOnce  — 单节点读写（兼容普通场景）
+                'accessModes': [data['accessMode']],
+                'storageClassName': data['storageClass'],
+                'resources': {
+                    'requests': {
+                        'storage': data['capacity']  # 已在 controller 层转换为 Gi 格式
+                    }
+                }
+            }
+        }
+        LOG.debug('[SharedPVC] to_resource: manifest built: name=%s, namespace=%s, accessModes=%s, '
+                  'storageClass=%s, storage=%s, labels=%s',
+                  pvc_name, data['namespace'], manifest['spec']['accessModes'],
+                  manifest['spec']['storageClassName'],
+                  manifest['spec']['resources']['requests']['storage'],
+                  labels)
+        return manifest
+
+    def apply(self, data):
+        LOG.info('[SharedPVC] ===== apply start =====')
+        LOG.info('[SharedPVC] apply request: cluster=%s, name=%s, namespace=%s, capacity=%s, '
+                 'accessMode=%s, storageClass=%s, instanceId=%s, correlation_id=%s',
+                 data.get('cluster'), data.get('name'), data.get('namespace'), data.get('capacity'),
+                 data.get('accessMode'), data.get('storageClass'),
+                 data.get('instanceId'), data.get('correlation_id'))
+
+        LOG.info('[SharedPVC] Step 1: Getting k8s client for cluster=%s', data.get('cluster'))
+        k8s_client, cluster_info = self._get_k8s_client(data)
+        LOG.info('[SharedPVC] Step 1 done: k8s client ready, api_server=%s',
+                 cluster_info.get('api_server'))
+
+        namespace = data['namespace']
+        LOG.info('[SharedPVC] Step 2: Ensuring namespace=%s exists', namespace)
+        k8s_client.ensure_namespace(namespace)
+        LOG.info('[SharedPVC] Step 2 done: namespace=%s ensured', namespace)
+
+        pvc_name = api_utils.escape_name(data['name'])
+        LOG.info('[SharedPVC] Step 3: Checking if PVC %s/%s already exists', namespace, pvc_name)
+        pvc_manifest = self.to_resource(data)
+
+        existing = k8s_client.get_pvc(pvc_name, namespace)
+        if existing is not None:
+            existing_storage = existing.spec.resources.requests.get('storage', 'unknown') if existing.spec else 'unknown'
+            existing_access_modes = existing.spec.access_modes if existing.spec else []
+            existing_storage_class = existing.spec.storage_class_name if existing.spec else 'unknown'
+            existing_phase = str(existing.status.phase) if existing.status else 'Unknown'
+            LOG.info('[SharedPVC] PVC %s/%s already exists (phase=%s), skip creation. '
+                     'Existing spec: storage=%s, accessModes=%s, storageClass=%s. '
+                     'Requested spec: storage=%s, accessMode=%s, storageClass=%s',
+                     namespace, pvc_name, existing_phase,
+                     existing_storage, existing_access_modes, existing_storage_class,
+                     data.get('capacity'), data.get('accessMode'), data.get('storageClass'))
+            result = {
+                'id': existing.metadata.uid,
+                'name': existing.metadata.name,
+                'namespace': existing.metadata.namespace,
+                'correlation_id': data['correlation_id'],
+                'status': existing_phase
+            }
+            LOG.info('[SharedPVC] ===== apply end (already exists) ===== result=%s', result)
+            return result
+
+        LOG.info('[SharedPVC] Step 4: PVC does not exist, creating PVC %s/%s', namespace, pvc_name)
+        LOG.debug('[SharedPVC] PVC manifest to create: %s', pvc_manifest)
+        result = k8s_client.create_pvc(namespace, pvc_manifest)
+        created_phase = str(result.status.phase) if result.status else 'Pending'
+        LOG.info('[SharedPVC] Step 4 done: PVC %s/%s created successfully, uid=%s, phase=%s',
+                 namespace, pvc_name, result.metadata.uid, created_phase)
+
+        ret = {
+            'id': result.metadata.uid,
+            'name': result.metadata.name,
+            'namespace': result.metadata.namespace,
+            'correlation_id': data['correlation_id'],
+            'status': created_phase
+        }
+        LOG.info('[SharedPVC] ===== apply end (created) ===== result=%s', ret)
+        return ret
+
+    def remove(self, data):
+        LOG.info('[SharedPVC] ===== remove start =====')
+        LOG.info('[SharedPVC] remove request: cluster=%s, name=%s, namespace=%s',
+                 data.get('cluster'), data.get('name'), data.get('namespace'))
+
+        LOG.info('[SharedPVC] Step 1: Getting k8s client for cluster=%s', data.get('cluster'))
+        k8s_client, cluster_info = self._get_k8s_client(data)
+        LOG.info('[SharedPVC] Step 1 done: k8s client ready, api_server=%s',
+                 cluster_info.get('api_server'))
+
+        pvc_name = api_utils.escape_name(data['name'])
+        namespace = data.get('namespace', 'default')
+
+        LOG.info('[SharedPVC] Step 2: Checking if PVC %s/%s exists before deletion', namespace, pvc_name)
+        existing = k8s_client.get_pvc(pvc_name, namespace)
+        if existing is None:
+            LOG.info('[SharedPVC] PVC %s/%s not found, nothing to delete (idempotent)', namespace, pvc_name)
+            result = {'name': pvc_name, 'namespace': namespace, 'correlation_id': data.get('correlation_id', '')}
+            LOG.info('[SharedPVC] ===== remove end (not found, skip) ===== result=%s', result)
+            return result
+
+        existing_phase = str(existing.status.phase) if existing.status else 'Unknown'
+        LOG.info('[SharedPVC] Step 3: Deleting PVC %s/%s (current phase=%s)', namespace, pvc_name, existing_phase)
+        k8s_client.delete_pvc(pvc_name, namespace)
+        LOG.info('[SharedPVC] Step 3 done: PVC %s/%s deleted successfully', namespace, pvc_name)
+
+        result = {'name': pvc_name, 'namespace': namespace, 'correlation_id': data.get('correlation_id', '')}
+        LOG.info('[SharedPVC] ===== remove end (deleted) ===== result=%s', result)
         return result

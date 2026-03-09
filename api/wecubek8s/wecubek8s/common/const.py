@@ -13,6 +13,7 @@ class Tag:
     DAEMONSET_ID_TAG = 'wecube-daemonset-correlation-id'
     SERVICE_ID_TAG = 'wecube-service-correlation-id'
     POD_ID_TAG = 'wecube-pod-correlation-id'
+    PVC_ID_TAG = 'wecube-pvc-correlation-id'
 
 
 class Registry:

@@ -252,6 +252,7 @@
                     <parameter datatype="string" mappingType="constant" required="N" description="deploy script to run before container starts">image_deploy_script</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="logs path for container">log_path</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" multiple="Y" description="block storage guid (mount_path is auto-fetched from CMDB)">block_storage</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" multiple="Y" description="shared pvc guid list (references existing shared PVCs, all pods mount the same PVC)">shared_block_storage</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>
@@ -319,6 +320,43 @@
                     <parameter datatype="string">name</parameter>
                     <parameter datatype="string">namespace</parameter>
                     <parameter datatype="string">status</parameter>
+                </outputParameters>
+            </interface>
+        </plugin>
+        <plugin name="pvc">
+            <interface action="apply" path="/kubernetes/v1/pvcs/apply" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
+                <inputParameters>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="cluster name">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="associated ci data id">correlation_id</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="pvc name(unique within namespace)">name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="pvc namespace(default)">namespace</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="storage capacity in G(e.g. 10 means 10Gi)">capacity</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="access mode: ReadWriteMany(multi-pod shared) / ReadWriteOnce / ReadOnlyMany">accessMode</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="storage class name(must support the chosen accessMode)">storageClass</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="cmdb instance id, written as pvc label">instanceId</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">id</parameter>
+                    <parameter datatype="string">name</parameter>
+                    <parameter datatype="string">namespace</parameter>
+                    <parameter datatype="string">correlation_id</parameter>
+                    <parameter datatype="string">status</parameter>
+                </outputParameters>
+            </interface>
+            <interface action="destroy" path="/kubernetes/v1/pvcs/destroy" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
+                <inputParameters>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="cluster name">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="pvc name to delete">name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="pvc namespace(default)">namespace</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">name</parameter>
+                    <parameter datatype="string">namespace</parameter>
+                    <parameter datatype="string">correlation_id</parameter>
                 </outputParameters>
             </interface>
         </plugin>

@@ -194,11 +194,26 @@ deployment_rules = [
                          rule=validator.TypeValidator(list),
                          validate_on=['check:O'],
                          nullable=True),
+    # 共享 PVC 的 GUID 数组，引用已存在的共享 PVC（多 Pod 共用同一 PVC）
+    crud.ColumnValidator(field='shared_block_storage',
+                         rule=validator.TypeValidator(list),
+                         validate_on=['check:O'],
+                         nullable=True),
     crud.ColumnValidator(field='volumeClaimTemplates',
                          rule=validator.TypeValidator(list),
                          validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='volumeClaimMounts',
+                         rule=validator.TypeValidator(list),
+                         validate_on=['check:O'],
+                         nullable=True),
+    # 共享 PVC 的 Pod-level volumes 配置（由 parse_and_build_shared_pvc_volumes 生成）
+    crud.ColumnValidator(field='sharedPvcVolumes',
+                         rule=validator.TypeValidator(list),
+                         validate_on=['check:O'],
+                         nullable=True),
+    # 共享 PVC 的容器挂载配置（由 parse_and_build_shared_pvc_volumes 生成）
+    crud.ColumnValidator(field='sharedPvcMounts',
                          rule=validator.TypeValidator(list),
                          validate_on=['check:O'],
                          nullable=True),
@@ -480,4 +495,64 @@ interconnect_setup_rules = [
                          validate_on=['check:O'],
                          nullable=True,
                          converter=converter.BooleanConverter()),
+]
+
+# 共享 PVC 规则（支持多 Pod 共用一个 PVC，accessMode 通常为 ReadWriteMany）
+shared_pvc_rules = [
+    crud.ColumnValidator(field='cluster',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='correlation_id',
+                         rule=validator.LengthValidator(1, 64),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='name',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    # default 'default'
+    crud.ColumnValidator(field='namespace',
+                         rule=validator.LengthValidator(0, 255),
+                         validate_on=['check:O'],
+                         nullable=True),
+    # 容量，单位 G，纯数字（整数或小数），如 "10" 或 "0.5"
+    crud.ColumnValidator(field='capacity',
+                         rule=validator.RegexValidator(r'^\d+(\.\d+)?$'),
+                         validate_on=['check:M'],
+                         nullable=False),
+    # 共享 PVC 的核心：accessMode 决定多 Pod 共享能力
+    # ReadWriteMany  — 多节点多 Pod 同时读写（共享 PVC 首选）
+    # ReadOnlyMany   — 多节点多 Pod 只读
+    # ReadWriteOnce  — 单节点读写（兼容普通场景）
+    crud.ColumnValidator(field='accessMode',
+                         rule=validator.InValidator(['ReadWriteMany', 'ReadWriteOnce', 'ReadOnlyMany']),
+                         validate_on=['check:M'],
+                         nullable=False),
+    # StorageClass 名称，需为集群中已存在且支持所选 accessMode 的 StorageClass
+    crud.ColumnValidator(field='storageClass',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    # 可选，作为 PVC 的额外标签写入，便于关联 CMDB 实例
+    crud.ColumnValidator(field='instanceId',
+                         rule=validator.LengthValidator(0, 255),
+                         validate_on=['check:O'],
+                         nullable=True),
+]
+
+shared_pvc_destroy_rules = [
+    crud.ColumnValidator(field='cluster',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='name',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    # default 'default'
+    crud.ColumnValidator(field='namespace',
+                         rule=validator.LengthValidator(0, 255),
+                         validate_on=['check:O'],
+                         nullable=True),
 ]

@@ -428,6 +428,138 @@ class StatefulSet(controller.Plugin):
         LOG.info('=== [parse_and_build_volume_claim_templates] End successfully ===')
         LOG.info('========================================')
     
+    def parse_and_build_shared_pvc_volumes(self, item):
+        """
+        解析 shared_block_storage 参数，构建共享 PVC 的 Pod-level volumes 和容器挂载配置。
+
+        与 block_storage/volumeClaimTemplates 的核心区别：
+        - block_storage     → StatefulSet volumeClaimTemplates，每个 Pod 自动获得独立 PVC
+        - shared_block_storage → 引用已存在的共享 PVC（claimName），所有 Pod 挂载同一个 PVC
+
+        处理逻辑：
+        1. 从 item 获取 shared_block_storage（GUID 数组）
+        2. 对每个 GUID 查询 CMDB 获取 key_name（PVC 实际名称）和 mount_path
+        3. 构建 Pod-level volumes（persistentVolumeClaim 引用）和容器 volumeMounts
+        4. 结果保存到 item['sharedPvcVolumes'] 和 item['sharedPvcMounts']
+        """
+        LOG.info('=== [parse_and_build_shared_pvc_volumes] Start ===')
+
+        import ast
+
+        shared_storage_value = item.get('shared_block_storage', '')
+        LOG.debug('Raw shared_block_storage from item: "%s" (type: %s)',
+                  shared_storage_value, type(shared_storage_value))
+
+        if not shared_storage_value:
+            LOG.info('No shared_block_storage provided, skipping shared PVC volume building')
+            LOG.info('=== [parse_and_build_shared_pvc_volumes] End (no shared_block_storage) ===')
+            return
+
+        # 解析 GUID 列表（支持 list 或字符串格式，与 block_storage 保持一致）
+        try:
+            if isinstance(shared_storage_value, list):
+                LOG.info('shared_block_storage is already a list: %s', shared_storage_value)
+                shared_guids = shared_storage_value
+            elif isinstance(shared_storage_value, str):
+                shared_str = shared_storage_value.strip()
+                if not shared_str:
+                    LOG.info('shared_block_storage is empty string, skipping')
+                    LOG.info('=== [parse_and_build_shared_pvc_volumes] End (empty string) ===')
+                    return
+                LOG.info('Parsing shared_block_storage string: "%s"', shared_str)
+                shared_guids = ast.literal_eval(shared_str)
+            else:
+                raise ValueError('shared_block_storage must be a list or string, got: %s' % type(shared_storage_value).__name__)
+
+            if not isinstance(shared_guids, list):
+                raise ValueError('shared_block_storage must be a list, got: %s' % type(shared_guids).__name__)
+
+            shared_guids = [str(g).strip() for g in shared_guids if g and str(g).strip()]
+            if not shared_guids:
+                LOG.info('shared_block_storage is empty after filtering, skipping')
+                LOG.info('=== [parse_and_build_shared_pvc_volumes] End (empty after filtering) ===')
+                return
+
+        except (ValueError, SyntaxError) as e:
+            LOG.error('Failed to parse shared_block_storage: %s, error: %s',
+                      shared_storage_value, str(e), exc_info=True)
+            raise exceptions.ValidationError(
+                attribute='shared_block_storage',
+                msg=_('shared_block_storage must be a list or valid string array format, error: %(error)s') % {'error': str(e)}
+            )
+
+        LOG.info('✓ Parsed %d shared_block_storage guids: %s', len(shared_guids), shared_guids)
+
+        shared_pvc_volumes = []  # Pod-level volumes（引用已有 PVC）
+        shared_pvc_mounts = []   # 容器 volumeMounts
+
+        for idx, guid in enumerate(shared_guids):
+            LOG.info('>>> Processing shared_block_storage [%d/%d]: guid=%s',
+                     idx + 1, len(shared_guids), guid)
+
+            pvc_info = self._query_block_storage_from_cmdb(guid)
+            if not pvc_info:
+                LOG.error('✗ Failed to query shared PVC info from CMDB for guid: %s', guid)
+                raise exceptions.PluginError(
+                    message=_('Failed to query shared PVC info from CMDB for guid: %(guid)s. '
+                               'Cannot proceed without PVC name and mount_path.') % {'guid': guid}
+                )
+
+            mount_path = pvc_info.get('mountPath', '')
+            if not mount_path:
+                LOG.error('✗ mount_path not found in CMDB for shared PVC guid: %s', guid)
+                raise exceptions.ValidationError(
+                    attribute='mount_path',
+                    msg=_('mount_path not found in CMDB for shared_block_storage guid: %(guid)s') % {'guid': guid}
+                )
+
+            if not mount_path.startswith('/'):
+                LOG.error('✗ mount_path must be absolute path, got: "%s" for guid: %s', mount_path, guid)
+                raise exceptions.ValidationError(
+                    attribute='mount_path',
+                    msg=_('mount_path from CMDB must start with /, got: %(path)s for guid: %(guid)s') % {
+                        'path': mount_path,
+                        'guid': guid
+                    }
+                )
+
+            # key_name 即 CMDB 中存储的 PVC 实际名称（对应 pvcs/apply 时传入的 name 经 escape_name 后的值）
+            pvc_name = pvc_info.get('name', '').strip()
+            if not pvc_name:
+                LOG.error('✗ key_name(name) not found in CMDB for shared PVC guid: %s', guid)
+                raise exceptions.ValidationError(
+                    attribute='name',
+                    msg=_('PVC name not found in CMDB for shared_block_storage guid: %(guid)s') % {'guid': guid}
+                )
+
+            # volume 名称需符合 K8s 规范，使用 escape_name 转义
+            from wecubek8s.apps.plugin import utils as api_utils
+            volume_name = api_utils.escape_name(pvc_name)
+
+            # Pod-level volume：通过 claimName 引用已存在的共享 PVC
+            shared_pvc_volumes.append({
+                'name': volume_name,
+                'persistentVolumeClaim': {
+                    'claimName': volume_name,
+                    'readOnly': False
+                }
+            })
+
+            # 容器 volumeMount
+            shared_pvc_mounts.append({
+                'name': volume_name,
+                'mountPath': mount_path
+            })
+
+            LOG.info('✓ [%d/%d] Built shared PVC volume: claimName=%s, mountPath=%s',
+                     idx + 1, len(shared_guids), volume_name, mount_path)
+
+        item['sharedPvcVolumes'] = shared_pvc_volumes
+        item['sharedPvcMounts'] = shared_pvc_mounts
+
+        LOG.info('✓ Built %d shared PVC volumes and %d mounts', len(shared_pvc_volumes), len(shared_pvc_mounts))
+        LOG.info('=== [parse_and_build_shared_pvc_volumes] End successfully ===')
+
     def validate_log_path(self, item):
         """
         校验 log_path 参数
@@ -569,8 +701,11 @@ class StatefulSet(controller.Plugin):
         # 添加默认环境变量
         self.add_default_envs(item)
         
-        # 解析并构建 volumeClaimTemplates（基于 block_storage 和 mount_path）
+        # 解析并构建 volumeClaimTemplates（基于 block_storage，每个 Pod 独立 PVC）
         self.parse_and_build_volume_claim_templates(item)
+        
+        # 解析并构建共享 PVC 挂载（基于 shared_block_storage，所有 Pod 共用同一 PVC）
+        self.parse_and_build_shared_pvc_volumes(item)
         
         clean_item = crud.ColumnValidator.get_clean_data(rules.deployment_rules, item, 'check')
         self.set_item_default(clean_item)
@@ -740,3 +875,88 @@ class ClusterInterconnect(controller.Plugin):
 
     def setup_interconnect(self, reqid, operator, item_index, item, **kwargs):
         return plugin_api.ClusterInterconnect().setup_interconnect(item)
+
+
+class SharedPVC(controller.Plugin):
+    allow_methods = ('POST', )
+    name = 'k8s.plugin.shared_pvc'
+
+    def set_item_default(self, item):
+        defaults = {'namespace': 'default'}
+        for key, value in defaults.items():
+            if not item.get(key):
+                item[key] = value
+
+    def normalize_capacity(self, item):
+        """
+        将 capacity（单位 G，纯数字）转换为 K8s 规范格式（Gi）
+        例如："10" -> "10Gi", "0.5" -> "0.5Gi"
+        """
+        capacity = item.get('capacity', '')
+        if capacity and not any(unit in str(capacity) for unit in ['Gi', 'Mi', 'Ti', 'G', 'M', 'T']):
+            item['capacity'] = '%sGi' % capacity
+            LOG.info('[SharedPVC] Normalized capacity: %s -> %s', capacity, item['capacity'])
+        else:
+            LOG.debug('[SharedPVC] capacity already has unit or is empty, no normalization needed: %s', capacity)
+
+    def validate_item_apply(self, item_index, item):
+        LOG.info('[SharedPVC] validate_item_apply started - item_index=%s, name=%s, cluster=%s',
+                 item_index, item.get('name'), item.get('cluster'))
+        LOG.debug('[SharedPVC] Raw apply item data: %s', item)
+        try:
+            clean_item = crud.ColumnValidator.get_clean_data(rules.shared_pvc_rules, item, 'check')
+            LOG.info('[SharedPVC] Field validation passed for name=%s', clean_item.get('name'))
+
+            self.set_item_default(clean_item)
+            LOG.debug('[SharedPVC] Defaults applied: namespace=%s', clean_item.get('namespace'))
+
+            self.normalize_capacity(clean_item)
+            LOG.info('[SharedPVC] validate_item_apply finished - name=%s, namespace=%s, capacity=%s, '
+                     'accessMode=%s, storageClass=%s, instanceId=%s',
+                     clean_item.get('name'), clean_item.get('namespace'), clean_item.get('capacity'),
+                     clean_item.get('accessMode'), clean_item.get('storageClass'), clean_item.get('instanceId'))
+            return clean_item
+        except Exception as e:
+            LOG.error('[SharedPVC] validate_item_apply failed - item_index=%s, name=%s, error=%s',
+                      item_index, item.get('name'), str(e), exc_info=True)
+            raise
+
+    def validate_item_destroy(self, item_index, item):
+        LOG.info('[SharedPVC] validate_item_destroy started - item_index=%s, name=%s, cluster=%s',
+                 item_index, item.get('name'), item.get('cluster'))
+        LOG.debug('[SharedPVC] Raw destroy item data: %s', item)
+        try:
+            clean_item = crud.ColumnValidator.get_clean_data(rules.shared_pvc_destroy_rules, item, 'check')
+            if not clean_item.get('namespace'):
+                clean_item['namespace'] = 'default'
+            LOG.info('[SharedPVC] validate_item_destroy finished - name=%s, namespace=%s, cluster=%s',
+                     clean_item.get('name'), clean_item.get('namespace'), clean_item.get('cluster'))
+            return clean_item
+        except Exception as e:
+            LOG.error('[SharedPVC] validate_item_destroy failed - item_index=%s, name=%s, error=%s',
+                      item_index, item.get('name'), str(e), exc_info=True)
+            raise
+
+    def apply(self, reqid, operator, item_index, item, **kwargs):
+        LOG.info('[SharedPVC] apply called - reqid=%s, operator=%s, item_index=%s, name=%s, cluster=%s',
+                 reqid, operator, item_index, item.get('name'), item.get('cluster'))
+        try:
+            result = plugin_api.SharedPVC().apply(item)
+            LOG.info('[SharedPVC] apply succeeded - name=%s, status=%s', item.get('name'), result.get('status'))
+            return result
+        except Exception as e:
+            LOG.error('[SharedPVC] apply failed - name=%s, cluster=%s, error=%s',
+                      item.get('name'), item.get('cluster'), str(e), exc_info=True)
+            raise
+
+    def destroy(self, reqid, operator, item_index, item, **kwargs):
+        LOG.info('[SharedPVC] destroy called - reqid=%s, operator=%s, item_index=%s, name=%s, cluster=%s',
+                 reqid, operator, item_index, item.get('name'), item.get('cluster'))
+        try:
+            result = plugin_api.SharedPVC().remove(item)
+            LOG.info('[SharedPVC] destroy succeeded - name=%s', item.get('name'))
+            return result
+        except Exception as e:
+            LOG.error('[SharedPVC] destroy failed - name=%s, cluster=%s, error=%s',
+                      item.get('name'), item.get('cluster'), str(e), exc_info=True)
+            raise
