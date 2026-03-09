@@ -1655,7 +1655,67 @@ class StatefulSet:
         
         except Exception as e:
             return f"Failed to get details: {str(e)}"
-    
+
+    def _get_pod_logs_summary(self, k8s_client, statefulset_name, namespace, tail_lines=50):
+        """
+        获取 StatefulSet 下各 Pod 的最近日志（包含当前和上一次容器实例），
+        等价于对每个 Pod 执行：
+            kubectl logs -n <namespace> <pod> --tail=<tail_lines>
+            kubectl logs -n <namespace> <pod> --previous --tail=<tail_lines>
+
+        只在出现故障时调用，结果拼入错误信息供快速定位。
+        日志拉取失败不影响主流程，直接跳过对应 Pod。
+        """
+        try:
+            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
+            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
+            if not pod_list or not pod_list.items:
+                return ''
+
+            log_parts = []
+            for pod in pod_list.items:
+                pod_name = pod.metadata.name
+                phase = pod.status.phase if pod.status else 'Unknown'
+
+                # Succeeded 的 Pod 不拉日志（正常退出，无需诊断）
+                # Running 但 not-ready（健康检查持续失败）也需要拉当前日志
+                if phase == 'Succeeded':
+                    continue
+
+                # 判断是否有重启记录，决定是否同时拉 previous 日志
+                has_restarts = False
+                if pod.status and pod.status.container_statuses:
+                    has_restarts = any(
+                        (cs.restart_count or 0) > 0
+                        for cs in pod.status.container_statuses
+                    )
+
+                # 当前容器日志（始终拉取）
+                current_log = k8s_client.get_pod_log(
+                    pod_name, namespace, previous=False, tail_lines=tail_lines
+                )
+                # 上一次容器实例日志（仅在有重启记录时有意义）
+                previous_log = None
+                if has_restarts:
+                    previous_log = k8s_client.get_pod_log(
+                        pod_name, namespace, previous=True, tail_lines=tail_lines
+                    )
+
+                pod_log_lines = [f'--- Pod: {pod_name} (phase={phase}) ---']
+                if current_log:
+                    pod_log_lines.append(f'[Current logs (last {tail_lines} lines)]:\n{current_log.strip()}')
+                if previous_log:
+                    pod_log_lines.append(f'[Previous logs (last {tail_lines} lines)]:\n{previous_log.strip()}')
+                if not current_log and not previous_log:
+                    pod_log_lines.append('[No logs available]')
+
+                log_parts.append('\n'.join(pod_log_lines))
+
+            return '\n\n'.join(log_parts)
+        except Exception as e:
+            LOG.warning('[StatefulSet] Failed to collect pod logs: %s', str(e))
+            return ''
+
     def _sync_pods_to_cmdb(self, k8s_client, namespace, pod_list, instance_id):
         """同步 Pod 信息到 CMDB"""
         if not instance_id:
@@ -2060,14 +2120,22 @@ class StatefulSet:
                     LOG.error('❌ Timeout waiting for Pods to be ready: %d/%d ready after %d seconds', 
                              ready_replicas, replicas, pod_ready_timeout)
                     LOG.error('Pod failure details: %s', error_msg)
-                    
+
+                    # 拉取 Pod 日志辅助定位（等价于 kubectl logs [-p] --tail=50）
+                    pod_logs = self._get_pod_logs_summary(k8s_client, resource_name, data['namespace'])
+                    if pod_logs:
+                        LOG.error('Pod logs for failed pods:\n%s', pod_logs)
+                        full_details = f'{error_msg}\n\nPod Logs:\n{pod_logs}'
+                    else:
+                        full_details = error_msg
+
                     raise exceptions.PluginError(
                         message=_('StatefulSet created but Pods failed to become ready within %(timeout)ds. '
                                   'Ready: %(ready)d/%(expected)d. Details: %(details)s') % {
                             'timeout': pod_ready_timeout,
                             'ready': ready_replicas,
                             'expected': replicas,
-                            'details': error_msg
+                            'details': full_details
                         }
                     )
         else:
@@ -2459,11 +2527,16 @@ class StatefulSet:
                                                         container_status.name, reason, exit_code, restart_count)
                                                 error_details.append(f'{pod_name}/{container_status.name}: terminated (exit {exit_code}, restarted {restart_count} times)')
                                             elif container_status.state.running:
-                                                # 容器在运行但 Pod 不 ready（可能健康检查失败）
+                                                # 容器在运行但 Pod 不 ready（健康检查持续失败）
                                                 if restart_count > 0:
                                                     LOG.error('  Container %s running but not ready (restarts: %d)',
                                                             container_status.name, restart_count)
                                                     error_details.append(f'{pod_name}/{container_status.name}: running but not ready (restarted {restart_count} times)')
+                                                else:
+                                                    # 无重启但 not-ready，最典型原因是健康检查配置不当或应用启动慢
+                                                    LOG.error('  Container %s running but not ready (no restarts, likely health check failure)',
+                                                            container_status.name)
+                                                    error_details.append(f'{pod_name}/{container_status.name}: running but not ready (no restarts, likely health check failure - check readiness probe config)')
                                         else:
                                             # 没有状态信息，但可能有重启次数
                                             if restart_count > 0:
@@ -2471,12 +2544,21 @@ class StatefulSet:
                                                 error_details.append(f'{pod_name}/{container_status.name}: restarted {restart_count} times')
                         
                         error_msg = '; '.join(error_details[:5])  # 只显示前5个错误，避免信息过长
+
+                        # 拉取 Pod 日志辅助定位（等价于 kubectl logs [-p] --tail=50）
+                        pod_logs = self._get_pod_logs_summary(k8s_client, resource_name, data['namespace'])
+                        if pod_logs:
+                            LOG.error('Pod logs for failed pods:\n%s', pod_logs)
+                            full_details = f'{error_msg}\n\nPod Logs:\n{pod_logs}'
+                        else:
+                            full_details = error_msg
+
                         raise exceptions.PluginError(
                             message=_('StatefulSet created but %(count)d/%(total)d pods failed to become ready within %(timeout)ds. Details: %(details)s') % {
                                 'count': len(pods_not_ready),
                                 'total': len(pod_list),
                                 'timeout': max_wait_time,
-                                'details': error_msg
+                                'details': full_details
                             }
                         )
                     

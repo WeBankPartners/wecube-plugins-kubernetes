@@ -206,6 +206,23 @@ class Client:
     def delete_pod(self, name, namespace, **kwargs):
         return self._action(self.core_client, 'delete_namespaced_pod', name, namespace, **kwargs)
 
+    def get_pod_log(self, name, namespace, previous=False, tail_lines=100, **kwargs):
+        """
+        获取 Pod 日志，等价于 kubectl logs [-p] --tail=N pod_name -n namespace。
+        previous=True 时获取上一个容器实例的日志（容器重启后使用）。
+        读取失败时返回 None，调用方自行决定是否忽略。
+        """
+        try:
+            func = getattr(self.core_client, 'read_namespaced_pod_log')
+            return func(name, namespace, previous=previous, tail_lines=tail_lines, **kwargs)
+        except k8s_exceptions.ApiException as e:
+            if e.status == 404:
+                return None
+            # 日志拉取失败不应阻断主流程，返回 None
+            return None
+        except Exception:
+            return None
+
     # Service
     def create_service(self, namespace, body, **kwargs):
         return self._action(self.core_client, 'create_namespaced_service', namespace, body, **kwargs)
