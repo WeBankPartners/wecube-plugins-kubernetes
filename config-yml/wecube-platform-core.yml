@@ -170,9 +170,8 @@ spec:
           type: File
       - name: log-storage
         emptyDir: {}
-      # 与 portal 共享的 UI 资源 PVC：引用 portal StatefulSet 自动创建的 PVC
-      # PVC 名称格式：<volumeClaimTemplate.name>-<statefulset.name>-<ordinal>
-      # 即 portal 的 volumeClaimTemplates name=ui-resources → ui-resource-wecube-portal-0
+      # 与 portal 共享的 UI 资源 PVC：引用共享 PVC ui-resource（在 wecube-portal.yml 中定义）
+      # portal 和 platform-core 同时挂载，ReadWriteMany 保证两者可并发读写，文件互相可见
       - name: ui-resources-shared
         persistentVolumeClaim:
-          claimName: ui-resource-wecube-portal-0
+          claimName: ui-resource

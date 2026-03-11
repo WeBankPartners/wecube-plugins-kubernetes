@@ -1065,6 +1065,17 @@ class StatefulSet:
         }]
         
         LOG.error('[DEBUG] images_data before convert_container: %s', images_data)
+
+        # 自动注入时区环境变量（来自平台系统参数 KUBERNETES_APP_TIMEZONE）
+        # 用户可在 envs 参数中传入 TZ 覆盖系统默认值
+        app_timezone = getattr(CONF, 'app_timezone', '') or ''
+        if app_timezone:
+            has_tz = any(env.get('name') == 'TZ' for env in pod_spec_envs)
+            if not has_tz:
+                pod_spec_envs.append({'name': 'TZ', 'value': app_timezone})
+                LOG.info('Auto-injected TZ=%s from system parameter KUBERNETES_APP_TIMEZONE', app_timezone)
+            else:
+                LOG.debug('TZ env already set by user, skipping auto-injection of KUBERNETES_APP_TIMEZONE')
         
         # 获取部署脚本（如果提供）
         deploy_script = data.get('image_deploy_script')

@@ -16,6 +16,37 @@ spec:
     app: wecube-minio
 
 ---
+# 共享 PVC：存储 MinIO 数据，所有 Pod 共用同一份数据，互相可见
+# 需要 StorageClass "nfs" 支持 ReadWriteMany（NFS 天然支持）
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wecube-minio-data
+  namespace: demo-myapp
+spec:
+  accessModes:
+  - ReadWriteMany
+  storageClassName: "nfs"
+  resources:
+    requests:
+      storage: 50Gi
+
+---
+# 共享 PVC：存储 MinIO 配置，所有 Pod 共用同一份配置
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wecube-minio-config
+  namespace: demo-myapp
+spec:
+  accessModes:
+  - ReadWriteMany
+  storageClassName: "nfs"
+  resources:
+    requests:
+      storage: 1Gi
+
+---
 # StatefulSet for MinIO
 apiVersion: apps/v1
 kind: StatefulSet
@@ -116,20 +147,12 @@ spec:
         hostPath:
           path: /etc/localtime
           type: File
-  volumeClaimTemplates:
-  - metadata:
-      name: wecube-minio-data
-    spec:
-      accessModes: [ "ReadWriteOnce" ]
-      storageClassName: "nfs"
-      resources:
-        requests:
-          storage: 50Gi
-  - metadata:
-      name: wecube-minio-config
-    spec:
-      accessModes: [ "ReadWriteOnce" ]
-      storageClassName: "nfs"
-      resources:
-        requests:
-          storage: 1Gi
+      # 引用共享 PVC，所有 Pod 挂载同一个 PVC，数据互相可见
+      - name: wecube-minio-data
+        persistentVolumeClaim:
+          claimName: wecube-minio-data
+      - name: wecube-minio-config
+        persistentVolumeClaim:
+          claimName: wecube-minio-config
+  # 移除 volumeClaimTemplates：原来每个 Pod 会自动创建独立 PVC（RWO，数据隔离）
+  # 改为在上方 volumes 中引用共享 PVC，所有 Pod 共用同一份存储
