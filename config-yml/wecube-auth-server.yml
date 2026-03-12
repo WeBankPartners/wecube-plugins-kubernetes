@@ -75,6 +75,8 @@ spec:
           value: "80"
         - name: ENCRYPT_SEED
           value: "Abcd1234"
+        - name: TZ
+          value: "Asia/Shanghai"
         volumeMounts:
         - name: auth-server-certs
           mountPath: /app/platform-auth-server/config/certs

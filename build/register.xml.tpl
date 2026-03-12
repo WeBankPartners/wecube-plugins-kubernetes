@@ -254,6 +254,7 @@
                     <parameter datatype="string" mappingType="constant" required="N" description="logs path for container">log_path</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" multiple="Y" description="block storage guid (mount_path is auto-fetched from CMDB)">block_storage</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" multiple="Y" description="shared pvc guid list (references existing shared PVCs, all pods mount the same PVC)">shared_block_storage</parameter>
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" refObjectName="commonTag" description="statefulset metadata annotations (key-value pairs, empty or null is ignored)">annotations</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>

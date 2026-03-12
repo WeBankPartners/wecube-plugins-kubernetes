@@ -199,6 +199,12 @@ deployment_rules = [
                          rule=validator.TypeValidator(list),
                          validate_on=['check:O'],
                          nullable=True),
+    # StatefulSet metadata 注解，格式同 tags（{name, value} 数组），合并写入 annotations
+    crud.ColumnValidator(field='annotations',
+                         rule=validator.IterableValidator(crud.ColumnValidator.get_clean_data, tag_item_rules, 'check'),
+                         validate_on=['check:O'],
+                         converter=validator.StringToList(),
+                         nullable=True),
     crud.ColumnValidator(field='volumeClaimTemplates',
                          rule=validator.TypeValidator(list),
                          validate_on=['check:O'],

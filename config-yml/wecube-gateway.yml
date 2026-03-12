@@ -57,6 +57,8 @@ spec:
             value: "U664"
           - name: WECUBE_SUB_SYSTEM_PLUGIN_CODE
             value: "U665"
+          - name: TZ
+            value: "Asia/Shanghai"
         volumeMounts:
         - name: localtime
           mountPath: /etc/localtime
