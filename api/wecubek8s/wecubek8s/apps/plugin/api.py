@@ -1263,14 +1263,16 @@ class StatefulSet:
         # 为空或不传时跳过，不覆盖已有的内部 annotations
         LOG.info('[StatefulSet] raw annotations from input: %s (type: %s)', data.get('annotations'), type(data.get('annotations')))
         user_annotations_list = data.get('annotations') or []
+        user_annotations = {}
         if user_annotations_list:
-            user_annotations = {}
             for item in user_annotations_list:
                 if isinstance(item, dict):
                     user_annotations.update(item)
             if user_annotations:
+                # 同时写入 StatefulSet metadata 和 Pod template metadata
                 statefulset_annotations.update(user_annotations)
-                LOG.info('Merged %d user-defined annotations into StatefulSet annotations: %s',
+                pod_annotations.update(user_annotations)
+                LOG.info('Merged %d user-defined annotations into both StatefulSet and Pod annotations: %s',
                          len(user_annotations), list(user_annotations.keys()))
         
         template = {
