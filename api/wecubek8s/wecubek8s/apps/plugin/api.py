@@ -1258,15 +1258,20 @@ class StatefulSet:
             statefulset_annotations['wecube.io/app-instance'] = data['instanceId']
             LOG.info('Adding app-instance to StatefulSet annotations: %s', data['instanceId'])
 
-        # 合并用户传入的自定义 annotations（格式同 tags：[{name, value}] 数组）
+        # 合并用户传入的自定义 annotations
+        # 支持格式：[{'key1': 'value1', 'key2': 'value2'}]（列表中含一个或多个普通 dict）
         # 为空或不传时跳过，不覆盖已有的内部 annotations
         LOG.info('[StatefulSet] raw annotations from input: %s (type: %s)', data.get('annotations'), type(data.get('annotations')))
         user_annotations_list = data.get('annotations') or []
         if user_annotations_list:
-            user_annotations = api_utils.convert_tag(user_annotations_list)
-            statefulset_annotations.update(user_annotations)
-            LOG.info('Merged %d user-defined annotations into StatefulSet annotations: %s',
-                     len(user_annotations), list(user_annotations.keys()))
+            user_annotations = {}
+            for item in user_annotations_list:
+                if isinstance(item, dict):
+                    user_annotations.update(item)
+            if user_annotations:
+                statefulset_annotations.update(user_annotations)
+                LOG.info('Merged %d user-defined annotations into StatefulSet annotations: %s',
+                         len(user_annotations), list(user_annotations.keys()))
         
         template = {
             'apiVersion': 'apps/v1',
