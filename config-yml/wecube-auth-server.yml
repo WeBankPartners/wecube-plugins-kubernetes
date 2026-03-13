@@ -13,7 +13,7 @@ spec:
   ports:
   - name: http
     port: 8002
-    targetPort: 8080
+    targetPort: 8002
 
 ---
 # ------------------- StatefulSet -------------------
@@ -37,7 +37,7 @@ spec:
       - name: wecube-auth-server
         image: 192.168.150.6:30816/library/platform-auth-server:v4.5.7
         ports:
-        - containerPort: 8080
+        - containerPort: 8002
         env:
         - name: LOG_LEVEL
           value: "info"

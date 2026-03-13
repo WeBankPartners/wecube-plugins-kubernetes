@@ -13,140 +13,75 @@ CONF = config.CONF
 LOG = logging.getLogger(__name__)
 
 
-def escape_name(name):
-    '''
-    lowercase RFC 1123 name must consist of lower case alphanumeric characters, 
-    '-' or '.', and must start and end with an alphanumeric character 
-    (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')
-    '''
-    # 防御性检查：确保 name 不是 None 或空字符串
-    if name is None:
-        # 获取调用堆栈，看看是谁传入了 None
-        import traceback
-        stack = traceback.format_stack()
-        caller_info = ''.join(stack[-3:-1])  # 获取调用者信息（最近2层）
-        raise ValueError(f'escape_name: name cannot be None. Called from:\n{caller_info}')
-    if not name or not name.strip():
-        import traceback
-        stack = traceback.format_stack()
-        caller_info = ''.join(stack[-3:-1])
-        raise ValueError(f'escape_name: name cannot be empty, got: {repr(name)}. Called from:\n{caller_info}')
-    
+def _auto_escape_name(name):
+    '''内部使用：将任意字符串自动转换为符合 RFC 1123 的名称（不对用户输入使用）。'''
+    if not name:
+        return name
     rule = r'[^.a-z0-9]'
     return re.sub(rule, '-', name.lower())
 
 
+def escape_name(name):
+    '''
+    校验名称是否符合 RFC 1123 规范：
+    小写字母、数字、'-' 或 '.'，首尾必须为字母或数字。
+    正则：[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*
+
+    不符合规范时直接抛出 ValidationError，不做自动转换。
+    '''
+    if not name or not name.strip():
+        raise exceptions.ValidationError(
+            attribute='name',
+            msg=_('name cannot be empty')
+        )
+    pattern = r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+    if not re.match(pattern, name):
+        raise exceptions.ValidationError(
+            attribute='name',
+            msg=_('name "%(name)s" is invalid: must conform to RFC 1123 - '
+                  'only lowercase alphanumeric characters, "-" or "." are allowed, '
+                  'and must start and end with an alphanumeric character') % {'name': name}
+        )
+    return name
+
+
 def normalize_statefulset_name(name):
     '''
-    规范化 StatefulSet 名称，自动移除末尾可能的端口号后缀。
-    
-    为了避免因调用方将端口号包含在名称中而导致创建多个 StatefulSet 的问题，
-    此函数会自动检测并移除名称末尾的端口号部分。
-    
-    规则：
-    - 如果名称以 '-数字' 或 ':数字' 结尾，移除该后缀
-    - 支持单端口：'app-name-80' -> 'app-name', 'app-name:8080' -> 'app-name'
-    - 支持多端口：'app-name:80,81,82' -> 'app-name'
-    - 保护性处理：只在明确匹配端口号模式时才移除，避免误删
-    
-    Args:
-        name: 原始名称，可能包含端口号后缀
-        
-    Returns:
-        清理后的名称（移除端口号后缀）
-    
-    Example:
-        >>> normalize_statefulset_name('sit-demo-core-app-vm-democore01-172-21-154-195-80')
-        'sit-demo-core-app-vm-democore01-172-21-154-195'
-        >>> normalize_statefulset_name('sit-demo-core-app-vm-democore01-172-21-154-195:8080')
-        'sit-demo-core-app-vm-democore01-172-21-154-195'
-        >>> normalize_statefulset_name('sit-demo-core-app-vm-democore01-172-21-154-195:80,81,82')
-        'sit-demo-core-app-vm-democore01-172-21-154-195'
-        >>> normalize_statefulset_name('my-app-v2')  # 不是端口号格式，保持原样
-        'my-app-v2'
+    直接返回原始名称，不做任何处理。
+    名称合法性由后续的 escape_service_name（DNS-1035 校验）统一保证。
     '''
-    # 匹配末尾的 '-数字' 或 ':数字[,数字...]' 模式（支持单端口或多端口逗号分隔）
-    # 使用贪婪匹配，只移除最后一个符合条件的后缀
-    import re
-    # 修改正则表达式以支持多端口格式：[\d,]+ 匹配数字和逗号的组合
-    match = re.match(r'^(.*)[-:]([\d,]+)$', name)
-    
-    if match:
-        base_name, port_str = match.groups()
-        
-        # 验证端口字符串格式：
-        # 1. 至少包含一个数字
-        # 2. 不能以逗号开头或结尾
-        # 3. 不能有连续的逗号
-        if not port_str or not re.search(r'\d', port_str):
-            # 没有数字，不是有效的端口格式
-            return name
-        
-        if port_str.startswith(',') or port_str.endswith(',') or ',,' in port_str:
-            # 格式不正确，保持原样
-            return name
-        
-        # 如果包含逗号，说明是多端口格式，直接移除
-        if ',' in port_str:
-            if base_name:
-                return base_name
-            else:
-                return name
-        
-        # 单端口格式：验证是否在有效端口号范围内（1-65535）
-        try:
-            port = int(port_str)
-            if 1 <= port <= 65535 and base_name:
-                return base_name
-        except ValueError:
-            pass
-    
-    # 如果不匹配端口号模式，返回原始名称
     return name
 
 
 def escape_service_name(name, max_length=63):
     '''
-    DNS-1035 label (for Service names) must consist of lower case alphanumeric characters or '-',
-    start with an alphabetic character, and end with an alphanumeric character.
-    More strict than DNS-1123: no dots allowed, must start with a letter.
-    (e.g. 'my-service', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')
-    
-    Args:
-        name: 原始名称
-        max_length: 最大长度限制（默认 63）。对于 StatefulSet，建议使用更小的值（如 50）
-                   以预留空间给 Kubernetes 自动添加的后缀（如 controller-revision-hash）
+    校验名称是否符合 DNS-1035 规范：
+    小写字母、数字或 '-'，必须以字母开头，以字母或数字结尾，长度不超过 max_length。
+    正则：[a-z]([-a-z0-9]*[a-z0-9])?
+
+    不符合规范时直接抛出 ValidationError，不做自动转换。
     '''
-    # 防御性检查：确保 name 不是 None 或空字符串
-    if name is None:
-        import traceback
-        stack = traceback.format_stack()
-        caller_info = ''.join(stack[-3:-1])  # 获取调用者信息
-        raise ValueError(f'escape_service_name: name cannot be None. Called from:\n{caller_info}')
     if not name or not name.strip():
-        import traceback
-        stack = traceback.format_stack()
-        caller_info = ''.join(stack[-3:-1])
-        raise ValueError(f'escape_service_name: name cannot be empty, got: {repr(name)}. Called from:\n{caller_info}')
-    
-    # 1. 转换为小写并替换所有非字母数字字符为 '-'
-    result = re.sub(r'[^a-z0-9]', '-', name.lower())
-    
-    # 2. 确保以字母开头（如果不是，添加 's-' 前缀）
-    if not result or not result[0].isalpha():
-        result = 's-' + result
-    
-    # 3. 确保以字母或数字结尾（删除尾部的 '-'）
-    result = result.rstrip('-')
-    
-    # 4. 合并连续的 '-' 为单个 '-'
-    result = re.sub(r'-+', '-', result)
-    
-    # 5. 确保长度限制
-    if len(result) > max_length:
-        result = result[:max_length].rstrip('-')
-    
-    return result
+        raise exceptions.ValidationError(
+            attribute='name',
+            msg=_('name cannot be empty')
+        )
+    if len(name) > max_length:
+        raise exceptions.ValidationError(
+            attribute='name',
+            msg=_('name "%(name)s" is too long: %(actual)d characters, maximum allowed is %(max)d') % {
+                'name': name, 'actual': len(name), 'max': max_length
+            }
+        )
+    pattern = r'^[a-z]([-a-z0-9]*[a-z0-9])?$'
+    if not re.match(pattern, name):
+        raise exceptions.ValidationError(
+            attribute='name',
+            msg=_('name "%(name)s" is invalid: must conform to DNS-1035 - '
+                  'only lowercase alphanumeric characters and "-" are allowed, '
+                  'must start with a letter and end with an alphanumeric character') % {'name': name}
+        )
+    return name
 
 
 def escape_label_value(value):
@@ -492,8 +427,7 @@ def convert_container(images, envs, vols, resource_limit, deploy_script=None):
             )
             raise ValueError(error_msg)
         
-        # 使用 escape_name 确保容器名称符合 RFC 1123 规范（将下划线转换为连字符）
-        container['name'] = escape_name(image_name)
+        container['name'] = _auto_escape_name(image_name)
         container['image'] = image_info['name'].strip()
         container['ports'] = convert_pod_ports(image_info.get('ports', ''))
         
@@ -548,7 +482,7 @@ def convert_registry_secret(k8s_client, images, namespace, username, password):
         registry_server, registry_namespace, image_name_parsed, image_tag = parse_image_url(image_name)
         if registry_server:
             name = registry_server + '#' + username
-            name = escape_name(name)
+            name = _auto_escape_name(name)
             
             # 去重：同一个 registry 和 username 只创建一个 secret
             if name not in seen_secrets:
