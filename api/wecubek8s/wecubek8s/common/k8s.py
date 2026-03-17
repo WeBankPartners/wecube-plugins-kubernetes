@@ -59,6 +59,7 @@ class Client:
         self.core_client = client.CoreV1Api(api_client)
         self.app_client = client.AppsV1Api(api_client)
         self.networking_client = client.NetworkingV1Api(api_client)
+        self.batch_client = client.BatchV1Api(api_client)
 
     def _action(self, client, func_name, *args, **kwargs):
         func = getattr(client, func_name)
@@ -323,6 +324,19 @@ class Client:
 
     def get_pvc(self, name, namespace, **kwargs):
         return self._action_detail(self.core_client, 'read_namespaced_persistent_volume_claim', name, namespace, **kwargs)
+
+    # Job
+    def create_job(self, namespace, body, **kwargs):
+        return self._action(self.batch_client, 'create_namespaced_job', namespace, body, **kwargs)
+
+    def delete_job(self, name, namespace, **kwargs):
+        return self._action(self.batch_client, 'delete_namespaced_job', name, namespace, **kwargs)
+
+    def get_job(self, name, namespace, **kwargs):
+        return self._action_detail(self.batch_client, 'read_namespaced_job', name, namespace, **kwargs)
+
+    def list_job(self, namespace, **kwargs):
+        return self._action(self.batch_client, 'list_namespaced_job', namespace, **kwargs)
 
     # NetworkPolicy
     def create_network_policy(self, namespace, body, **kwargs):

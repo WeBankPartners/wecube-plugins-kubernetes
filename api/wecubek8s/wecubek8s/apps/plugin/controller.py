@@ -960,3 +960,50 @@ class SharedPVC(controller.Plugin):
             LOG.error('[SharedPVC] destroy failed - name=%s, cluster=%s, error=%s',
                       item.get('name'), item.get('cluster'), str(e), exc_info=True)
             raise
+
+
+class PackageDeploy(controller.Plugin):
+    """
+    包部署接口：通过 K8s Job + busybox 镜像，将远程 tar.gz 包下载并解压到共享 PVC 的指定目录。
+    """
+    allow_methods = ('POST',)
+    name = 'k8s.plugin.package_deploy'
+
+    def set_item_default(self, item):
+        defaults = {
+            'namespace': 'default',
+            'target_path': '/',
+        }
+        for key, value in defaults.items():
+            if not item.get(key):
+                item[key] = value
+
+    def validate_item_apply(self, item_index, item):
+        LOG.info('[PackageDeploy] validate_item_apply started - item_index=%s, correlation_id=%s, cluster=%s',
+                 item_index, item.get('correlation_id'), item.get('cluster'))
+        try:
+            clean_item = crud.ColumnValidator.get_clean_data(rules.package_deploy_rules, item, 'check')
+            self.set_item_default(clean_item)
+            LOG.info('[PackageDeploy] validate_item_apply finished - correlation_id=%s, namespace=%s, pvc_name=%s, '
+                     'package_url=%s, target_path=%s',
+                     clean_item.get('correlation_id'), clean_item.get('namespace'), clean_item.get('pvc_name'),
+                     clean_item.get('package_url'), clean_item.get('target_path'))
+            return clean_item
+        except Exception as e:
+            LOG.error('[PackageDeploy] validate_item_apply failed - item_index=%s, correlation_id=%s, error=%s',
+                      item_index, item.get('correlation_id'), str(e), exc_info=True)
+            raise
+
+    def apply(self, reqid, operator, item_index, item, **kwargs):
+        LOG.info('[PackageDeploy] apply called - reqid=%s, operator=%s, item_index=%s, '
+                 'correlation_id=%s, cluster=%s',
+                 reqid, operator, item_index, item.get('correlation_id'), item.get('cluster'))
+        try:
+            result = plugin_api.PackageDeploy().apply(item)
+            LOG.info('[PackageDeploy] apply succeeded - job_name=%s, status=%s',
+                     result.get('job_name'), result.get('status'))
+            return result
+        except Exception as e:
+            LOG.error('[PackageDeploy] apply failed - correlation_id=%s, cluster=%s, error=%s',
+                      item.get('correlation_id'), item.get('cluster'), str(e), exc_info=True)
+            raise

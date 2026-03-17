@@ -4,6 +4,7 @@ from __future__ import absolute_import
 
 import logging
 import time
+import hashlib
 
 from talos.core import config
 from talos.core.i18n import _
@@ -1977,17 +1978,49 @@ class StatefulSet:
                     client.ApiClient().sanitize_for_serialization(vct) for vct in old_vct
                 ]
                 
-                # 如果用户尝试修改 volumeClaimTemplates，记录警告
+                # 如果用户尝试修改 volumeClaimTemplates，记录警告，并移除新请求带来的 volumeClaimMounts
                 if new_vct:
                     LOG.warning('volumeClaimTemplates cannot be modified on existing StatefulSet. '
                               'The new volumeClaimTemplates configuration will be IGNORED. '
                               'To change storage config, you must delete and recreate the StatefulSet.')
+                    # 【关键修复】新请求的 volumeClaimTemplates 被忽略，同步移除对应的 volumeClaimMounts
+                    # 保留旧 volumeClaimTemplates 对应的 volumeMounts（按旧 VCT 名称判断）
+                    old_vct_names = set()
+                    for vct in old_vct:
+                        serialized = client.ApiClient().sanitize_for_serialization(vct)
+                        if isinstance(serialized, dict):
+                            old_vct_names.add(serialized.get('metadata', {}).get('name', ''))
+                    new_vct_names = {vct['metadata']['name'] for vct in new_vct if isinstance(vct, dict)}
+                    # 新增的（不在旧 VCT 中的）volumeMount 需要移除
+                    extra_names = new_vct_names - old_vct_names
+                    if extra_names:
+                        LOG.warning('Removing volumeClaimMounts for new (ignored) volumeClaimTemplates: %s', extra_names)
+                        for container in resource_template['spec']['template']['spec'].get('containers', []):
+                            original_mounts = container.get('volumeMounts', [])
+                            filtered_mounts = [m for m in original_mounts if m.get('name') not in extra_names]
+                            if len(filtered_mounts) < len(original_mounts):
+                                LOG.warning('Removed %d volumeMount(s) from container "%s"',
+                                            len(original_mounts) - len(filtered_mounts), container.get('name'))
+                            container['volumeMounts'] = filtered_mounts
             elif new_vct:
                 # 原有 StatefulSet 没有 volumeClaimTemplates，但新请求想要添加
-                # 这也是不允许的，需要删除这个字段
+                # 这也是不允许的，需要删除这个字段，同时同步移除容器中对应的 volumeMounts
                 LOG.warning('Cannot add volumeClaimTemplates to existing StatefulSet (immutable field). '
                           'The volumeClaimTemplates configuration will be IGNORED.')
                 del resource_template['spec']['volumeClaimTemplates']
+
+                # 【关键修复】volumeClaimTemplates 被忽略时，必须同步移除容器中对应的 volumeClaimMounts
+                # 否则容器 volumeMounts 引用了不存在的 volume，K8s 会报 "Not found: <name>"
+                vct_names = {vct['metadata']['name'] for vct in new_vct if isinstance(vct, dict)}
+                if vct_names:
+                    LOG.warning('Removing volumeClaimMounts for ignored volumeClaimTemplates: %s', vct_names)
+                    for container in resource_template['spec']['template']['spec'].get('containers', []):
+                        original_mounts = container.get('volumeMounts', [])
+                        filtered_mounts = [m for m in original_mounts if m.get('name') not in vct_names]
+                        if len(filtered_mounts) < len(original_mounts):
+                            LOG.warning('Removed %d volumeMount(s) from container "%s" due to ignored volumeClaimTemplates',
+                                        len(original_mounts) - len(filtered_mounts), container.get('name'))
+                        container['volumeMounts'] = filtered_mounts
             
             # 2. 处理 selector（不可变字段）
             old_selector = exists_resource.spec.selector
@@ -4104,3 +4137,343 @@ class SharedPVC:
         result = {'name': pvc_name, 'namespace': namespace, 'correlation_id': data.get('correlation_id', '')}
         LOG.info('[SharedPVC] ===== remove end (deleted) ===== result=%s', result)
         return result
+
+
+class PackageDeploy:
+    """
+    包部署：通过 K8s Job + busybox 镜像，将远程 tar.gz 包下载并解压到共享 PVC 的指定目录。
+
+    Job 中只有一个容器，使用 busybox 执行：
+      wget -O /tmp/pkg.tar.gz <package_url> && tar -xzf /tmp/pkg.tar.gz -C <target_path>
+
+    共享 PVC 通过 volumes/volumeMounts 挂载到容器内的 /mnt/pvc，
+    target_path 是 PVC 内部的相对路径（挂载点为 /mnt/pvc），
+    因此实际解压路径为 /mnt/pvc/<target_path>。
+
+    Job 命名规则：使用 name + correlation_id 的哈希截断，保证 DNS-1035 合规且唯一。
+
+    busybox 镜像地址从集群的 private_registry 自动拼接，格式为 <private_registry>/busybox:latest；
+    若集群未配置 private_registry 则直接使用 busybox:latest。
+    """
+
+    BUSYBOX_IMAGE_NAME = 'busybox:latest'
+    # Job 等待超时（秒）
+    JOB_WAIT_TIMEOUT = 600
+    # 轮询间隔（秒）
+    JOB_POLL_INTERVAL = 5
+
+    def _get_k8s_client(self, data):
+        cluster_name = data['cluster']
+        LOG.info('[PackageDeploy] Looking up cluster info for cluster=%s', cluster_name)
+        cluster_info = db_resource.Cluster().list({'name': cluster_name})
+        if not cluster_info:
+            LOG.error('[PackageDeploy] Cluster not found: %s', cluster_name)
+            raise exceptions.ValidationError(
+                attribute='cluster',
+                message=_('name of cluster(%(name)s) not found') % {'name': cluster_name}
+            )
+        cluster_info = cluster_info[0]
+        api_server = cluster_info['api_server']
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            api_server = 'https://' + api_server
+        LOG.info('[PackageDeploy] Cluster found: name=%s, api_server=%s', cluster_name, api_server)
+        k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
+        return k8s.Client(k8s_auth), cluster_info
+
+    def _build_job_name(self, correlation_id):
+        """
+        生成 Job 名称，规则：pkg-deploy-<hash_8>
+        直接基于 correlation_id 生成，保证 DNS-1035 合规且唯一。
+        """
+        suffix = hashlib.md5(correlation_id.encode('utf-8')).hexdigest()[:8]
+        return 'pkg-deploy-%s' % suffix
+
+    def to_resource(self, data, k8s_client, cluster_info):
+        LOG.info('[PackageDeploy][to_resource] ---- building Job manifest ----')
+        LOG.info('[PackageDeploy][to_resource] input: correlation_id=%s, namespace=%s, '
+                 'pvc_name=%s, package_url=%s, target_path=%s',
+                 data.get('correlation_id'), data.get('namespace'),
+                 data.get('pvc_name'), data.get('package_url'), data.get('target_path'))
+
+        job_name = self._build_job_name(data['correlation_id'])
+        LOG.info('[PackageDeploy][to_resource] generated job_name=%s (from correlation_id=%s)',
+                 job_name, data['correlation_id'])
+
+        namespace = data['namespace']
+        pvc_name = data['pvc_name']
+        package_url = data['package_url']
+        target_path = data.get('target_path') or '/'
+
+        # 从集群配置中读取私有仓库地址，拼接 busybox 镜像完整地址
+        private_registry = cluster_info.get('private_registry', '') or ''
+        if private_registry:
+            busybox_image = '%s/%s' % (private_registry.rstrip('/'), self.BUSYBOX_IMAGE_NAME)
+            LOG.info('[PackageDeploy][to_resource] private_registry=%s -> busybox_image=%s',
+                     private_registry, busybox_image)
+        else:
+            busybox_image = self.BUSYBOX_IMAGE_NAME
+            LOG.info('[PackageDeploy][to_resource] no private_registry configured, using default busybox_image=%s',
+                     busybox_image)
+
+        # 从集群配置中读取镜像拉取认证信息，为 busybox 镜像创建 imagePullSecrets
+        image_pull_username = cluster_info.get('image_pull_username', '') or ''
+        image_pull_password = cluster_info.get('image_pull_password', '') or ''
+        LOG.info('[PackageDeploy][to_resource] image_pull_username=%s, has_password=%s',
+                 image_pull_username, bool(image_pull_password))
+
+        image_pull_secrets = []
+        if private_registry and image_pull_username and image_pull_password:
+            LOG.info('[PackageDeploy][to_resource] creating imagePullSecrets for registry=%s, username=%s',
+                     private_registry, image_pull_username)
+            image_pull_secrets = api_utils.convert_registry_secret(
+                k8s_client,
+                [busybox_image],
+                namespace,
+                image_pull_username,
+                image_pull_password
+            )
+            LOG.info('[PackageDeploy][to_resource] imagePullSecrets created: %s', image_pull_secrets)
+        else:
+            LOG.info('[PackageDeploy][to_resource] skip imagePullSecrets: '
+                     'private_registry=%s, has_username=%s, has_password=%s',
+                     bool(private_registry), bool(image_pull_username), bool(image_pull_password))
+
+        # target_path 统一去除首尾斜杠后拼接，保证不出现双斜杠
+        raw_target_path = target_path
+        target_path = target_path.strip('/')
+        extract_dir = '/mnt/pvc/%s' % target_path if target_path else '/mnt/pvc'
+        LOG.info('[PackageDeploy][to_resource] target_path: raw=%s -> normalized=%s -> extract_dir=%s',
+                 raw_target_path, target_path, extract_dir)
+
+        # shell 命令：先确保目标目录存在，然后下载、解压
+        shell_cmd = (
+            'mkdir -p {extract_dir} && '
+            'wget -O /tmp/pkg.tar.gz "{package_url}" && '
+            'tar -xzf /tmp/pkg.tar.gz -C {extract_dir} && '
+            'echo "Done: package deployed to {extract_dir}" && '
+            'rm -f /tmp/pkg.tar.gz'
+        ).format(extract_dir=extract_dir, package_url=package_url)
+        LOG.info('[PackageDeploy][to_resource] shell_cmd=%s', shell_cmd)
+
+        pod_spec = {
+            'restartPolicy': 'Never',
+            'containers': [
+                {
+                    'name': 'deploy-package',
+                    'image': busybox_image,
+                    'command': ['sh', '-c', shell_cmd],
+                    'volumeMounts': [
+                        {
+                            'name': 'shared-pvc',
+                            'mountPath': '/mnt/pvc'
+                        }
+                    ]
+                }
+            ],
+            'volumes': [
+                {
+                    'name': 'shared-pvc',
+                    'persistentVolumeClaim': {
+                        'claimName': pvc_name
+                    }
+                }
+            ]
+        }
+        if image_pull_secrets:
+            pod_spec['imagePullSecrets'] = image_pull_secrets
+
+        manifest = {
+            'apiVersion': 'batch/v1',
+            'kind': 'Job',
+            'metadata': {
+                'name': job_name,
+                'namespace': namespace,
+                'labels': {
+                    const.Tag.PVC_ID_TAG: data['correlation_id'],
+                    'app': job_name,
+                }
+            },
+            'spec': {
+                # Job 完成后保留 3600 秒自动清理
+                'ttlSecondsAfterFinished': 3600,
+                'backoffLimit': 0,
+                'template': {
+                    'metadata': {
+                        'labels': {
+                            'app': job_name,
+                        }
+                    },
+                    'spec': pod_spec
+                }
+            }
+        }
+        LOG.info('[PackageDeploy][to_resource] manifest built: job_name=%s, namespace=%s, '
+                 'image=%s, pvc=%s, extract_dir=%s, imagePullSecrets=%s',
+                 job_name, namespace, busybox_image, pvc_name, extract_dir, image_pull_secrets)
+        LOG.info('[PackageDeploy][to_resource] ---- manifest build complete ----')
+        return manifest, job_name
+
+    def apply(self, data):
+        LOG.info('[PackageDeploy] ===== apply start =====')
+        LOG.info('[PackageDeploy] request params: cluster=%s, namespace=%s, pvc_name=%s, '
+                 'package_url=%s, target_path=%s, correlation_id=%s',
+                 data.get('cluster'), data.get('namespace'),
+                 data.get('pvc_name'), data.get('package_url'), data.get('target_path'),
+                 data.get('correlation_id'))
+
+        LOG.info('[PackageDeploy] Step 1: Getting k8s client for cluster=%s', data.get('cluster'))
+        k8s_client, cluster_info = self._get_k8s_client(data)
+        LOG.info('[PackageDeploy] Step 1 done: cluster api_server=%s, private_registry=%s',
+                 cluster_info.get('api_server'), cluster_info.get('private_registry'))
+
+        namespace = data['namespace']
+        LOG.info('[PackageDeploy] Step 2: Ensuring namespace=%s exists', namespace)
+        k8s_client.ensure_namespace(namespace)
+        LOG.info('[PackageDeploy] Step 2 done: namespace=%s ensured', namespace)
+
+        LOG.info('[PackageDeploy] Step 3: Building Job manifest')
+        manifest, job_name = self.to_resource(data, k8s_client, cluster_info)
+        LOG.info('[PackageDeploy] Step 3 done: job_name=%s', job_name)
+
+        LOG.info('[PackageDeploy] Step 4: Checking if Job %s/%s already exists', namespace, job_name)
+        existing_job = k8s_client.get_job(job_name, namespace)
+        if existing_job is not None:
+            existing_status = existing_job.status
+            existing_conditions = [c.type for c in (existing_status.conditions or [])] if existing_status else []
+            LOG.info('[PackageDeploy] Step 4: Job %s/%s already exists '
+                     '(active=%s, succeeded=%s, failed=%s, conditions=%s), deleting before recreate',
+                     namespace, job_name,
+                     existing_status.active if existing_status else None,
+                     existing_status.succeeded if existing_status else None,
+                     existing_status.failed if existing_status else None,
+                     existing_conditions)
+            k8s_client.delete_job(job_name, namespace)
+            LOG.info('[PackageDeploy] Step 4: delete_job called, waiting for Job to disappear...')
+            for wait_idx in range(30):
+                time.sleep(2)
+                if k8s_client.get_job(job_name, namespace) is None:
+                    LOG.info('[PackageDeploy] Step 4: Job %s/%s confirmed deleted after %ds',
+                             namespace, job_name, (wait_idx + 1) * 2)
+                    break
+            else:
+                LOG.warning('[PackageDeploy] Step 4: Job %s/%s may not be fully deleted after 60s, proceeding anyway',
+                            namespace, job_name)
+        else:
+            LOG.info('[PackageDeploy] Step 4: Job %s/%s does not exist, proceeding to create', namespace, job_name)
+
+        LOG.info('[PackageDeploy] Step 5: Creating Job %s/%s', namespace, job_name)
+        created_job = k8s_client.create_job(namespace, manifest)
+        LOG.info('[PackageDeploy] Step 5 done: Job %s/%s created, uid=%s',
+                 namespace, job_name, created_job.metadata.uid)
+
+        LOG.info('[PackageDeploy] Step 6: Waiting for Job %s/%s to complete (timeout=%ds, poll_interval=%ds)',
+                 namespace, job_name, self.JOB_WAIT_TIMEOUT, self.JOB_POLL_INTERVAL)
+        start_time = time.time()
+        job_status = 'Running'
+        poll_count = 0
+        while time.time() - start_time < self.JOB_WAIT_TIMEOUT:
+            time.sleep(self.JOB_POLL_INTERVAL)
+            poll_count += 1
+            final_job = k8s_client.get_job(job_name, namespace)
+            if final_job is None:
+                LOG.warning('[PackageDeploy] Step 6 [poll#%d]: Job %s/%s disappeared during wait',
+                            poll_count, namespace, job_name)
+                job_status = 'Unknown'
+                break
+            job_st = final_job.status
+            active = job_st.active or 0
+            succeeded = job_st.succeeded or 0
+            failed = job_st.failed or 0
+            conds = job_st.conditions or []
+            cond_types = [c.type for c in conds]
+            cond_detail = [(c.type, c.status, c.reason, c.message) for c in conds]
+            elapsed = time.time() - start_time
+            LOG.info('[PackageDeploy] Step 6 [poll#%d, %.1fs]: Job %s/%s status: '
+                     'active=%d, succeeded=%d, failed=%d, conditions=%s',
+                     poll_count, elapsed, namespace, job_name,
+                     active, succeeded, failed, cond_detail)
+            if 'Complete' in cond_types:
+                job_status = 'Succeeded'
+                LOG.info('[PackageDeploy] Step 6 [poll#%d]: Job %s/%s COMPLETED successfully',
+                         poll_count, namespace, job_name)
+                break
+            if 'Failed' in cond_types:
+                job_status = 'Failed'
+                LOG.error('[PackageDeploy] Step 6 [poll#%d]: Job %s/%s FAILED. conditions=%s',
+                          poll_count, namespace, job_name, cond_detail)
+                break
+        else:
+            job_status = 'Timeout'
+            LOG.error('[PackageDeploy] Step 6: Job %s/%s did NOT complete within %ds (polled %d times)',
+                      namespace, job_name, self.JOB_WAIT_TIMEOUT, poll_count)
+
+        elapsed_total = time.time() - start_time
+        LOG.info('[PackageDeploy] Step 6 done: job_status=%s, total_elapsed=%.1fs, poll_count=%d',
+                 job_status, elapsed_total, poll_count)
+
+        if job_status not in ('Succeeded',):
+            LOG.info('[PackageDeploy] Collecting Pod logs for failed/timeout Job %s/%s', namespace, job_name)
+            pod_logs = self._get_job_pod_logs(k8s_client, namespace, job_name)
+            LOG.error('[PackageDeploy] Job %s/%s final_status=%s. Pod logs:\n%s',
+                      namespace, job_name, job_status, pod_logs)
+            raise exceptions.K8sCallError(
+                cluster=cluster_info.get('api_server', ''),
+                msg='PackageDeploy Job(%s/%s) %s. Pod logs: %s' % (namespace, job_name, job_status, pod_logs)
+            )
+
+        result = {
+            'job_name': job_name,
+            'namespace': namespace,
+            'status': job_status,
+            'correlation_id': data['correlation_id'],
+        }
+        LOG.info('[PackageDeploy] ===== apply end ===== result=%s', result)
+        return result
+
+    def _get_job_pod_logs(self, k8s_client, namespace, job_name, tail_lines=100):
+        """收集 Job 关联 Pod 的日志，用于错误诊断"""
+        LOG.info('[PackageDeploy][_get_job_pod_logs] collecting logs for job=%s/%s', namespace, job_name)
+        try:
+            pods = k8s_client.list_pod(namespace, label_selector='app=%s' % job_name)
+            if not pods or not pods.items:
+                LOG.warning('[PackageDeploy][_get_job_pod_logs] no pods found for job=%s/%s', namespace, job_name)
+                return '(no pods found for job %s)' % job_name
+            LOG.info('[PackageDeploy][_get_job_pod_logs] found %d pod(s) for job=%s/%s',
+                     len(pods.items), namespace, job_name)
+            logs = []
+            for pod in pods.items:
+                pod_name = pod.metadata.name
+                pod_phase = pod.status.phase if pod.status else 'Unknown'
+                pod_conditions = [(c.type, c.status, c.reason) for c in (pod.status.conditions or [])] \
+                    if pod.status else []
+                container_statuses = []
+                if pod.status and pod.status.container_statuses:
+                    for cs in pod.status.container_statuses:
+                        state_info = {}
+                        if cs.state:
+                            if cs.state.waiting:
+                                state_info = {'waiting': {'reason': cs.state.waiting.reason,
+                                                          'message': cs.state.waiting.message}}
+                            elif cs.state.terminated:
+                                state_info = {'terminated': {'exit_code': cs.state.terminated.exit_code,
+                                                             'reason': cs.state.terminated.reason,
+                                                             'message': cs.state.terminated.message}}
+                            elif cs.state.running:
+                                state_info = {'running': {'started_at': str(cs.state.running.started_at)}}
+                        container_statuses.append({'name': cs.name, 'ready': cs.ready, 'state': state_info})
+                LOG.info('[PackageDeploy][_get_job_pod_logs] Pod %s: phase=%s, conditions=%s, containers=%s',
+                         pod_name, pod_phase, pod_conditions, container_statuses)
+                try:
+                    log_text = k8s_client.get_pod_log(pod_name, namespace, tail_lines=tail_lines)
+                    LOG.info('[PackageDeploy][_get_job_pod_logs] Pod %s log (%d lines):\n%s',
+                             pod_name, len((log_text or '').splitlines()), log_text or '(empty)')
+                    logs.append('[Pod %s | phase=%s]\n%s' % (pod_name, pod_phase, log_text or '(empty log)'))
+                except Exception as e:
+                    LOG.error('[PackageDeploy][_get_job_pod_logs] failed to get log for Pod %s: %s',
+                              pod_name, str(e), exc_info=True)
+                    logs.append('[Pod %s] failed to get log: %s' % (pod_name, str(e)))
+            return '\n'.join(logs)
+        except Exception as e:
+            LOG.error('[PackageDeploy][_get_job_pod_logs] unexpected error listing pods for job=%s/%s: %s',
+                      namespace, job_name, str(e), exc_info=True)
+            return '(failed to list pods: %s)' % str(e)

@@ -35,7 +35,7 @@ spec:
     spec:
       containers:
       - name: wecube-auth-server
-        image: 192.168.150.6:30816/library/platform-auth-server:v4.5.7
+        image: 192.168.150.6:30816/library/platform-auth-server:v4.5.7.12
         ports:
         - containerPort: 8002
         env:

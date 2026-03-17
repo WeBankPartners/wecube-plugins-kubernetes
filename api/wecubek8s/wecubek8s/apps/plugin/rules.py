@@ -561,3 +561,37 @@ shared_pvc_destroy_rules = [
                          validate_on=['check:O'],
                          nullable=True),
 ]
+
+# 包部署规则（通过 K8s Job + busybox 将 tar.gz 包解压到共享 PVC）
+package_deploy_rules = [
+    # 目标 K8s 集群名称
+    crud.ColumnValidator(field='cluster',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    # CMDB correlation_id，同时作为 Job 名称的唯一来源
+    crud.ColumnValidator(field='correlation_id',
+                         rule=validator.LengthValidator(1, 64),
+                         validate_on=['check:M'],
+                         nullable=False),
+    # 命名空间，default 为 'default'
+    crud.ColumnValidator(field='namespace',
+                         rule=validator.LengthValidator(0, 255),
+                         validate_on=['check:O'],
+                         nullable=True),
+    # tar.gz 包的下载 URL
+    crud.ColumnValidator(field='package_url',
+                         rule=validator.LengthValidator(1, 2048),
+                         validate_on=['check:M'],
+                         nullable=False),
+    # 目标共享 PVC 名称（需已提前创建，accessMode 建议 ReadWriteMany）
+    crud.ColumnValidator(field='pvc_name',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    # 包解压后放入 PVC 的目标目录，默认 '/'
+    crud.ColumnValidator(field='target_path',
+                         rule=validator.LengthValidator(0, 1024),
+                         validate_on=['check:O'],
+                         nullable=True),
+]

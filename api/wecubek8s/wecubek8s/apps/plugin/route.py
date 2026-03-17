@@ -29,6 +29,9 @@ def add_routes(api):
     api.add_route('/kubernetes/v1/pvcs/apply', controller.SharedPVC(action='apply'))
     api.add_route('/kubernetes/v1/pvcs/destroy', controller.SharedPVC(action='destroy'))
 
+    # 包部署接口（通过 K8s Job + busybox 将远程 tar.gz 包解压到共享 PVC 指定目录）
+    api.add_route('/kubernetes/v1/packages/deploy', controller.PackageDeploy(action='apply'))
+
     # 跨集群互联接口
     api.add_route('/kubernetes/v1/interconnect/external_service',
                   controller.ClusterInterconnect(action='create_external_service'))
