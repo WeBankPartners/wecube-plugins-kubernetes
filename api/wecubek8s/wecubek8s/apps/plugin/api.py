@@ -4156,7 +4156,6 @@ class PackageDeploy:
     若集群未配置 private_registry 则直接使用 busybox:latest。
     """
 
-    BUSYBOX_IMAGE_NAME = 'busybox:latest'
     # Job 等待超时（秒）
     JOB_WAIT_TIMEOUT = 600
     # 轮询间隔（秒）
@@ -4202,20 +4201,24 @@ class PackageDeploy:
         namespace = data['namespace']
         pvc_name = data['pvc_name']
         package_url = data['package_url']
-        target_path = data.get('target_path') or '/'
+        target_path = data.get('target_path') or ''
 
-        # 从集群配置中读取私有仓库地址，拼接 busybox 镜像完整地址
+        # 使用与 setup_package_init_container 一致的 package-init-container 镜像，
+        # 该镜像内置 download-package.sh，支持 MinIO/S3（mc/aws-cli）和 HTTP/HTTPS 下载，
+        # 固定解压目标目录为 /shared-data/diff-var-files/
+        init_container_image = const.Registry.INIT_CONTAINER_IMAGE
+
+        # 从集群配置中读取私有仓库地址，拼接完整镜像地址
         private_registry = cluster_info.get('private_registry', '') or ''
         if private_registry:
-            busybox_image = '%s/%s' % (private_registry.rstrip('/'), self.BUSYBOX_IMAGE_NAME)
-            LOG.info('[PackageDeploy][to_resource] private_registry=%s -> busybox_image=%s',
-                     private_registry, busybox_image)
+            deploy_image = '%s/%s' % (private_registry.rstrip('/'), init_container_image)
+            LOG.info('[PackageDeploy][to_resource] private_registry=%s -> deploy_image=%s',
+                     private_registry, deploy_image)
         else:
-            busybox_image = self.BUSYBOX_IMAGE_NAME
-            LOG.info('[PackageDeploy][to_resource] no private_registry configured, using default busybox_image=%s',
-                     busybox_image)
+            deploy_image = init_container_image
+            LOG.info('[PackageDeploy][to_resource] no private_registry, using image=%s', deploy_image)
 
-        # 从集群配置中读取镜像拉取认证信息，为 busybox 镜像创建 imagePullSecrets
+        # 从集群配置中读取镜像拉取认证信息，创建 imagePullSecrets
         image_pull_username = cluster_info.get('image_pull_username', '') or ''
         image_pull_password = cluster_info.get('image_pull_password', '') or ''
         LOG.info('[PackageDeploy][to_resource] image_pull_username=%s, has_password=%s',
@@ -4227,7 +4230,7 @@ class PackageDeploy:
                      private_registry, image_pull_username)
             image_pull_secrets = api_utils.convert_registry_secret(
                 k8s_client,
-                [busybox_image],
+                [deploy_image],
                 namespace,
                 image_pull_username,
                 image_pull_password
@@ -4238,36 +4241,49 @@ class PackageDeploy:
                      'private_registry=%s, has_username=%s, has_password=%s',
                      bool(private_registry), bool(image_pull_username), bool(image_pull_password))
 
-        # target_path 统一去除首尾斜杠后拼接，保证不出现双斜杠
+        # target_path：去除首尾斜杠，作为 PVC 的 subPath（空则挂载 PVC 根目录）
         raw_target_path = target_path
         target_path = target_path.strip('/')
-        extract_dir = '/mnt/pvc/%s' % target_path if target_path else '/mnt/pvc'
-        LOG.info('[PackageDeploy][to_resource] target_path: raw=%s -> normalized=%s -> extract_dir=%s',
-                 raw_target_path, target_path, extract_dir)
+        LOG.info('[PackageDeploy][to_resource] target_path: raw=%s -> normalized=%s '
+                 '(used as PVC subPath, empty means PVC root)',
+                 raw_target_path, target_path)
 
-        # shell 命令：先确保目标目录存在，然后下载、解压
-        shell_cmd = (
-            'mkdir -p {extract_dir} && '
-            'wget -O /tmp/pkg.tar.gz "{package_url}" && '
-            'tar -xzf /tmp/pkg.tar.gz -C {extract_dir} && '
-            'echo "Done: package deployed to {extract_dir}" && '
-            'rm -f /tmp/pkg.tar.gz'
-        ).format(extract_dir=extract_dir, package_url=package_url)
-        LOG.info('[PackageDeploy][to_resource] shell_cmd=%s', shell_cmd)
+        # download-package.sh 固定写入 /shared-data/diff-var-files/
+        # 通过将 PVC 挂载到该路径（可选 subPath）来控制最终存储位置
+        SCRIPT_EXTRACT_PATH = '/shared-data/diff-var-files'
+        volume_mount = {
+            'name': 'shared-pvc',
+            'mountPath': SCRIPT_EXTRACT_PATH
+        }
+        if target_path:
+            # subPath 让 K8s 在 PVC 内自动创建 target_path 子目录并挂载到 SCRIPT_EXTRACT_PATH
+            volume_mount['subPath'] = target_path
+            LOG.info('[PackageDeploy][to_resource] PVC %s subPath=%s -> mountPath=%s',
+                     pvc_name, target_path, SCRIPT_EXTRACT_PATH)
+        else:
+            LOG.info('[PackageDeploy][to_resource] PVC %s (root) -> mountPath=%s',
+                     pvc_name, SCRIPT_EXTRACT_PATH)
+
+        # 环境变量：
+        #   PACKAGE_URL       — 下载地址，由调用方传入
+        #   PACKAGE_USERNAME  — MinIO Access Key（const.Artifacts.USERNAME）
+        #   PACKAGE_PASSWORD  — MinIO Secret Key（const.Artifacts.PASSWORD）
+        LOG.info('[PackageDeploy][to_resource] env: PACKAGE_URL=%s, PACKAGE_USERNAME=%s, PACKAGE_PASSWORD=***',
+                 package_url, const.Artifacts.USERNAME)
 
         pod_spec = {
             'restartPolicy': 'Never',
             'containers': [
                 {
                     'name': 'deploy-package',
-                    'image': busybox_image,
-                    'command': ['sh', '-c', shell_cmd],
-                    'volumeMounts': [
-                        {
-                            'name': 'shared-pvc',
-                            'mountPath': '/mnt/pvc'
-                        }
-                    ]
+                    'image': deploy_image,
+                    'imagePullPolicy': 'Always',
+                    'env': [
+                        {'name': 'PACKAGE_URL',      'value': package_url},
+                        {'name': 'PACKAGE_USERNAME', 'value': const.Artifacts.USERNAME},
+                        {'name': 'PACKAGE_PASSWORD', 'value': const.Artifacts.PASSWORD},
+                    ],
+                    'volumeMounts': [volume_mount]
                 }
             ],
             'volumes': [
@@ -4308,8 +4324,9 @@ class PackageDeploy:
             }
         }
         LOG.info('[PackageDeploy][to_resource] manifest built: job_name=%s, namespace=%s, '
-                 'image=%s, pvc=%s, extract_dir=%s, imagePullSecrets=%s',
-                 job_name, namespace, busybox_image, pvc_name, extract_dir, image_pull_secrets)
+                 'image=%s, pvc=%s, mountPath=%s, subPath=%s, imagePullSecrets=%s',
+                 job_name, namespace, deploy_image, pvc_name,
+                 SCRIPT_EXTRACT_PATH, target_path or '(root)', image_pull_secrets)
         LOG.info('[PackageDeploy][to_resource] ---- manifest build complete ----')
         return manifest, job_name
 

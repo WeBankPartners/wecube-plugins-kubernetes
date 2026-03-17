@@ -362,6 +362,26 @@
                 </outputParameters>
             </interface>
         </plugin>
+        <plugin name="package">
+            <interface action="deploy" path="/kubernetes/v1/packages/deploy" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
+                <inputParameters>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="cluster name">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="associated ci data id, also used as unique job identifier">correlation_id</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="namespace(default: default)">namespace</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="download url of the tar.gz package">package_url</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="target shared pvc name (must exist in advance, accessMode ReadWriteMany recommended)">pvc_name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="target sub-directory inside the pvc to extract into (default: /)">target_path</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">job_name</parameter>
+                    <parameter datatype="string">namespace</parameter>
+                    <parameter datatype="string">status</parameter>
+                    <parameter datatype="string">correlation_id</parameter>
+                </outputParameters>
+            </interface>
+        </plugin>
         <plugin name="node">
             <interface action="label" path="/kubernetes/v1/nodes/label" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
                 <inputParameters>
