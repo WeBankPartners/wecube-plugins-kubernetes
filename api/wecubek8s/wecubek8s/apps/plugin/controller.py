@@ -1007,3 +1007,58 @@ class PackageDeploy(controller.Plugin):
             LOG.error('[PackageDeploy] apply failed - correlation_id=%s, cluster=%s, error=%s',
                       item.get('correlation_id'), item.get('cluster'), str(e), exc_info=True)
             raise
+
+
+class PvcBatchDestroy(controller.Plugin):
+    """
+    PVC 批量销毁接口：同时支持共享 PVC 和 volumeClaimTemplate PVC 的批量删除。
+    """
+    allow_methods = ('POST',)
+    name = 'k8s.plugin.pvc_batch_destroy'
+
+    def set_item_default(self, item):
+        if not item.get('namespace'):
+            item['namespace'] = 'default'
+
+    def validate_item_destroy(self, item_index, item):
+        LOG.info('[PvcBatchDestroy] validate_item_destroy started - item_index=%s, '
+                 'cluster=%s, statefulset_name=%s, pvc_key_names=%s',
+                 item_index, item.get('cluster'), item.get('statefulset_name'), item.get('pvc_key_names'))
+        try:
+            clean_item = crud.ColumnValidator.get_clean_data(rules.pvc_batch_destroy_rules, item, 'check')
+            self.set_item_default(clean_item)
+
+            # pvc_key_names 每项去空、去重
+            raw_keys = clean_item.get('pvc_key_names') or []
+            clean_keys = list(dict.fromkeys(k.strip() for k in raw_keys if k and k.strip()))
+            if not clean_keys:
+                raise exceptions.ValidationError(
+                    attribute='pvc_key_names',
+                    message='pvc_key_names must contain at least one non-empty key name'
+                )
+            clean_item['pvc_key_names'] = clean_keys
+
+            LOG.info('[PvcBatchDestroy] validate_item_destroy finished - namespace=%s, '
+                     'statefulset_name=%s, pvc_key_names=%s',
+                     clean_item.get('namespace'), clean_item.get('statefulset_name'),
+                     clean_item.get('pvc_key_names'))
+            return clean_item
+        except Exception as e:
+            LOG.error('[PvcBatchDestroy] validate_item_destroy failed - item_index=%s, error=%s',
+                      item_index, str(e), exc_info=True)
+            raise
+
+    def destroy(self, reqid, operator, item_index, item, **kwargs):
+        LOG.info('[PvcBatchDestroy] destroy called - reqid=%s, operator=%s, item_index=%s, '
+                 'cluster=%s, statefulset_name=%s, pvc_key_names=%s',
+                 reqid, operator, item_index,
+                 item.get('cluster'), item.get('statefulset_name'), item.get('pvc_key_names'))
+        try:
+            result = plugin_api.PvcBatchDestroy().remove(item)
+            LOG.info('[PvcBatchDestroy] destroy succeeded - deleted_count=%d, deleted_pvcs=%s',
+                     result.get('deleted_count', 0), result.get('deleted_pvcs', ''))
+            return result
+        except Exception as e:
+            LOG.error('[PvcBatchDestroy] destroy failed - cluster=%s, statefulset_name=%s, error=%s',
+                      item.get('cluster'), item.get('statefulset_name'), str(e), exc_info=True)
+            raise

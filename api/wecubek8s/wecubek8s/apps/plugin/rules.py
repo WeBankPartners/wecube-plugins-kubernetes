@@ -595,3 +595,32 @@ package_deploy_rules = [
                          validate_on=['check:O'],
                          nullable=True),
 ]
+
+# PVC 批量销毁规则
+# 同时支持：共享 PVC（直接按名称删除）和 volumeClaimTemplates PVC（按 key_name+statefulset_name+ordinal 推算）
+pvc_batch_destroy_rules = [
+    crud.ColumnValidator(field='cluster',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    crud.ColumnValidator(field='correlation_id',
+                         rule=validator.LengthValidator(1, 64),
+                         validate_on=['check:M'],
+                         nullable=False),
+    # 命名空间，default 为 'default'
+    crud.ColumnValidator(field='namespace',
+                         rule=validator.LengthValidator(0, 255),
+                         validate_on=['check:O'],
+                         nullable=True),
+    # StatefulSet 名称，用于推算 volumeClaimTemplate PVC 的完整名称
+    crud.ColumnValidator(field='statefulset_name',
+                         rule=validator.LengthValidator(1, 255),
+                         validate_on=['check:M'],
+                         nullable=False),
+    # 需要删除的 PVC key_name 列表（多个用逗号分隔，或传数组）
+    # 对每个 key_name 会自动识别：共享 PVC 或 volumeClaimTemplate PVC
+    crud.ColumnValidator(field='pvc_key_names',
+                         rule=validator.TypeValidator(list),
+                         validate_on=['check:M'],
+                         nullable=False),
+]

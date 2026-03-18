@@ -29,6 +29,9 @@ def add_routes(api):
     api.add_route('/kubernetes/v1/pvcs/apply', controller.SharedPVC(action='apply'))
     api.add_route('/kubernetes/v1/pvcs/destroy', controller.SharedPVC(action='destroy'))
 
+    # PVC 批量销毁接口（自动识别共享 PVC 和 volumeClaimTemplate PVC，按 statefulset_name + pvc_key_names 批量删除）
+    api.add_route('/kubernetes/v1/pvcs/batch_destroy', controller.PvcBatchDestroy(action='destroy'))
+
     # 包部署接口（通过 K8s Job + busybox 将远程 tar.gz 包解压到共享 PVC 指定目录）
     api.add_route('/kubernetes/v1/packages/deploy', controller.PackageDeploy(action='apply'))
 

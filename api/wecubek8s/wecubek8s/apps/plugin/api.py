@@ -4494,3 +4494,136 @@ class PackageDeploy:
             LOG.error('[PackageDeploy][_get_job_pod_logs] unexpected error listing pods for job=%s/%s: %s',
                       namespace, job_name, str(e), exc_info=True)
             return '(failed to list pods: %s)' % str(e)
+
+
+class PvcBatchDestroy:
+    """
+    PVC 批量销毁：根据 statefulset_name 和 pvc_key_names 批量删除相关 PVC。
+
+    自动识别两种类型：
+      1. 共享 PVC（直接以 key_name 为完整 PVC 名存在）：直接按名称删除。
+      2. volumeClaimTemplates PVC（命名规则 <key_name>-<statefulset_name>-<ordinal>）：
+         通过前缀 "<key_name>-<statefulset_name>-" 在命名空间内列举并批量删除。
+
+    每个 key_name 的判断逻辑：
+      Step A：尝试按 key_name 直接获取 PVC → 存在则认定为共享 PVC，删除之。
+      Step B：列举 namespace 下所有名称匹配前缀 "<key_name>-<statefulset_name>-" 的 PVC，
+              逐一删除（对应 StatefulSet 副本产生的 PVC）。
+      两步都执行，互不干扰，保证共享 PVC 和 volumeClaimTemplate PVC 都能被清理。
+    """
+
+    def _get_k8s_client(self, data):
+        cluster_name = data['cluster']
+        LOG.info('[PvcBatchDestroy] Looking up cluster info for cluster=%s', cluster_name)
+        cluster_info = db_resource.Cluster().list({'name': cluster_name})
+        if not cluster_info:
+            raise exceptions.ValidationError(
+                attribute='cluster',
+                message=_('name of cluster(%(name)s) not found') % {'name': cluster_name}
+            )
+        cluster_info = cluster_info[0]
+        api_server = cluster_info['api_server']
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            api_server = 'https://' + api_server
+        LOG.info('[PvcBatchDestroy] Cluster found: name=%s, api_server=%s', cluster_name, api_server)
+        k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
+        return k8s.Client(k8s_auth)
+
+    def remove(self, data):
+        LOG.info('[PvcBatchDestroy] ===== remove start =====')
+        namespace = data['namespace']
+        statefulset_name = data['statefulset_name']
+        pvc_key_names = data['pvc_key_names']
+        correlation_id = data['correlation_id']
+
+        LOG.info('[PvcBatchDestroy] request: cluster=%s, namespace=%s, statefulset_name=%s, '
+                 'pvc_key_names=%s, correlation_id=%s',
+                 data.get('cluster'), namespace, statefulset_name, pvc_key_names, correlation_id)
+
+        k8s_client = self._get_k8s_client(data)
+
+        # 预先获取 namespace 下所有 PVC，避免对每个 key_name 都全量 list
+        LOG.info('[PvcBatchDestroy] Listing all PVCs in namespace=%s', namespace)
+        all_pvcs_resp = k8s_client.list_pvc(namespace)
+        all_pvcs = all_pvcs_resp.items if all_pvcs_resp else []
+        all_pvc_names = {pvc.metadata.name for pvc in all_pvcs}
+        LOG.info('[PvcBatchDestroy] Found %d PVCs in namespace=%s: %s',
+                 len(all_pvc_names), namespace, sorted(all_pvc_names))
+
+        deleted = []
+        skipped = []
+        failed = []
+
+        for key_name in pvc_key_names:
+            if not key_name or not key_name.strip():
+                LOG.warning('[PvcBatchDestroy] Empty key_name, skipping')
+                continue
+            key_name = key_name.strip()
+            LOG.info('[PvcBatchDestroy] ---- processing key_name=%s ----', key_name)
+
+            # Step A：尝试共享 PVC（直接以 key_name 为完整名称）
+            if key_name in all_pvc_names:
+                LOG.info('[PvcBatchDestroy] [key=%s] Step A: found shared PVC "%s", deleting',
+                         key_name, key_name)
+                try:
+                    k8s_client.delete_pvc(key_name, namespace)
+                    LOG.info('[PvcBatchDestroy] [key=%s] Step A: shared PVC "%s" deleted successfully',
+                             key_name, key_name)
+                    deleted.append({'key_name': key_name, 'pvc_name': key_name, 'type': 'shared'})
+                except Exception as e:
+                    LOG.error('[PvcBatchDestroy] [key=%s] Step A: failed to delete shared PVC "%s": %s',
+                              key_name, key_name, str(e), exc_info=True)
+                    failed.append({'key_name': key_name, 'pvc_name': key_name, 'type': 'shared', 'error': str(e)})
+            else:
+                LOG.info('[PvcBatchDestroy] [key=%s] Step A: no shared PVC named "%s" found, skipping',
+                         key_name, key_name)
+                skipped.append({'key_name': key_name, 'pvc_name': key_name, 'type': 'shared', 'reason': 'not found'})
+
+            # Step B：查找 volumeClaimTemplate PVC（前缀 "<key_name>-<statefulset_name>-"）
+            vct_prefix = '%s-%s-' % (key_name, statefulset_name)
+            vct_pvcs = [name for name in all_pvc_names if name.startswith(vct_prefix)]
+            LOG.info('[PvcBatchDestroy] [key=%s] Step B: searching prefix="%s", matched=%s',
+                     key_name, vct_prefix, vct_pvcs)
+
+            if vct_pvcs:
+                for pvc_name in sorted(vct_pvcs):
+                    LOG.info('[PvcBatchDestroy] [key=%s] Step B: deleting volumeClaimTemplate PVC "%s"',
+                             key_name, pvc_name)
+                    try:
+                        k8s_client.delete_pvc(pvc_name, namespace)
+                        LOG.info('[PvcBatchDestroy] [key=%s] Step B: PVC "%s" deleted successfully',
+                                 key_name, pvc_name)
+                        deleted.append({'key_name': key_name, 'pvc_name': pvc_name, 'type': 'volumeClaimTemplate'})
+                    except Exception as e:
+                        LOG.error('[PvcBatchDestroy] [key=%s] Step B: failed to delete PVC "%s": %s',
+                                  key_name, pvc_name, str(e), exc_info=True)
+                        failed.append({'key_name': key_name, 'pvc_name': pvc_name,
+                                       'type': 'volumeClaimTemplate', 'error': str(e)})
+            else:
+                LOG.info('[PvcBatchDestroy] [key=%s] Step B: no volumeClaimTemplate PVCs found with prefix "%s"',
+                         key_name, vct_prefix)
+                skipped.append({'key_name': key_name, 'pvc_name': vct_prefix + '*',
+                                 'type': 'volumeClaimTemplate', 'reason': 'not found'})
+
+        if failed:
+            LOG.error('[PvcBatchDestroy] ===== remove end with errors ===== '
+                      'deleted=%d, skipped=%d, failed=%d',
+                      len(deleted), len(skipped), len(failed))
+            raise exceptions.K8sCallError(
+                cluster=data.get('cluster', ''),
+                msg='PvcBatchDestroy partially failed. deleted=%s, failed=%s' % (
+                    [d['pvc_name'] for d in deleted],
+                    [(f['pvc_name'], f['error']) for f in failed]
+                )
+            )
+
+        result = {
+            'correlation_id': correlation_id,
+            'namespace': namespace,
+            'statefulset_name': statefulset_name,
+            'deleted_count': len(deleted),
+            'deleted_pvcs': ','.join(d['pvc_name'] for d in deleted),
+            'skipped_count': len(skipped),
+        }
+        LOG.info('[PvcBatchDestroy] ===== remove end ===== result=%s', result)
+        return result

@@ -325,6 +325,9 @@ class Client:
     def get_pvc(self, name, namespace, **kwargs):
         return self._action_detail(self.core_client, 'read_namespaced_persistent_volume_claim', name, namespace, **kwargs)
 
+    def list_pvc(self, namespace, **kwargs):
+        return self._action(self.core_client, 'list_namespaced_persistent_volume_claim', namespace, **kwargs)
+
     # Job
     def create_job(self, namespace, body, **kwargs):
         return self._action(self.batch_client, 'create_namespaced_job', namespace, body, **kwargs)

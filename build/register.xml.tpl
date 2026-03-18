@@ -361,6 +361,25 @@
                     <parameter datatype="string">correlation_id</parameter>
                 </outputParameters>
             </interface>
+            <interface action="batch_destroy" path="/kubernetes/v1/pvcs/batch_destroy" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
+                <inputParameters>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="cluster name">cluster</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="associated ci data id">correlation_id</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="namespace(default: default)">namespace</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" description="statefulset name, used to locate volumeClaimTemplate PVCs">statefulset_name</parameter>
+                    <parameter datatype="string" mappingType="constant" required="Y" multiple="Y" description="list of pvc key_names to delete; supports both shared PVC and volumeClaimTemplate PVC">pvc_key_names</parameter>
+                </inputParameters>
+                <outputParameters>
+                    <parameter datatype="string">errorCode</parameter>
+                    <parameter datatype="string">errorMessage</parameter>
+                    <parameter datatype="string">correlation_id</parameter>
+                    <parameter datatype="string">namespace</parameter>
+                    <parameter datatype="string">statefulset_name</parameter>
+                    <parameter datatype="string">deleted_count</parameter>
+                    <parameter datatype="string">deleted_pvcs</parameter>
+                    <parameter datatype="string">skipped_count</parameter>
+                </outputParameters>
+            </interface>
         </plugin>
         <plugin name="package">
             <interface action="deploy" path="/kubernetes/v1/packages/deploy" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
