@@ -76,8 +76,6 @@
         <systemParameter name="KUBERNETES_NOTIFY_POD_DELETED" scopeType="plugins" defaultValue="kubernetes-pod-deleted" />
         <systemParameter name="KUBERNETES_LOG_LEVEL" scopeType="plugins" defaultValue="info" />
         <systemParameter name="KUBERNETES_APP_TIMEZONE" scopeType="plugins" defaultValue="Asia/Shanghai" />
-        <systemParameter name="S3_ACCESS_KEY" scopeType="plugins" defaultValue="access_key" />
-        <systemParameter name="S3_SECRET_KEY" scopeType="plugins" defaultValue="secret_key" />
     </systemParameters>
 
     <!-- 5.权限设定 -->
