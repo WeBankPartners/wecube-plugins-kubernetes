@@ -587,11 +587,11 @@ def setup_package_init_container(data, containers, volumes, cluster_info=None):
                 },
                 {
                     'name': 'PACKAGE_USERNAME',
-                    'value': const.Artifacts.USERNAME
+                    'value': getattr(CONF, 's3_access_key', '') or ''
                 },
                 {
                     'name': 'PACKAGE_PASSWORD',
-                    'value': const.Artifacts.PASSWORD
+                    'value': getattr(CONF, 's3_secret_key', '') or ''
                 }
             ],
             'volumeMounts': [

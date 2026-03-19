@@ -23,11 +23,3 @@ class Registry:
     INIT_CONTAINER_IMAGE = 'package-init-container:1.0.0'
     # 默认私有仓库地址
     DEFAULT_PRIVATE_REGISTRY = '***REMOVED***'
-
-
-class Artifacts:
-    """Artifacts/MinIO 服务器认证常量"""
-    # MinIO/S3 认证信息（用于 packageUrl 下载）
-    # 注意：MinIO 使用 access_key 和 secret_key，不是 HTTP Basic Auth
-    USERNAME = 'access_key'   # MinIO Access Key
-    PASSWORD = 'secret_key'   # MinIO Secret Key
