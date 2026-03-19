@@ -562,7 +562,7 @@ shared_pvc_destroy_rules = [
                          nullable=True),
 ]
 
-# 包部署规则（通过 K8s Job + busybox 将 tar.gz 包解压到共享 PVC）
+# 包部署规则（通过 K8s Job + init-container 镜像，将远程 tar.gz 包下载并解压到共享 PVC 的指定目录）
 package_deploy_rules = [
     # 目标 K8s 集群名称
     crud.ColumnValidator(field='cluster',

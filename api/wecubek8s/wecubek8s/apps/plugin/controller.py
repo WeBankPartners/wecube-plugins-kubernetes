@@ -964,7 +964,7 @@ class SharedPVC(controller.Plugin):
 
 class PackageDeploy(controller.Plugin):
     """
-    包部署接口：通过 K8s Job + busybox 镜像，将远程 tar.gz 包下载并解压到共享 PVC 的指定目录。
+    包部署接口：通过 K8s Job + init-container 镜像，将远程 tar.gz 包下载并解压到共享 PVC 的指定目录。
     """
     allow_methods = ('POST',)
     name = 'k8s.plugin.package_deploy'

@@ -4141,19 +4141,13 @@ class SharedPVC:
 
 class PackageDeploy:
     """
-    包部署：通过 K8s Job + busybox 镜像，将远程 tar.gz 包下载并解压到共享 PVC 的指定目录。
-
-    Job 中只有一个容器，使用 busybox 执行：
-      wget -O /tmp/pkg.tar.gz <package_url> && tar -xzf /tmp/pkg.tar.gz -C <target_path>
+    包部署：通过 K8s Job + init-container 镜像，将远程 tar.gz 包下载并解压到共享 PVC 的指定目录。
 
     共享 PVC 通过 volumes/volumeMounts 挂载到容器内的 /mnt/pvc，
     target_path 是 PVC 内部的相对路径（挂载点为 /mnt/pvc），
     因此实际解压路径为 /mnt/pvc/<target_path>。
 
     Job 命名规则：使用 name + correlation_id 的哈希截断，保证 DNS-1035 合规且唯一。
-
-    busybox 镜像地址从集群的 private_registry 自动拼接，格式为 <private_registry>/busybox:latest；
-    若集群未配置 private_registry 则直接使用 busybox:latest。
     """
 
     # Job 等待超时（秒）
