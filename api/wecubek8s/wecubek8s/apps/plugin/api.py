@@ -4260,8 +4260,8 @@ class PackageDeploy:
 
         # 环境变量：
         #   PACKAGE_URL       — 下载地址，由调用方传入
-        #   PACKAGE_USERNAME  — MinIO Access Key（来自系统参数 KUBERNETES_S3_ACCESS_KEY）
-        #   PACKAGE_PASSWORD  — MinIO Secret Key（来自系统参数 KUBERNETES_S3_SECRET_KEY）
+        #   PACKAGE_USERNAME  — MinIO Access Key（来自系统参数 S3_ACCESS_KEY）
+        #   PACKAGE_PASSWORD  — MinIO Secret Key（来自系统参数 S3_SECRET_KEY）
         s3_access_key = getattr(CONF, 's3_access_key', '') or ''
         LOG.info('[PackageDeploy][to_resource] env: PACKAGE_URL=%s, PACKAGE_USERNAME=%s, PACKAGE_PASSWORD=***',
                  package_url, s3_access_key)
