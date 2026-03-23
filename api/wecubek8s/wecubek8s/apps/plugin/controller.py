@@ -161,6 +161,7 @@ class StatefulSet(controller.Plugin):
         LOG.info('=== [_query_block_storage_from_cmdb] Start querying CMDB for guid: %s ===', guid)
         try:
             from wecubek8s.common import wecmdb
+            from wecubek8s.common import wecube
             cmdb_server = CONF.wecube.base_url
             LOG.debug('CMDB server configured: %s', cmdb_server)
             
@@ -168,9 +169,15 @@ class StatefulSet(controller.Plugin):
                 LOG.warning('CMDB base_url not configured, cannot query block_storage')
                 return None
             
+            # 使用子系统身份登录获取 token，不依赖浏览器请求携带的用户 token
+            wecube_client = wecube.WeCubeClient(cmdb_server, None)
+            subsystem_token = wecube_client.login_subsystem(set_self=False)
+            LOG.debug('Obtained subsystem token for CMDB (prefix: %s...)',
+                      subsystem_token[:20] if subsystem_token else 'None')
+            
             # 获取 CMDB 客户端
-            cmdb_client = wecmdb.EntityClient(cmdb_server)
-            LOG.debug('Created CMDB client successfully')
+            cmdb_client = wecmdb.EntityClient(cmdb_server, subsystem_token)
+            LOG.debug('Created CMDB client successfully with subsystem token')
             
             # 通过 GUID 查询 block_storage
             query_data = {

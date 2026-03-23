@@ -1761,13 +1761,12 @@ class StatefulSet:
                 LOG.warning('CMDB base_url not configured, skipping CMDB sync')
                 return
             
-            # 使用请求上下文中的用户 token（从 HTTP 请求头传入）
-            # 这样创建的 Pod 记录会关联到该用户，watcher 也需要使用相同的 token 才能访问
-            from wecubek8s.common import utils
-            user_token = utils.get_token()
-            cmdb_client = wecmdb.EntityClient(cmdb_server, user_token)
-            LOG.info('Using user token for CMDB operations (token prefix: %s...)', 
-                    user_token[:20] if user_token else 'None')
+            # 使用子系统身份登录获取 token，不依赖浏览器请求携带的用户 token
+            wecube_client = wecube.WeCubeClient(cmdb_server, None)
+            subsystem_token = wecube_client.login_subsystem(set_self=False)
+            LOG.info('Using subsystem token for CMDB operations (token prefix: %s...)',
+                     subsystem_token[:20] if subsystem_token else 'None')
+            cmdb_client = wecmdb.EntityClient(cmdb_server, subsystem_token)
             
             # 1. 查询 CMDB 中该 instanceId 下的所有 Pod
             query_data = {
