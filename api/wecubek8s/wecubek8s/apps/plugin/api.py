@@ -4196,19 +4196,19 @@ class PackageDeploy:
         package_url = data['package_url']
         target_path = data.get('target_path') or ''
 
-        # 使用与 setup_package_init_container 一致的 package-init-container 镜像，
-        # 该镜像内置 download-package.sh，支持 MinIO/S3（mc/aws-cli）和 HTTP/HTTPS 下载，
-        # 固定解压目标目录为 /shared-data/diff-var-files/
-        init_container_image = const.Registry.INIT_CONTAINER_IMAGE
+        # 使用 busybox 镜像，通过内联 shell 脚本实现：
+        #   1. 用 wget + Bearer Token 下载 tar.gz 包
+        #   2. 解压到 PVC 挂载目录
+        busybox_image = 'busybox:latest'
 
         # 从集群配置中读取私有仓库地址，拼接完整镜像地址
         private_registry = cluster_info.get('private_registry', '') or ''
         if private_registry:
-            deploy_image = '%s/%s' % (private_registry.rstrip('/'), init_container_image)
+            deploy_image = '%s/%s' % (private_registry.rstrip('/'), busybox_image)
             LOG.info('[PackageDeploy][to_resource] private_registry=%s -> deploy_image=%s',
                      private_registry, deploy_image)
         else:
-            deploy_image = init_container_image
+            deploy_image = busybox_image
             LOG.info('[PackageDeploy][to_resource] no private_registry, using image=%s', deploy_image)
 
         # 从集群配置中读取镜像拉取认证信息，创建 imagePullSecrets
@@ -4234,36 +4234,42 @@ class PackageDeploy:
                      'private_registry=%s, has_username=%s, has_password=%s',
                      bool(private_registry), bool(image_pull_username), bool(image_pull_password))
 
-        # target_path：去除首尾斜杠，作为 PVC 的 subPath（空则挂载 PVC 根目录）
+        # target_path：去除首尾斜杠，作为 PVC 内解压目标子目录（空则直接解压到 PVC 根目录）
         raw_target_path = target_path
         target_path = target_path.strip('/')
-        LOG.info('[PackageDeploy][to_resource] target_path: raw=%s -> normalized=%s '
-                 '(used as PVC subPath, empty means PVC root)',
+        LOG.info('[PackageDeploy][to_resource] target_path: raw=%s -> normalized=%s',
                  raw_target_path, target_path)
 
-        # download-package.sh 固定写入 /shared-data/diff-var-files/
-        # 通过将 PVC 挂载到该路径（可选 subPath）来控制最终存储位置
-        SCRIPT_EXTRACT_PATH = '/shared-data/diff-var-files'
-        volume_mount = {
-            'name': 'shared-pvc',
-            'mountPath': SCRIPT_EXTRACT_PATH
-        }
-        if target_path:
-            # subPath 让 K8s 在 PVC 内自动创建 target_path 子目录并挂载到 SCRIPT_EXTRACT_PATH
-            volume_mount['subPath'] = target_path
-            LOG.info('[PackageDeploy][to_resource] PVC %s subPath=%s -> mountPath=%s',
-                     pvc_name, target_path, SCRIPT_EXTRACT_PATH)
-        else:
-            LOG.info('[PackageDeploy][to_resource] PVC %s (root) -> mountPath=%s',
-                     pvc_name, SCRIPT_EXTRACT_PATH)
+        # PVC 挂载到容器内固定路径 /mnt/pvc，解压目标为 /mnt/pvc/<target_path>
+        PVC_MOUNT_PATH = '/mnt/pvc'
+        extract_dir = ('%s/%s' % (PVC_MOUNT_PATH, target_path)).rstrip('/')
+        LOG.info('[PackageDeploy][to_resource] PVC %s -> mountPath=%s, extract_dir=%s',
+                 pvc_name, PVC_MOUNT_PATH, extract_dir)
 
-        # 环境变量：
-        #   PACKAGE_URL       — 下载地址，由调用方传入
-        #   PACKAGE_USERNAME  — MinIO Access Key（来自系统参数 S3_ACCESS_KEY）
-        #   PACKAGE_PASSWORD  — MinIO Secret Key（来自系统参数 S3_SECRET_KEY）
-        s3_access_key = getattr(CONF, 's3_access_key', '') or ''
-        LOG.info('[PackageDeploy][to_resource] env: PACKAGE_URL=%s, PACKAGE_USERNAME=%s, PACKAGE_PASSWORD=***',
-                 package_url, s3_access_key)
+        # 通过子系统身份登录获取 Bearer Token，注入给 busybox 容器使用
+        # token 在 Job 提交前获取，Job 实际执行时通过环境变量读取
+        from wecubek8s.common import wecube as wecube_mod
+        wecube_client = wecube_mod.WeCubeClient(CONF.wecube.base_url, None)
+        subsystem_token = wecube_client.login_subsystem(set_self=False) or ''
+        LOG.info('[PackageDeploy][to_resource] obtained subsystem token (prefix=%s...)',
+                 subsystem_token[:20] if subsystem_token else 'None')
+
+        # busybox 内联脚本：
+        #   - 使用 wget --header 携带 Bearer Token 下载
+        #   - 自动创建目标目录并解压
+        inline_script = (
+            'set -e; '
+            'echo "=== PackageDeploy Job start ==="; '
+            'echo "Downloading: $PACKAGE_URL"; '
+            'mkdir -p $EXTRACT_DIR; '
+            'wget --header="Authorization: Bearer $PACKAGE_TOKEN" '
+            '     -O /tmp/pkg.tar.gz "$PACKAGE_URL" && '
+            'echo "Download OK, extracting to $EXTRACT_DIR ..." && '
+            'tar -xzf /tmp/pkg.tar.gz -C $EXTRACT_DIR && '
+            'rm -f /tmp/pkg.tar.gz && '
+            'echo "=== PackageDeploy Job done ==="'
+        )
+        LOG.info('[PackageDeploy][to_resource] inline_script prepared, extract_dir=%s', extract_dir)
 
         pod_spec = {
             'restartPolicy': 'Never',
@@ -4272,12 +4278,19 @@ class PackageDeploy:
                     'name': 'deploy-package',
                     'image': deploy_image,
                     'imagePullPolicy': 'Always',
+                    'command': ['/bin/sh', '-c'],
+                    'args': [inline_script],
                     'env': [
-                        {'name': 'PACKAGE_URL',      'value': package_url},
-                        {'name': 'PACKAGE_USERNAME', 'value': getattr(CONF, 's3_access_key', '') or ''},
-                        {'name': 'PACKAGE_PASSWORD', 'value': getattr(CONF, 's3_secret_key', '') or ''},
+                        {'name': 'PACKAGE_URL',   'value': package_url},
+                        {'name': 'PACKAGE_TOKEN', 'value': subsystem_token},
+                        {'name': 'EXTRACT_DIR',   'value': extract_dir},
                     ],
-                    'volumeMounts': [volume_mount]
+                    'volumeMounts': [
+                        {
+                            'name': 'shared-pvc',
+                            'mountPath': PVC_MOUNT_PATH
+                        }
+                    ]
                 }
             ],
             'volumes': [
@@ -4318,9 +4331,9 @@ class PackageDeploy:
             }
         }
         LOG.info('[PackageDeploy][to_resource] manifest built: job_name=%s, namespace=%s, '
-                 'image=%s, pvc=%s, mountPath=%s, subPath=%s, imagePullSecrets=%s',
+                 'image=%s, pvc=%s, mountPath=%s, extract_dir=%s, imagePullSecrets=%s',
                  job_name, namespace, deploy_image, pvc_name,
-                 SCRIPT_EXTRACT_PATH, target_path or '(root)', image_pull_secrets)
+                 PVC_MOUNT_PATH, extract_dir, image_pull_secrets)
         LOG.info('[PackageDeploy][to_resource] ---- manifest build complete ----')
         return manifest, job_name
 
