@@ -4257,16 +4257,17 @@ class PackageDeploy:
         # busybox 内联脚本：
         #   - 使用 wget --header 携带 Bearer Token 下载
         #   - 自动创建目标目录并解压
+        # 从 URL 中提取文件名（去掉 query string），直接下载到目标目录，不解压
         inline_script = (
             'set -e; '
             'echo "=== PackageDeploy Job start ==="; '
             'echo "Downloading: $PACKAGE_URL"; '
             'mkdir -p $EXTRACT_DIR; '
+            'FILENAME=$(basename "$PACKAGE_URL" | sed "s/?.*//"); '
+            'echo "Target file: $EXTRACT_DIR/$FILENAME"; '
             'wget --header="Authorization: Bearer $PACKAGE_TOKEN" '
-            '     -O /tmp/pkg.tar.gz "$PACKAGE_URL" && '
-            'echo "Download OK, extracting to $EXTRACT_DIR ..." && '
-            'tar -xzf /tmp/pkg.tar.gz -C $EXTRACT_DIR && '
-            'rm -f /tmp/pkg.tar.gz && '
+            '     -O "$EXTRACT_DIR/$FILENAME" "$PACKAGE_URL" && '
+            'echo "Download OK: $EXTRACT_DIR/$FILENAME"; '
             'echo "=== PackageDeploy Job done ==="'
         )
         LOG.info('[PackageDeploy][to_resource] inline_script prepared, extract_dir=%s', extract_dir)
