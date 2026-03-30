@@ -75,21 +75,33 @@ spec:
         - name: db_user
           value: "root"
         - name: db_pass
-          value: "WeCube@1234"
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: mysql-password
         - name: db_database
           value: "wecube"
         # 认证服务 URL - 指向集群内 wecube-auth-server service
         - name: auth_server_url
           value: "http://wecube-auth-server:8002"
         - name: jwt_signing_key
-          value: "Platform+Auth+Server+Secret"
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: signing-key
         # MinIO / S3 对象存储 - 指向集群内 wecube-minio-service
         - name: s3_address
           value: "wecube-minio:9000"
         - name: s3_access_key
-          value: "access_key"
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: s3-access-key
         - name: s3_secret_key
-          value: "secret_key"
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: s3-secret-key
         # 静态资源服务器配置
         # 使用 local 模式，直接写入挂载的 PVC（与 portal 共享同一 PVC）
         - name: static_resource_server_as_local
@@ -127,7 +139,10 @@ spec:
         - name: host_ip
           value: ""
         - name: encrypt_seed
-          value: "defaultEncryptSeed"
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: core-encrypt-seed
         - name: menu_api_map_enable
           value: "Y"
         - name: TZ

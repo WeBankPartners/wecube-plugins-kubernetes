@@ -48,7 +48,10 @@ spec:
         - name: MYSQL_USER_NAME
           value: "root"
         - name: MYSQL_USER_PASSWORD
-          value: "WeCube@1234"
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: mysql-password
         - name: MYSQL_SERVER_DATABASE_NAME
           value: "auth_server"
         - name: WECUBE_CORE_ADDRESS
@@ -56,7 +59,10 @@ spec:
         - name: PASSWORD_PRIVATE_KEY_PATH
           value: "/app/platform-auth-server/config/certs/rsa_private_key.pem"
         - name: SIGNING_KEY
-          value: "Platform+Auth+Server+Secret"
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: signing-key
         - name: USER_ACCESS_TOKEN
           value: "20000"
         - name: USER_REFRESH_TOKEN
@@ -74,7 +80,10 @@ spec:
         - name: NOTIFY_PERCENT
           value: "80"
         - name: ENCRYPT_SEED
-          value: "Abcd1234"
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: auth-encrypt-seed
         - name: TZ
           value: "Asia/Shanghai"
         volumeMounts:

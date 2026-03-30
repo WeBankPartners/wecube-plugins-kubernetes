@@ -112,9 +112,15 @@ spec:
           name: api
         env:
         - name: MINIO_ACCESS_KEY
-          value: "access_key"
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: s3-access-key
         - name: MINIO_SECRET_KEY
-          value: "secret_key"
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: s3-secret-key
         volumeMounts:
         - name: wecube-minio-data
           mountPath: /data
