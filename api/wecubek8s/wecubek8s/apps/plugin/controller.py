@@ -1057,7 +1057,14 @@ class PvcBatchDestroy(controller.Plugin):
                  item.get('cluster'), item.get('statefulset_name'), item.get('pvc_key_names'))
         if not item.get('pvc_key_names'):
             LOG.info('[PvcBatchDestroy] pvc_key_names is empty, skip destroy, return directly')
-            return {'deleted_count': 0, 'deleted_pvcs': []}
+            return {
+                'correlation_id': item.get('correlation_id', ''),
+                'namespace': item.get('namespace', ''),
+                'statefulset_name': item.get('statefulset_name', ''),
+                'deleted_count': 0,
+                'deleted_pvcs': '',
+                'skipped_count': 0,
+            }
         try:
             result = plugin_api.PvcBatchDestroy().remove(item)
             LOG.info('[PvcBatchDestroy] destroy succeeded - deleted_count=%d, deleted_pvcs=%s',
