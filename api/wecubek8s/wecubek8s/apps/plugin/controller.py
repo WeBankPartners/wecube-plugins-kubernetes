@@ -1035,14 +1035,9 @@ class PvcBatchDestroy(controller.Plugin):
             clean_item = crud.ColumnValidator.get_clean_data(rules.pvc_batch_destroy_rules, item, 'check')
             self.set_item_default(clean_item)
 
-            # pvc_key_names 每项去空、去重
+            # pvc_key_names 每项去空、去重；为空时保留空列表，由 destroy 阶段提前返回
             raw_keys = clean_item.get('pvc_key_names') or []
             clean_keys = list(dict.fromkeys(k.strip() for k in raw_keys if k and k.strip()))
-            if not clean_keys:
-                raise exceptions.ValidationError(
-                    attribute='pvc_key_names',
-                    message='pvc_key_names must contain at least one non-empty key name'
-                )
             clean_item['pvc_key_names'] = clean_keys
 
             LOG.info('[PvcBatchDestroy] validate_item_destroy finished - namespace=%s, '
@@ -1060,6 +1055,9 @@ class PvcBatchDestroy(controller.Plugin):
                  'cluster=%s, statefulset_name=%s, pvc_key_names=%s',
                  reqid, operator, item_index,
                  item.get('cluster'), item.get('statefulset_name'), item.get('pvc_key_names'))
+        if not item.get('pvc_key_names'):
+            LOG.info('[PvcBatchDestroy] pvc_key_names is empty, skip destroy, return directly')
+            return {'deleted_count': 0, 'deleted_pvcs': []}
         try:
             result = plugin_api.PvcBatchDestroy().remove(item)
             LOG.info('[PvcBatchDestroy] destroy succeeded - deleted_count=%d, deleted_pvcs=%s',

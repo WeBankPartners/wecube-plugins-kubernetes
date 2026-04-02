@@ -619,8 +619,9 @@ pvc_batch_destroy_rules = [
                          nullable=False),
     # 需要删除的 PVC key_name 列表（多个用逗号分隔，或传数组）
     # 对每个 key_name 会自动识别：共享 PVC 或 volumeClaimTemplate PVC
+    # nullable=True：允许传 null，controller 中会进一步校验非空
     crud.ColumnValidator(field='pvc_key_names',
                          rule=validator.TypeValidator(list),
-                         validate_on=['check:M'],
-                         nullable=False),
+                         validate_on=['check:O'],
+                         nullable=True),
 ]
