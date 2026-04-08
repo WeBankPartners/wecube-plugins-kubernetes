@@ -502,9 +502,11 @@ class Deployment:
         
         pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
         
+        # 受系统参数 KUBERNETES_ENABLE_HOST_PATH 控制，false 时跳过 hostPath 挂载（适用于 baseline 安全策略）
+        enable_host_path = (getattr(CONF, 'enable_host_path', '') or '').strip().lower() == 'true'
         # 自动添加 /logs hostPath 挂载（基于传入的 deployment_path 参数）
         deployment_path = data.get('deployment_path')
-        if deployment_path:
+        if deployment_path and enable_host_path:
             # 确保路径以 / 结尾
             if not deployment_path.endswith('/'):
                 deployment_path += '/'
@@ -533,6 +535,9 @@ class Deployment:
             
             LOG.info('Auto-mounted host path %s to %s', host_log_path, log_path)
         
+        elif deployment_path and not enable_host_path:
+            LOG.info('KUBERNETES_ENABLE_HOST_PATH is false, skipping hostPath log mount for deployment_path=%s',
+                     deployment_path)
         # 自动注入日志文件路径环境变量（无论是否有 deployment_path 都添加）
         # 获取日志路径（如果上面的 deployment_path 块设置了 log_path 变量，使用该值；否则使用默认值）
         log_path_for_env = data.get('log_path', '/logs')
@@ -992,9 +997,11 @@ class StatefulSet:
         
         pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
         
+        # 受系统参数 KUBERNETES_ENABLE_HOST_PATH 控制，false 时跳过 hostPath 挂载（适用于 baseline 安全策略）
+        enable_host_path = (getattr(CONF, 'enable_host_path', '') or '').strip().lower() == 'true'
         # 自动添加 /logs hostPath 挂载（基于传入的 deployment_path 参数）
         deployment_path = data.get('deployment_path')
-        if deployment_path:
+        if deployment_path and enable_host_path:
             # 确保路径以 / 结尾
             if not deployment_path.endswith('/'):
                 deployment_path += '/'
@@ -1023,6 +1030,9 @@ class StatefulSet:
             
             LOG.info('Auto-mounted host path %s to %s', host_log_path, log_path)
         
+        elif deployment_path and not enable_host_path:
+            LOG.info('KUBERNETES_ENABLE_HOST_PATH is false, skipping hostPath log mount for deployment_path=%s',
+                     deployment_path)
         # 自动注入日志文件路径环境变量（无论是否有 deployment_path 都添加）
         # 获取日志路径（如果上面的 deployment_path 块设置了 log_path 变量，使用该值；否则使用默认值）
         log_path_for_env = data.get('log_path', '/logs')
