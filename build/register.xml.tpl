@@ -76,7 +76,7 @@
         <systemParameter name="KUBERNETES_NOTIFY_POD_DELETED" scopeType="plugins" defaultValue="kubernetes-pod-deleted" />
         <systemParameter name="KUBERNETES_LOG_LEVEL" scopeType="plugins" defaultValue="info" />
         <systemParameter name="KUBERNETES_APP_TIMEZONE" scopeType="plugins" defaultValue="Asia/Shanghai" />
-        <systemParameter name="KUBERNETES_ENABLE_HOST_PATH" scopeType="plugins" defaultValue="false" />
+        <systemParameter name="KUBERNETES_ENABLE_HOST_PATH" scopeType="plugins" defaultValue="true" />
     </systemParameters>
 
     <!-- 5.权限设定 -->
