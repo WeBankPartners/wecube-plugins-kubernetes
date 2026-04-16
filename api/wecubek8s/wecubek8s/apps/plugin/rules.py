@@ -25,7 +25,7 @@ cluster_rules = [
                          validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='image_pull_password',
-                         rule=validator.LengthValidator(0, 255),
+                         rule=validator.LengthValidator(0, 4096),
                          validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='private_registry',
@@ -120,7 +120,7 @@ deployment_rules = [
                          validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='image_pull_password',
-                         rule=validator.LengthValidator(0, 255),
+                         rule=validator.LengthValidator(0, 4096),
                          validate_on=['check:O'],
                          nullable=True),
     # tag: {name: xxx, value: xxxx}

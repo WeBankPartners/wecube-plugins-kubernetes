@@ -19,7 +19,7 @@ class Cluster(Base, DictBase):
     api_server = Column(String(255), nullable=False)
     token = Column(String(2048), nullable=False)
     image_pull_username = Column(String(255))
-    image_pull_password = Column(String(255))
+    image_pull_password = Column(String(4096))
     private_registry = Column(String(255))
     created_by = Column(String(36))
     created_time = Column(DateTime)

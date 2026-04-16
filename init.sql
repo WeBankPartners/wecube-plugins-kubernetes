@@ -39,4 +39,14 @@ ALTER TABLE `cluster` ADD COLUMN `image_pull_password` varchar(255) DEFAULT NULL
 ALTER TABLE `cluster` ADD COLUMN `private_registry` varchar(255) DEFAULT NULL COMMENT '私有镜像仓库地址';
 #@v0.1.5-end@;
 
+
+
+-- ============================================
+-- v0.1.6: 增加数据库镜像密码长度
+-- ============================================
+#@v0.1.6-begin@;
+
+ALTER TABLE `cluster` MODIFY COLUMN `image_pull_password` varchar(4096) DEFAULT NULL COMMENT '镜像仓库密码';
+#@v0.1.6-end@;
+
 SET FOREIGN_KEY_CHECKS = 1;
