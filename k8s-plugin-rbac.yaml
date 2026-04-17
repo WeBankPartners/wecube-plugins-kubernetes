@@ -87,6 +87,11 @@ rules:
   - apiGroups: [""]
     resources: ["nodes/metrics", "nodes/stats", "nodes/proxy"]
     verbs: ["get", "list"]
+  
+  # ⭐ Job 权限（包部署功能需要）
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -138,7 +138,7 @@ deployment_rules = [
                          validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='memory',
-                         rule=validator.RegexValidator(r'^((\d+)(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?)?$'),
+                         rule=validator.RegexValidator(r'^(((\d+\.\d+|\d+)(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?)?)?$'),
                          validate_on=['check:O'],
                          nullable=True),
     # for stateful set, difference env & volume for each pod
@@ -262,7 +262,7 @@ daemonset_rules = [
                          validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='memory',
-                         rule=validator.RegexValidator(r'^((\d+)(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?)?$'),
+                         rule=validator.RegexValidator(r'^(((\d+\.\d+|\d+)(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?)?)?$'),
                          validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='envs',
