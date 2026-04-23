@@ -2074,34 +2074,55 @@ class StatefulSet:
                 for i in range(replicas - 1, -1, -1):
                     pod_name = f"{resource_name}-{i}"
                     try:
-                        # 检查 Pod 是否存在
                         existing_pod = k8s_client.get_pod(pod_name, data['namespace'])
                         if existing_pod:
                             LOG.info('Deleting Pod %s/%s to trigger recreation with new template', 
                                    data['namespace'], pod_name)
                             k8s_client.delete_pod(pod_name, data['namespace'])
                             
-                            # 等待 Pod 删除并重建完成（可选，更安全但更慢）
-                            # 这样可以避免同时删除所有 Pod 导致服务不可用
                             if data.get('rolling_restart', 'true').lower() == 'true':
-                                LOG.info('Waiting for Pod %s to be recreated before deleting next Pod...', pod_name)
-                                pod_recreate_timeout = 60  # 60秒超时
                                 check_interval = 3
-                                max_attempts = pod_recreate_timeout // check_interval
-                                
-                                for attempt in range(max_attempts):
+
+                                # 阶段一：等待旧 Pod 完全消失（避免把 Terminating 误判为新 Pod）
+                                terminate_timeout = 180  # 最长等待旧 Pod 消失 180 秒
+                                terminate_attempts = terminate_timeout // check_interval
+                                LOG.info('[RollingRestart] Phase-1: waiting for old Pod %s to disappear (timeout=%ds)',
+                                         pod_name, terminate_timeout)
+                                for attempt in range(terminate_attempts):
+                                    time.sleep(check_interval)
+                                    pod = k8s_client.get_pod(pod_name, data['namespace'])
+                                    if pod is None:
+                                        LOG.info('[RollingRestart] Phase-1: old Pod %s fully terminated after %ds',
+                                                 pod_name, (attempt + 1) * check_interval)
+                                        break
+                                    phase = pod.status.phase if pod.status else 'Unknown'
+                                    LOG.debug('[RollingRestart] Phase-1 [%d/%d]: Pod %s phase=%s, still waiting...',
+                                              attempt + 1, terminate_attempts, pod_name, phase)
+                                else:
+                                    LOG.warning('[RollingRestart] Phase-1: old Pod %s did not disappear within %ds, proceeding anyway',
+                                                pod_name, terminate_timeout)
+
+                                # 阶段二：等待新 Pod 重建并就绪
+                                ready_timeout = 300  # 最长等待新 Pod 就绪 300 秒
+                                ready_attempts = ready_timeout // check_interval
+                                LOG.info('[RollingRestart] Phase-2: waiting for new Pod %s to be Running+Ready (timeout=%ds)',
+                                         pod_name, ready_timeout)
+                                for attempt in range(ready_attempts):
                                     time.sleep(check_interval)
                                     pod = k8s_client.get_pod(pod_name, data['namespace'])
                                     if pod and pod.status and pod.status.phase == 'Running':
-                                        # 检查容器是否就绪
                                         if pod.status.container_statuses:
                                             all_ready = all(cs.ready for cs in pod.status.container_statuses)
                                             if all_ready:
-                                                LOG.info('Pod %s is ready, proceeding to next Pod', pod_name)
+                                                LOG.info('[RollingRestart] Phase-2: Pod %s is Running+Ready after %ds, proceeding to next Pod',
+                                                         pod_name, (attempt + 1) * check_interval)
                                                 break
+                                    phase = (pod.status.phase if pod and pod.status else 'NotFound')
+                                    LOG.debug('[RollingRestart] Phase-2 [%d/%d]: Pod %s phase=%s, still waiting...',
+                                              attempt + 1, ready_attempts, pod_name, phase)
                                 else:
-                                    LOG.warning('Pod %s did not become ready within %d seconds, proceeding anyway', 
-                                              pod_name, pod_recreate_timeout)
+                                    LOG.warning('[RollingRestart] Phase-2: Pod %s did not become Ready within %ds, proceeding anyway',
+                                                pod_name, ready_timeout)
                         else:
                             LOG.debug('Pod %s does not exist, skipping deletion', pod_name)
                     except Exception as e:
