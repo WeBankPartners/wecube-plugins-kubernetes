@@ -2060,78 +2060,10 @@ class StatefulSet:
             # 注意: replace 需要保留 resourceVersion
             resource_template['metadata']['resourceVersion'] = exists_resource.metadata.resource_version
             exists_resource = k8s_client.replace_statefulset(resource_name, data['namespace'], resource_template)
-            
-            # ==================== 触发 Pod 滚动重启（StatefulSet 更新后需要手动重启 Pod）====================
-            # StatefulSet 不像 Deployment 那样会自动滚动更新 Pod
-            # 当修改 Pod 模板（如 image_deploy_script）后，需要手动删除 Pod 才会使用新模板重建
-            # 这里我们从最大序号到最小序号依次删除 Pod（StatefulSet 的标准滚动更新顺序）
-            try:
-                replicas = int(data.get('replicas', 1))
-                LOG.info('Triggering Pod restart for StatefulSet %s/%s (replicas: %d)', 
-                         data['namespace'], resource_name, replicas)
-                
-                # 从最大序号开始删除（StatefulSet 的标准做法：反向滚动）
-                for i in range(replicas - 1, -1, -1):
-                    pod_name = f"{resource_name}-{i}"
-                    try:
-                        existing_pod = k8s_client.get_pod(pod_name, data['namespace'])
-                        if existing_pod:
-                            LOG.info('Deleting Pod %s/%s to trigger recreation with new template', 
-                                   data['namespace'], pod_name)
-                            k8s_client.delete_pod(pod_name, data['namespace'])
-                            
-                            if data.get('rolling_restart', 'true').lower() == 'true':
-                                check_interval = 3
-
-                                # 阶段一：等待旧 Pod 完全消失（避免把 Terminating 误判为新 Pod）
-                                terminate_timeout = 180  # 最长等待旧 Pod 消失 180 秒
-                                terminate_attempts = terminate_timeout // check_interval
-                                LOG.info('[RollingRestart] Phase-1: waiting for old Pod %s to disappear (timeout=%ds)',
-                                         pod_name, terminate_timeout)
-                                for attempt in range(terminate_attempts):
-                                    time.sleep(check_interval)
-                                    pod = k8s_client.get_pod(pod_name, data['namespace'])
-                                    if pod is None:
-                                        LOG.info('[RollingRestart] Phase-1: old Pod %s fully terminated after %ds',
-                                                 pod_name, (attempt + 1) * check_interval)
-                                        break
-                                    phase = pod.status.phase if pod.status else 'Unknown'
-                                    LOG.debug('[RollingRestart] Phase-1 [%d/%d]: Pod %s phase=%s, still waiting...',
-                                              attempt + 1, terminate_attempts, pod_name, phase)
-                                else:
-                                    LOG.warning('[RollingRestart] Phase-1: old Pod %s did not disappear within %ds, proceeding anyway',
-                                                pod_name, terminate_timeout)
-
-                                # 阶段二：等待新 Pod 重建并就绪
-                                ready_timeout = 300  # 最长等待新 Pod 就绪 300 秒
-                                ready_attempts = ready_timeout // check_interval
-                                LOG.info('[RollingRestart] Phase-2: waiting for new Pod %s to be Running+Ready (timeout=%ds)',
-                                         pod_name, ready_timeout)
-                                for attempt in range(ready_attempts):
-                                    time.sleep(check_interval)
-                                    pod = k8s_client.get_pod(pod_name, data['namespace'])
-                                    if pod and pod.status and pod.status.phase == 'Running':
-                                        if pod.status.container_statuses:
-                                            all_ready = all(cs.ready for cs in pod.status.container_statuses)
-                                            if all_ready:
-                                                LOG.info('[RollingRestart] Phase-2: Pod %s is Running+Ready after %ds, proceeding to next Pod',
-                                                         pod_name, (attempt + 1) * check_interval)
-                                                break
-                                    phase = (pod.status.phase if pod and pod.status else 'NotFound')
-                                    LOG.debug('[RollingRestart] Phase-2 [%d/%d]: Pod %s phase=%s, still waiting...',
-                                              attempt + 1, ready_attempts, pod_name, phase)
-                                else:
-                                    LOG.warning('[RollingRestart] Phase-2: Pod %s did not become Ready within %ds, proceeding anyway',
-                                                pod_name, ready_timeout)
-                        else:
-                            LOG.debug('Pod %s does not exist, skipping deletion', pod_name)
-                    except Exception as e:
-                        LOG.warning('Failed to delete Pod %s: %s (continuing with remaining Pods)', pod_name, str(e))
-                
-                LOG.info('Completed Pod restart trigger for StatefulSet %s/%s', data['namespace'], resource_name)
-            except Exception as e:
-                LOG.error('Failed to trigger Pod restart: %s (StatefulSet update completed, but Pods may not reflect changes)', str(e))
-                # 不影响主流程，继续执行
+            # StatefulSet 配置了 updateStrategy.type=RollingUpdate，K8s 会自动从最高序号 Pod 开始
+            # 逐个滚动更新，确保每个 Pod Ready 后再更新下一个，无需手动删除 Pod。
+            LOG.info('StatefulSet %s/%s updated, K8s RollingUpdate will handle pod restarts automatically.',
+                     data['namespace'], resource_name)
         
         # ==================== 等待 Pod 就绪（解决异步创建问题）====================
         replicas = int(data.get('replicas', 1))
@@ -2153,13 +2085,26 @@ class StatefulSet:
                     if sts and sts.status:
                         ready_replicas = sts.status.ready_replicas or 0
                         current_replicas = sts.status.replicas or 0
+                        updated_replicas = sts.status.updated_replicas or 0
+                        current_revision = sts.status.current_revision or ''
+                        update_revision = sts.status.update_revision or ''
+                        rollout_complete = (
+                            updated_replicas >= replicas
+                            and (not current_revision or not update_revision
+                                 or current_revision == update_revision)
+                        )
+
+                        LOG.info('[Wait %d/%d] StatefulSet status: ready=%d/%d, updated=%d/%d, '
+                                 'current_revision=%s, update_revision=%s',
+                                 attempt, max_attempts,
+                                 ready_replicas, replicas,
+                                 updated_replicas, replicas,
+                                 current_revision, update_revision)
                         
-                        LOG.info('[Wait %d/%d] StatefulSet status: %d/%d replicas ready', 
-                                 attempt, max_attempts, ready_replicas, replicas)
-                        
-                        # 检查是否所有 Pod 都就绪
-                        if ready_replicas >= replicas:
-                            LOG.info('✅ All Pods are ready! (%d/%d)', ready_replicas, replicas)
+                        # 必须同时满足：所有 Pod 已就绪 + 所有 Pod 已更新到最新版本
+                        # 避免 K8s 滚动更新中途（某个 Pod 刚 Ready，下一个还未开始）时提前退出
+                        if ready_replicas >= replicas and rollout_complete:
+                            LOG.info('✅ All Pods are ready and updated! (%d/%d)', ready_replicas, replicas)
                             
                             # 额外验证：检查实际的 Pod 状态
                             pod_validation_passed = self._validate_pod_health(
