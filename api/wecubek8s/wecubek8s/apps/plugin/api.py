@@ -2064,6 +2064,40 @@ class StatefulSet:
             # 逐个滚动更新，确保每个 Pod Ready 后再更新下一个，无需手动删除 Pod。
             LOG.info('StatefulSet %s/%s updated, K8s RollingUpdate will handle pod restarts automatically.',
                      data['namespace'], resource_name)
+
+            # ==================== 处理 CrashLoopBackOff Pod（RollingUpdate 的死锁问题）====================
+            # K8s RollingUpdate 要求"旧 Pod Ready 才滚下一个"，而 CrashLoopBackOff 的 Pod 永远不会 Ready，
+            # 导致新模板永远无法被应用。检测到这种情况时，主动删除 CrashLoopBackOff 的 Pod，
+            # 让 StatefulSet 控制器用新模板重建，打破死锁。
+            try:
+                replicas_count = int(data.get('replicas', 1))
+                crash_pods_deleted = []
+                for i in range(replicas_count):
+                    pod_name = f"{resource_name}-{i}"
+                    try:
+                        pod = k8s_client.get_pod(pod_name, data['namespace'])
+                        if pod and pod.status and pod.status.container_statuses:
+                            for cs in pod.status.container_statuses:
+                                if (cs.state and cs.state.waiting
+                                        and cs.state.waiting.reason == 'CrashLoopBackOff'):
+                                    LOG.warning('[CrashLoopBackOff] Pod %s/%s container "%s" is in '
+                                                'CrashLoopBackOff (restarts=%d), deleting to unblock RollingUpdate.',
+                                                data['namespace'], pod_name, cs.name,
+                                                cs.restart_count or 0)
+                                    k8s_client.delete_pod(pod_name, data['namespace'])
+                                    crash_pods_deleted.append(pod_name)
+                                    break
+                    except Exception as e:
+                        LOG.warning('[CrashLoopBackOff] Failed to check/delete Pod %s: %s', pod_name, str(e))
+                if crash_pods_deleted:
+                    LOG.info('[CrashLoopBackOff] Deleted %d CrashLoopBackOff pod(s): %s. '
+                             'StatefulSet will recreate them with the new template.',
+                             len(crash_pods_deleted), crash_pods_deleted)
+                else:
+                    LOG.info('[CrashLoopBackOff] No CrashLoopBackOff pods found, RollingUpdate proceeds normally.')
+            except Exception as e:
+                LOG.warning('[CrashLoopBackOff] Error during CrashLoopBackOff check: %s (non-fatal, continuing)',
+                            str(e))
         
         # ==================== 等待 Pod 就绪（解决异步创建问题）====================
         replicas = int(data.get('replicas', 1))
