@@ -4265,14 +4265,20 @@ class PackageDeploy:
                  subsystem_token[:20] if subsystem_token else 'None')
 
         # busybox 内联脚本：
-        #   - 使用 wget --header 携带 Bearer Token 下载
-        #   - 自动创建目标目录并解压
-        # 从 URL 中提取文件名（去掉 query string），直接下载到目标目录，不解压
+        #   1. 创建目标目录
+        #   2. 将目标目录中所有文件（不含子目录）移动到 bak_yyyymmdd/ 备份目录
+        #   3. 使用 wget --header 携带 Bearer Token 下载新包到目标目录
         inline_script = (
             'set -e; '
             'echo "=== PackageDeploy Job start ==="; '
+            'mkdir -p "$EXTRACT_DIR"; '
+            'BAK_DATE=$(date +%Y%m%d); '
+            'BAK_DIR="$EXTRACT_DIR/bak_${BAK_DATE}"; '
+            'mkdir -p "$BAK_DIR"; '
+            'echo "Backing up existing files to $BAK_DIR ..."; '
+            'find "$EXTRACT_DIR" -maxdepth 1 -type f -exec mv {} "$BAK_DIR/" \\; ; '
+            'echo "Backup done."; '
             'echo "Downloading: $PACKAGE_URL"; '
-            'mkdir -p $EXTRACT_DIR; '
             'FILENAME=$(basename "$PACKAGE_URL" | sed "s/?.*//"); '
             'echo "Target file: $EXTRACT_DIR/$FILENAME"; '
             'wget --header="Authorization: Bearer $PACKAGE_TOKEN" '
