@@ -1576,6 +1576,86 @@ class StatefulSet:
         except Exception as e:
             LOG.error('Failed to validate pod health: %s', str(e))
             return False
+
+    _RECOVERABLE_FAILED_POD_REASONS = {
+        'Evicted',
+        'NodeLost',
+        'Shutdown',
+        'Preempting',
+    }
+
+    def _get_pod_ready_timeout(self, data):
+        raw_timeout = data.get('pod_ready_timeout')
+        if raw_timeout is None or str(raw_timeout).strip() == '':
+            raw_timeout = getattr(CONF, 'pod_ready_timeout', '') or 480
+
+        try:
+            timeout = int(raw_timeout)
+        except (TypeError, ValueError):
+            LOG.warning('Invalid pod_ready_timeout value %s, using default 480 seconds', raw_timeout)
+            return 480
+
+        if timeout <= 0:
+            LOG.warning('pod_ready_timeout must be positive, got %s, using default 480 seconds', raw_timeout)
+            return 480
+
+        return timeout
+
+    def _is_recoverable_failed_pod(self, pod):
+        """判断 Failed Pod 是否属于可等待恢复的调度/节点类失败。"""
+        status = getattr(pod, 'status', None)
+        phase = getattr(status, 'phase', None) if status else None
+        reason = getattr(status, 'reason', None) if status else None
+        return phase == 'Failed' and reason in self._RECOVERABLE_FAILED_POD_REASONS
+
+    def _build_pod_failure_detail(self, pod):
+        """构造简短的 Pod 失败详情，避免界面只看到 Failed state。"""
+        pod_name = getattr(getattr(pod, 'metadata', None), 'name', 'Unknown')
+        status = getattr(pod, 'status', None)
+        phase = getattr(status, 'phase', 'Unknown') if status else 'Unknown'
+        reason = getattr(status, 'reason', None) if status else None
+        message = getattr(status, 'message', None) if status else None
+
+        details = [f"Pod {pod_name}: phase={phase}"]
+        if reason:
+            details.append(f"reason={reason}")
+        if message:
+            details.append(f"message={message[:200]}")
+
+        for attr_name, status_type in (
+                ('init_container_statuses', 'init container'),
+                ('container_statuses', 'container')):
+            for container_status in (getattr(status, attr_name, None) or []):
+                container_name = getattr(container_status, 'name', 'Unknown')
+                restart_count = getattr(container_status, 'restart_count', 0) or 0
+                state = getattr(container_status, 'state', None)
+                if not state:
+                    continue
+                waiting = getattr(state, 'waiting', None)
+                terminated = getattr(state, 'terminated', None)
+                if waiting:
+                    wait_reason = getattr(waiting, 'reason', None) or 'Unknown'
+                    wait_message = getattr(waiting, 'message', None) or ''
+                    detail = (f"{container_name}: waiting - {wait_reason} "
+                              f"(restarts {restart_count})")
+                    if wait_message:
+                        detail += f" - {wait_message[:200]}"
+                    details.append(detail)
+                elif terminated:
+                    term_reason = getattr(terminated, 'reason', None) or 'Unknown'
+                    exit_code = getattr(terminated, 'exit_code', 0) or 0
+                    term_message = getattr(terminated, 'message', None) or ''
+                    detail = (f"{container_name}: terminated - {term_reason} "
+                              f"(exit {exit_code})")
+                    if restart_count:
+                        detail += f", restarts {restart_count}"
+                    if term_message:
+                        detail += f" - {term_message[:200]}"
+                    if status_type == 'init container':
+                        detail = 'init ' + detail
+                    details.append(detail)
+
+        return '; '.join(details)
     
     def _check_pod_failures(self, k8s_client, statefulset_name, namespace):
         """检查 Pod 是否有创建失败的情况
@@ -1601,6 +1681,7 @@ class StatefulSet:
                 'ImagePullBackOff': 'Image cannot be pulled',
                 'ErrImagePull': 'Failed to pull image',
                 'CreateContainerConfigError': 'Container configuration error',
+                'InvalidImageName': 'Invalid image name',
             }
             
             # CrashLoopBackOff 需要检查重启次数（避免误判暂时性失败）
@@ -1612,7 +1693,10 @@ class StatefulSet:
                 
                 # 检查 Pod Phase 失败状态
                 if phase == 'Failed':
-                    error_msg = f"Pod {pod_name} is in Failed state"
+                    error_msg = self._build_pod_failure_detail(pod)
+                    if self._is_recoverable_failed_pod(pod):
+                        LOG.warning('Recoverable Failed Pod detected, keep waiting: %s', error_msg)
+                        continue
                     LOG.error('❌ %s - exiting immediately', error_msg)
                     return True, error_msg
                 
@@ -1676,7 +1760,7 @@ class StatefulSet:
                 phase = pod.status.phase if pod.status else 'Unknown'
                 
                 if phase != 'Running':
-                    errors.append(f"{pod_name}: phase={phase}")
+                    errors.append(self._build_pod_failure_detail(pod))
                 
                 if pod.status and pod.status.container_statuses:
                     for container_status in pod.status.container_statuses:
@@ -2105,7 +2189,7 @@ class StatefulSet:
         
         if wait_for_pods:
             LOG.info('Waiting for StatefulSet Pods to be ready (replicas: %d)...', replicas)
-            pod_ready_timeout = int(data.get('pod_ready_timeout', 300))  # 默认等待 5 分钟
+            pod_ready_timeout = self._get_pod_ready_timeout(data)  # 默认来自系统参数
             check_interval = 5  # 每 5 秒检查一次
             max_attempts = pod_ready_timeout // check_interval
             
@@ -2360,7 +2444,11 @@ class StatefulSet:
                                 
                                 # 检查致命错误状态
                                 if phase == 'Failed':
-                                    error_msg = f'Pod {pod_name} is in Failed state'
+                                    error_msg = self._build_pod_failure_detail(pod)
+                                    if self._is_recoverable_failed_pod(pod):
+                                        LOG.warning('Recoverable Failed Pod detected during CMDB sync wait, keep waiting: %s',
+                                                    error_msg)
+                                        continue
                                     LOG.error('❌ %s', error_msg)
                                     raise exceptions.PluginError(message=_('Pod creation failed: %(error)s') % {'error': error_msg})
                                 

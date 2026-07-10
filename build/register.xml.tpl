@@ -76,6 +76,7 @@
         <systemParameter name="KUBERNETES_NOTIFY_POD_DELETED" scopeType="plugins" defaultValue="kubernetes-pod-deleted" />
         <systemParameter name="KUBERNETES_LOG_LEVEL" scopeType="plugins" defaultValue="info" />
         <systemParameter name="KUBERNETES_APP_TIMEZONE" scopeType="plugins" defaultValue="Asia/Shanghai" />
+        <systemParameter name="KUBERNETES_POD_READY_TIMEOUT" scopeType="plugins" defaultValue="480" />
         <systemParameter name="KUBERNETES_ENABLE_HOST_PATH" scopeType="plugins" defaultValue="true" />
     </systemParameters>
 
@@ -85,7 +86,7 @@
 
     <!-- 6.运行资源 - 描述部署运行本插件包需要的基础资源(如主机、虚拟机、容器、数据库等) -->
     <resourceDependencies>
-        <docker imageName="{{IMAGENAME}}" containerName="{{CONTAINERNAME}}" portBindings="{{ALLOCATE_PORT}}:9001" volumeBindings="/etc/localtime:/etc/localtime,{{BASE_MOUNT_PATH}}/kubernetes/logs:/var/log/wecubek8s,{{BASE_MOUNT_PATH}}/certs:/certs" envVariables="GATEWAY_URL={{GATEWAY_URL}},JWT_SIGNING_KEY={{JWT_SIGNING_KEY}},SUB_SYSTEM_CODE={{SUB_SYSTEM_CODE}},SUB_SYSTEM_KEY={{SUB_SYSTEM_KEY}},KUBERNETES_DB_USERNAME={{DB_USER}},KUBERNETES_DB_PASSWORD={{DB_PWD}},KUBERNETES_DB_HOSTIP={{DB_HOST}},KUBERNETES_DB_HOSTPORT={{DB_PORT}},KUBERNETES_DB_SCHEMA={{DB_SCHEMA}},ENCRYPT_SEED={{ENCRYPT_SEED}},NOTIFY_POD_ADDED={{KUBERNETES_NOTIFY_POD_ADDED}},NOTIFY_POD_DELETED={{KUBERNETES_NOTIFY_POD_DELETED}},KUBERNETES_LOG_LEVEL={{KUBERNETES_LOG_LEVEL}},APP_TIMEZONE={{KUBERNETES_APP_TIMEZONE}},S3_ACCESS_KEY={{S3_ACCESS_KEY}},S3_SECRET_KEY={{S3_SECRET_KEY}},ENABLE_HOST_PATH={{KUBERNETES_ENABLE_HOST_PATH}}" />
+        <docker imageName="{{IMAGENAME}}" containerName="{{CONTAINERNAME}}" portBindings="{{ALLOCATE_PORT}}:9001" volumeBindings="/etc/localtime:/etc/localtime,{{BASE_MOUNT_PATH}}/kubernetes/logs:/var/log/wecubek8s,{{BASE_MOUNT_PATH}}/certs:/certs" envVariables="GATEWAY_URL={{GATEWAY_URL}},JWT_SIGNING_KEY={{JWT_SIGNING_KEY}},SUB_SYSTEM_CODE={{SUB_SYSTEM_CODE}},SUB_SYSTEM_KEY={{SUB_SYSTEM_KEY}},KUBERNETES_DB_USERNAME={{DB_USER}},KUBERNETES_DB_PASSWORD={{DB_PWD}},KUBERNETES_DB_HOSTIP={{DB_HOST}},KUBERNETES_DB_HOSTPORT={{DB_PORT}},KUBERNETES_DB_SCHEMA={{DB_SCHEMA}},ENCRYPT_SEED={{ENCRYPT_SEED}},NOTIFY_POD_ADDED={{KUBERNETES_NOTIFY_POD_ADDED}},NOTIFY_POD_DELETED={{KUBERNETES_NOTIFY_POD_DELETED}},KUBERNETES_LOG_LEVEL={{KUBERNETES_LOG_LEVEL}},APP_TIMEZONE={{KUBERNETES_APP_TIMEZONE}},POD_READY_TIMEOUT={{KUBERNETES_POD_READY_TIMEOUT}},S3_ACCESS_KEY={{S3_ACCESS_KEY}},S3_SECRET_KEY={{S3_SECRET_KEY}},ENABLE_HOST_PATH={{KUBERNETES_ENABLE_HOST_PATH}}" />
         <mysql schema="kubernetes" initFileName="init.sql" upgradeFileName="upgrade.sql" />
     </resourceDependencies>
 
