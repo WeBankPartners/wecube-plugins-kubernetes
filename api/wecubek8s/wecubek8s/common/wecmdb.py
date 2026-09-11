@@ -23,11 +23,31 @@ class EntityClient(utils.ClientMixin):
         self.token = token or utils.get_token()
 
     @staticmethod
-    def build_query_url(package, entity):
-        return '/%s/entities/%s/query' % (package, entity)
+    def build_query_url(package, entity, action):
+        return '/%s/entities/%s/%s' % (package, entity, action)
+
+    def query(self, package, entity, query_data):
+        """查询实体数据"""
+        url = self.server + self.build_query_url(package, entity, 'query')
+        return self.post(url, query_data)
+    
+    def create(self, package, entity, create_data):
+        """创建实体数据"""
+        url = self.server + self.build_query_url(package, entity, 'create')
+        return self.post(url, create_data)
+    
+    def update(self, package, entity, update_data):
+        """更新实体数据"""
+        url = self.server + self.build_query_url(package, entity, 'update')
+        return self.post(url, update_data)
+    
+    def delete(self, package, entity, delete_data):
+        """删除实体数据"""
+        url = self.server + self.build_query_url(package, entity, 'delete')
+        return self.post(url, delete_data)
 
     def retrieve(self, package, entity, query):
-        url = self.server + self.build_query_url(package, entity)
+        url = self.server + self.build_query_url(package, entity, 'query')
         return self.post(url, query)
 
 

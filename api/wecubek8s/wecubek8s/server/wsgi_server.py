@@ -50,3 +50,22 @@ application = base.initialize_server('wecubek8s',
                                      override_middlewares=True)
 application.set_error_serializer(error_serializer)
 application.req_options.auto_parse_qs_csv = True
+
+# 预热数据库连接，避免首次请求时创建连接导致线程问题
+try:
+    from talos.core import config
+    from talos.db import crud
+    import logging
+    CONF = config.CONF
+    LOG = logging.getLogger(__name__)
+    LOG.info("预热数据库连接...")
+    # 创建一个测试查询触发连接池初始化
+    test_engine = crud.get_engine()
+    conn = test_engine.connect()
+    conn.close()
+    LOG.info("数据库连接预热完成")
+except Exception as e:
+    # 预热失败不影响启动
+    import logging
+    LOG = logging.getLogger(__name__)
+    LOG.warning(f"数据库连接预热失败（不影响启动）: {e}")

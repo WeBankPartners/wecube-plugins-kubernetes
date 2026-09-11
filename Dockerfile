@@ -1,13 +1,14 @@
-FROM python:3.7-slim
+FROM ccr.ccs.tencentyun.com/webankpartners/python:3.8.20-slim-bullseye
 LABEL maintainer = "Webank CTB Team"
-# Install logrotate
-RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list
-RUN sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list
+# 使用腾讯云镜像源
+RUN sed -i 's/deb.debian.org/mirrors.tencentyun.com/g' /etc/apt/sources.list && \
+    sed -i 's/security.debian.org/mirrors.tencentyun.com/g' /etc/apt/sources.list
 COPY api/wecubek8s/requirements.txt /tmp/requirements.txt
 COPY api/wecubek8s/dist/* /tmp/
 # Install && Clean up
-RUN apt update && apt-get -y install gcc python3-dev swig libssl-dev && \
-    pip3 install -i http://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -r /tmp/requirements.txt && \
+RUN apt update && apt-get -y install gcc python3-dev swig libssl-dev libev-dev make && \
+    pip3 install -i http://mirrors.tencentyun.com/pypi/simple/ --trusted-host mirrors.tencentyun.com setuptools wheel && \
+    pip3 install -i http://mirrors.tencentyun.com/pypi/simple/ --trusted-host mirrors.tencentyun.com --no-build-isolation -r /tmp/requirements.txt && \
     pip3 install /tmp/*.whl && \
     rm -rf /root/.cache && apt autoclean && \
     rm -rf /tmp/* /var/lib/apt/* /var/cache/* && \
@@ -21,6 +22,15 @@ COPY api/wecubek8s/etc /etc/wecubek8s
 # RUN chown -R app:app /etc/wecubek8s/
 # RUN chown -R app:app /var/log/wecubek8s/
 # USER app
+
+# 设置时区为北京时间
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 设置环境变量限制 gevent threadpool 大小和使用 thread 解析器
+ENV GEVENT_THREADPOOL_SIZE=10
+ENV GEVENT_RESOLVER=thread
+
 COPY build/start_all.sh /scripts/start_all.sh
 RUN chmod +x /scripts/start_all.sh
 CMD ["/bin/sh","-c","/scripts/start_all.sh"]

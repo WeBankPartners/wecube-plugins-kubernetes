@@ -1,0 +1,107 @@
+---
+# Headless Service for StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: wecube-nexus
+  namespace: demo-myapp
+  labels:
+    app: wecube-nexus
+spec:
+  ports:
+  - port: 8081
+    name: web
+  clusterIP: None
+  selector:
+    app: wecube-nexus
+
+---
+# StatefulSet for Nexus
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wecube-nexus
+  namespace: demo-myapp
+  labels:
+    app: wecube-nexus
+spec:
+  serviceName: "wecube-nexus"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wecube-nexus
+  template:
+    metadata:
+      labels:
+        app: wecube-nexus
+    spec:
+      securityContext:
+        fsGroup: 200
+      initContainers:
+      - name: init-nexus-data
+        image: 192.168.150.6:30816/library/busybox:latest
+        command:
+        - sh
+        - -c
+        - |
+          echo "Initializing nexus-data directory permissions..."
+          mkdir -p /nexus-data/log/audit
+          mkdir -p /nexus-data/tmp
+          mkdir -p /nexus-data/javaprefs
+          chown -R 200:200 /nexus-data
+          chmod -R 755 /nexus-data
+          echo "Permissions initialized successfully"
+          ls -la /nexus-data
+        volumeMounts:
+        - name: wecube-nexus-data
+          mountPath: /nexus-data
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: wecube-nexus
+        image: 192.168.150.6:30816/library/nexus3:3.84.0
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 200
+        ports:
+        - containerPort: 8081
+          name: web
+        volumeMounts:
+        - name: wecube-nexus-data
+          mountPath: /nexus-data
+        - name: localtime
+          mountPath: /etc/localtime
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "250m"
+          limits:
+            memory: "4Gi"
+            cpu: "1000m"
+        livenessProbe:
+          tcpSocket:
+            port: 8081
+          initialDelaySeconds: 180
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 8081
+          initialDelaySeconds: 120
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: localtime
+        hostPath:
+          path: /etc/localtime
+          type: File
+  volumeClaimTemplates:
+  - metadata:
+      name: wecube-nexus-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "nfs"
+      resources:
+        requests:
+          storage: 50Gi

@@ -4,9 +4,11 @@ from __future__ import absolute_import
 
 import logging
 import datetime
+import time
 from urllib.parse import urlparse
 
 from kubernetes import watch
+from kubernetes.client.rest import ApiException
 from talos.common import cache
 from talos.core import config
 from talos.core.i18n import _
@@ -14,9 +16,16 @@ from wecubek8s.common import jsonfilter
 from wecubek8s.common import k8s
 from wecubek8s.common import const
 from wecubek8s.db import resource as db_resource
+import threading
 
 CONF = config.CONF
 LOG = logging.getLogger(__name__)
+
+# resourceVersion 缓存（用于断连重连时继续监听，防止事件丢失）
+# Key: cluster_id, Value: {'resource_version': str, 'last_update': timestamp}
+# 多 watcher 场景：每个 watcher 进程维护自己的 resourceVersion，重连时从各自的缓存继续
+_resource_version_cache = {}
+_resource_version_lock = threading.Lock()
 
 
 class BaseEntity:
@@ -49,8 +58,16 @@ class BaseEntity:
     def all(self, clusters):
         return []
 
+    def _ensure_api_server_protocol(self, api_server):
+        """确保 api_server 有正确的协议前缀"""
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            LOG.warning('api_server missing protocol prefix, auto-adding https://: %s', api_server)
+            return 'https://' + api_server
+        return api_server
+    
     def cluster_client(self, cluster):
-        k8s_auth = k8s.AuthToken(cluster['api_server'], cluster['token'])
+        api_server = self._ensure_api_server_protocol(cluster['api_server'])
+        k8s_auth = k8s.AuthToken(api_server, cluster['token'])
         k8s_client = k8s.Client(k8s_auth)
         return k8s_client
 
@@ -74,8 +91,6 @@ class Cluster(BaseEntity):
             'api_host': api_host,
             'api_port': str(api_port),
             'token': item['token'],
-            'metric_host': item['metric_host'],
-            'metric_port': item['metric_port'],
         }
         return result
 
@@ -128,8 +143,13 @@ class Deployment(BaseEntity):
                 if tag_key == const.Tag.DEPLOYMENT_ID_TAG:
                     correlation_id = tag_value
                     break
+        
+        # 使用 cluster_id + uid 作为全局唯一标识
+        asset_id = f"{cluster['id']}_{item.metadata.uid}" if item.metadata.uid else None
+        
         result = {
             'id': item.metadata.uid,
+            'asset_id': asset_id,
             'name': item.metadata.name,
             'displayName': f'{cluster["name"]}-{item.metadata.namespace}-{item.metadata.name}',
             'namespace': item.metadata.namespace,
@@ -214,22 +234,78 @@ class Pod(BaseEntity):
                     correlation_id = tag_value
                     break
         controll_by = None
+        statefulset_id = None
+        statefulset_name = None  # StatefulSet 名称（用于 watcher 查询 annotation）
         if item.metadata.owner_references:
             for owner in item.metadata.owner_references:
-                if owner.controller and owner.kind == 'ReplicaSet':
-                    controll_by = owner.uid
-                    break
+                if owner.controller:
+                    if owner.kind == 'ReplicaSet':
+                        controll_by = owner.uid
+                    elif owner.kind == 'StatefulSet':
+                        statefulset_id = owner.uid
+                        statefulset_name = owner.name  # 保存 StatefulSet 名称
+                    # 可以继续添加其他控制器类型（如 DaemonSet、Job 等）
+        
+        # 从 annotations 中提取创建者的 token（用于 watcher 访问 CMDB）
+        # 优先级1：从 Pod 自己的 annotations 中读取（直接通过 apply API 创建的 Pod）
+        creator_token = None
+        if item.metadata.annotations:
+            creator_token = item.metadata.annotations.get('wecube.io/creator-token')
+            if creator_token:
+                LOG.debug('Extracted creator token from Pod annotations (prefix: %s...)', 
+                         creator_token[:20])
+        
+        # 优先级2：如果 Pod 没有 creator_token，从父资源的 annotations 中继承
+        # 这适用于"漂移"场景：Pod 通过 StatefulSet 扩缩容、重启等自动创建
+        if not creator_token and item.metadata.owner_references:
+            try:
+                k8s_client = cls.cluster_client(cluster)
+                for owner in item.metadata.owner_references:
+                    if owner.controller:  # 只从控制器（controller）继承
+                        owner_obj = None
+                        if owner.kind == 'StatefulSet':
+                            owner_obj = k8s_client.read_namespaced_stateful_set(
+                                owner.name, item.metadata.namespace)
+                        elif owner.kind == 'Deployment':
+                            owner_obj = k8s_client.read_namespaced_deployment(
+                                owner.name, item.metadata.namespace)
+                        elif owner.kind == 'ReplicaSet':
+                            owner_obj = k8s_client.read_namespaced_replica_set(
+                                owner.name, item.metadata.namespace)
+                        # 可以继续添加其他控制器类型
+                        
+                        if owner_obj and owner_obj.metadata.annotations:
+                            creator_token = owner_obj.metadata.annotations.get('wecube.io/creator-token')
+                            if creator_token:
+                                LOG.info('Inherited creator token from %s %s (prefix: %s...)',
+                                        owner.kind, owner.name, creator_token[:20])
+                                break  # 找到 token 就停止
+            except Exception as e:
+                LOG.warning('Failed to inherit creator token from owner: %s', str(e))
+        
+        # 使用 cluster_id + pod_uid 作为全局唯一标识，防止重复集群配置导致的重复创建
+        asset_id = f"{cluster['id']}_{item.metadata.uid}" if item.metadata.uid else None
+        
+        # 提取所有 annotations（用于 watcher 判断 Pod 创建来源等信息）
+        annotations = dict(item.metadata.annotations) if item.metadata.annotations else {}
+        
         result = {
             'id': item.metadata.uid,
+            'asset_id': asset_id,  # 全局唯一标识（cluster_id + pod_uid）
             'name': item.metadata.name,
             'displayName': f'{cluster["name"]}-{item.metadata.namespace}-{item.metadata.name}',
             'namespace': item.metadata.namespace,
             'ip_address': item.status.pod_ip,
+            'host_ip': item.status.host_ip,
             'replicaset_id': controll_by,
+            'statefulset_id': statefulset_id,
+            'statefulset_name': statefulset_name,  # StatefulSet 名称（用于从 K8s 读取 annotation）
             'deployment_id': None,
             'correlation_id': correlation_id,
             'node_id': item.spec.node_name,
             'cluster_id': cluster["id"],
+            'creator_token': creator_token,  # 新增：创建者的 token
+            'annotations': annotations,  # 新增：完整的 annotations（用于判断创建来源等）
         }
         # patch node_id
         node_mapping = {}
@@ -255,15 +331,103 @@ class Pod(BaseEntity):
 
     def watch(self, cluster, event_stop, notify):
         k8s_client = self.cluster_client(cluster)
-        current_time = datetime.datetime.now(datetime.timezone.utc)
         w = watch.Watch()
-        for event in w.stream(k8s_client.core_client.list_pod_for_all_namespaces):
-            if event['type'] == 'ADDED':
-                # new -> alert
-                if event['object'].metadata.creation_timestamp >= current_time:
-                    notify('POD.ADDED', cluster['id'], self.to_dict(cluster, event['object']))
-            elif event['type'] == 'DELETED':
-                # delete -> alert
-                notify('POD.DELETED', cluster['id'], self.to_dict(cluster, event['object']))
-            if event_stop.is_set():
-                w.stop()
+        cluster_id = cluster['id']
+        cluster_name = cluster.get('name', cluster_id)
+        
+        LOG.info('Starting watch for cluster %s', cluster_name)
+        
+        try:
+            # 优先使用缓存的 resourceVersion（断连重连时从上次位置继续，防止丢失事件）
+            resource_version = None
+            with _resource_version_lock:
+                cached = _resource_version_cache.get(cluster_id)
+                if cached:
+                    resource_version = cached['resource_version']
+                    LOG.info('🔄 Resuming watch from cached resource_version: %s (preventing event loss)', 
+                            resource_version)
+            
+            # 首次启动：获取当前的 resource_version
+            if not resource_version:
+                pod_list = k8s_client.core_client.list_pod_for_all_namespaces(limit=1)
+                resource_version = pod_list.metadata.resource_version
+                LOG.info('🆕 Starting fresh watch from resource_version: %s (first time)', resource_version)
+                
+                # 缓存初始版本号
+                with _resource_version_lock:
+                    _resource_version_cache[cluster_id] = {
+                        'resource_version': resource_version,
+                        'last_update': time.time()
+                    }
+            
+            # 设置超时为 1 小时，避免 Kubernetes Python client 默认超时（2-5分钟）导致连接断开
+            # 每小时自动重连一次，保持连接健康，符合 Kubernetes 官方最佳实践
+            # timeout_seconds: API Server 端超时时间
+            # _request_timeout: HTTP 客户端（urllib3）超时时间 (connect_timeout, read_timeout)
+            #   - connect_timeout=10: 连接超时 10 秒
+            #   - read_timeout=3660: 读取超时 61 分钟（略大于 timeout_seconds，确保 API Server 先超时）
+            for event in w.stream(
+                k8s_client.core_client.list_pod_for_all_namespaces,
+                resource_version=resource_version,
+                timeout_seconds=3600,
+                _request_timeout=(10, 3660)
+            ):
+                event_type = event.get('type')
+                pod_obj = event.get('object')
+                
+                if not pod_obj:
+                    LOG.warning('Received watch event without object: %s', event)
+                    continue
+                
+                pod_name = pod_obj.metadata.name if pod_obj.metadata else 'unknown'
+                pod_uid = pod_obj.metadata.uid if pod_obj.metadata else 'unknown'
+                
+                LOG.debug('Watch event: type=%s, pod=%s, uid=%s', event_type, pod_name, pod_uid)
+                
+                # 更新 resourceVersion 缓存（每次事件都更新，确保重连时不丢失）
+                if hasattr(pod_obj.metadata, 'resource_version') and pod_obj.metadata.resource_version:
+                    current_rv = pod_obj.metadata.resource_version
+                    with _resource_version_lock:
+                        _resource_version_cache[cluster_id] = {
+                            'resource_version': current_rv,
+                            'last_update': time.time()
+                        }
+                    LOG.debug('📌 Updated cached resource_version to: %s', current_rv)
+                
+                if event_type == 'ADDED':
+                    # 触发 POD.ADDED 通知（移除时间过滤以避免丢失重连期间的事件）
+                    # CMDB 同步函数内部会处理去重（通过 code 字段查询已存在的 Pod）
+                    LOG.info('Pod ADDED event detected: %s (uid: %s)', pod_name, pod_uid)
+                    notify('POD.ADDED', cluster['id'], self.to_dict(cluster, pod_obj))
+                elif event_type == 'DELETED':
+                    # 触发 POD.DELETED 通知
+                    LOG.info('Pod DELETED event detected: %s (uid: %s)', pod_name, pod_uid)
+                    notify('POD.DELETED', cluster['id'], self.to_dict(cluster, pod_obj))
+                elif event_type == 'MODIFIED':
+                    # MODIFIED 事件不触发通知，避免噪音
+                    LOG.debug('Pod MODIFIED event (not notifying): %s', pod_name)
+                else:
+                    LOG.warning('Unknown watch event type: %s for pod %s', event_type, pod_name)
+                
+                if event_stop.is_set():
+                    LOG.info('Watch stop requested for cluster %s', cluster_name)
+                    w.stop()
+                    break
+        except ApiException as e:
+            # 处理 410 Gone 错误：resourceVersion 过期（太旧，API Server 已清理历史）
+            # 此时需要清空缓存，下次重连时重新获取当前版本号
+            if e.status == 410:
+                LOG.warning('⚠️ Resource version expired (410 Gone) for cluster %s, will reset on next reconnection', 
+                           cluster_name)
+                LOG.warning('Expired resourceVersion was: %s', resource_version)
+                with _resource_version_lock:
+                    if cluster_id in _resource_version_cache:
+                        del _resource_version_cache[cluster_id]
+                        LOG.info('Cleared expired resourceVersion cache for cluster %s', cluster_name)
+            raise
+        except Exception as e:
+            LOG.warning('Warning in watch stream for cluster %s: %s', cluster_name, str(e))
+            raise
+        finally:
+            w.stop()
+            LOG.info('Watch stopped for cluster %s', cluster_name)

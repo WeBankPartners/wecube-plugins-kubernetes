@@ -44,9 +44,22 @@ class Client:
         configuration = client.Configuration()
         auth(configuration)
         self.auth = auth
+
+        # 配置重试策略，不替换底层 PoolManager（kubernetes 28.x 禁止两者同时使用）
+        # Watch 的长超时通过调用侧传递 timeout_seconds 参数控制
+        configuration.retries = urllib3.Retry(
+            total=3,
+            read=3,
+            connect=3,
+            backoff_factor=0.3,
+            status_forcelist=(500, 502, 503, 504)
+        )
+
         api_client = client.ApiClient(configuration)
         self.core_client = client.CoreV1Api(api_client)
         self.app_client = client.AppsV1Api(api_client)
+        self.networking_client = client.NetworkingV1Api(api_client)
+        self.batch_client = client.BatchV1Api(api_client)
 
     def _action(self, client, func_name, *args, **kwargs):
         func = getattr(client, func_name)
@@ -69,6 +82,12 @@ class Client:
     # Node
     def list_node(self, **kwargs):
         return self._action(self.core_client, 'list_node', **kwargs)
+
+    def get_node(self, name, **kwargs):
+        return self._action_detail(self.core_client, 'read_node', name, **kwargs)
+
+    def patch_node(self, name, body, **kwargs):
+        return self._action(self.core_client, 'patch_node', name, body, **kwargs)
 
     # Namespace
     def create_namespace(self, body, **kwargs):
@@ -93,6 +112,15 @@ class Client:
     def update_deployment(self, name, namespace, body, **kwargs):
         return self._action(self.app_client, 'patch_namespaced_deployment', name, namespace, body, **kwargs)
 
+    def replace_deployment(self, name, namespace, body, **kwargs):
+        """
+        完全替换 Deployment (使用 PUT 而不是 PATCH)
+        
+        这会完全替换资源定义,不会合并字段,适合需要删除旧配置的场景
+        注意: 需要在 body 中包含 resourceVersion
+        """
+        return self._action(self.app_client, 'replace_namespaced_deployment', name, namespace, body, **kwargs)
+
     def delete_deployment(self, name, namespace, **kwargs):
         return self._action(self.app_client, 'delete_namespaced_deployment', name, namespace, **kwargs)
 
@@ -105,20 +133,105 @@ class Client:
     def list_all_deployment(self, **kwargs):
         return self._action(self.app_client, 'list_deployment_for_all_namespaces', **kwargs)
 
+    # StatefulSet
+    def create_statefulset(self, namespace, body, **kwargs):
+        return self._action(self.app_client, 'create_namespaced_stateful_set', namespace, body, **kwargs)
+
+    def update_statefulset(self, name, namespace, body, **kwargs):
+        return self._action(self.app_client, 'patch_namespaced_stateful_set', name, namespace, body, **kwargs)
+
+    def replace_statefulset(self, name, namespace, body, **kwargs):
+        """
+        完全替换 StatefulSet (使用 PUT 而不是 PATCH)
+
+        这会完全替换资源定义,不会合并字段,适合需要删除旧配置的场景
+        注意: 需要在 body 中包含 resourceVersion
+        """
+        return self._action(self.app_client, 'replace_namespaced_stateful_set', name, namespace, body, **kwargs)
+
+
+    def delete_statefulset(self, name, namespace, **kwargs):
+        return self._action(self.app_client, 'delete_namespaced_stateful_set', name, namespace, **kwargs)
+
+    def get_statefulset(self, name, namespace, **kwargs):
+        return self._action_detail(self.app_client, 'read_namespaced_stateful_set', name, namespace, **kwargs)
+
+    def list_statefulset(self, namespace, **kwargs):
+        return self._action(self.app_client, 'list_namespaced_stateful_set', namespace, **kwargs)
+
+    def list_all_statefulset(self, **kwargs):
+        return self._action(self.app_client, 'list_stateful_set_for_all_namespaces', **kwargs)
+
+    # DaemonSet
+    def create_daemonset(self, namespace, body, **kwargs):
+        return self._action(self.app_client, 'create_namespaced_daemon_set', namespace, body, **kwargs)
+
+    def update_daemonset(self, name, namespace, body, **kwargs):
+        return self._action(self.app_client, 'patch_namespaced_daemon_set', name, namespace, body, **kwargs)
+
+    def replace_daemonset(self, name, namespace, body, **kwargs):
+        """
+        完全替换 DaemonSet (使用 PUT 而不是 PATCH)
+        
+        这会完全替换资源定义,不会合并字段,适合需要删除旧配置的场景
+        注意: 需要在 body 中包含 resourceVersion
+        """
+        return self._action(self.app_client, 'replace_namespaced_daemon_set', name, namespace, body, **kwargs)
+
+    def delete_daemonset(self, name, namespace, **kwargs):
+        return self._action(self.app_client, 'delete_namespaced_daemon_set', name, namespace, **kwargs)
+
+    def get_daemonset(self, name, namespace, **kwargs):
+        return self._action_detail(self.app_client, 'read_namespaced_daemon_set', name, namespace, **kwargs)
+
+    def list_daemonset(self, namespace, **kwargs):
+        return self._action(self.app_client, 'list_namespaced_daemon_set', namespace, **kwargs)
+
+    def list_all_daemonset(self, **kwargs):
+        return self._action(self.app_client, 'list_daemon_set_for_all_namespaces', **kwargs)
+
     # ReplcaSet
     def list_all_replica_set(self, **kwargs):
         return self._action(self.app_client, 'list_replica_set_for_all_namespaces', **kwargs)
 
     # Pod
+    def list_pod(self, namespace, **kwargs):
+        return self._action(self.core_client, 'list_namespaced_pod', namespace, **kwargs)
+    
     def list_all_pod(self, **kwargs):
         return self._action(self.core_client, 'list_pod_for_all_namespaces', **kwargs)
+    
+    def get_pod(self, name, namespace, **kwargs):
+        return self._action_detail(self.core_client, 'read_namespaced_pod', name, namespace, **kwargs)
+    
+    def delete_pod(self, name, namespace, **kwargs):
+        return self._action(self.core_client, 'delete_namespaced_pod', name, namespace, **kwargs)
+
+    def get_pod_log(self, name, namespace, previous=False, tail_lines=100, **kwargs):
+        """
+        获取 Pod 日志，等价于 kubectl logs [-p] --tail=N pod_name -n namespace。
+        previous=True 时获取上一个容器实例的日志（容器重启后使用）。
+        读取失败时返回 None，调用方自行决定是否忽略。
+        """
+        try:
+            func = getattr(self.core_client, 'read_namespaced_pod_log')
+            return func(name, namespace, previous=previous, tail_lines=tail_lines, **kwargs)
+        except k8s_exceptions.ApiException as e:
+            if e.status == 404:
+                return None
+            # 日志拉取失败不应阻断主流程，返回 None
+            return None
+        except Exception:
+            return None
 
     # Service
     def create_service(self, namespace, body, **kwargs):
         return self._action(self.core_client, 'create_namespaced_service', namespace, body, **kwargs)
 
     def update_service(self, name, namespace, body, **kwargs):
-        return self._action(self.core_client, 'patch_namespaced_service', name, namespace, body, **kwargs)
+        # 使用 replace 而不是 patch，完全替换 Service 定义
+        # 这样可以避免 patch 合并时保留旧字段的问题（如端口列表合并）
+        return self._action(self.core_client, 'replace_namespaced_service', name, namespace, body, **kwargs)
 
     def delete_service(self, name, namespace, **kwargs):
         return self._action(self.core_client, 'delete_namespaced_service', name, namespace, **kwargs)
@@ -185,6 +298,58 @@ class Client:
         has_namespace = self.get_namespace(name)
         if has_namespace is None:
             self.create_namespace(body, **kwargs)
-        else:
-            self.update_namespace(name, body)
+        # else:
+        #     self.update_namespace(name, body)
         return True
+
+    # Endpoint
+    def create_endpoint(self, namespace, body, **kwargs):
+        return self._action(self.core_client, 'create_namespaced_endpoints', namespace, body, **kwargs)
+
+    def update_endpoint(self, name, namespace, body, **kwargs):
+        return self._action(self.core_client, 'patch_namespaced_endpoints', name, namespace, body, **kwargs)
+
+    def delete_endpoint(self, name, namespace, **kwargs):
+        return self._action(self.core_client, 'delete_namespaced_endpoints', name, namespace, **kwargs)
+
+    def get_endpoint(self, name, namespace, **kwargs):
+        return self._action_detail(self.core_client, 'read_namespaced_endpoints', name, namespace, **kwargs)
+
+    # PersistentVolumeClaim
+    def create_pvc(self, namespace, body, **kwargs):
+        return self._action(self.core_client, 'create_namespaced_persistent_volume_claim', namespace, body, **kwargs)
+
+    def delete_pvc(self, name, namespace, **kwargs):
+        return self._action(self.core_client, 'delete_namespaced_persistent_volume_claim', name, namespace, **kwargs)
+
+    def get_pvc(self, name, namespace, **kwargs):
+        return self._action_detail(self.core_client, 'read_namespaced_persistent_volume_claim', name, namespace, **kwargs)
+
+    def list_pvc(self, namespace, **kwargs):
+        return self._action(self.core_client, 'list_namespaced_persistent_volume_claim', namespace, **kwargs)
+
+    # Job
+    def create_job(self, namespace, body, **kwargs):
+        return self._action(self.batch_client, 'create_namespaced_job', namespace, body, **kwargs)
+
+    def delete_job(self, name, namespace, **kwargs):
+        return self._action(self.batch_client, 'delete_namespaced_job', name, namespace, **kwargs)
+
+    def get_job(self, name, namespace, **kwargs):
+        return self._action_detail(self.batch_client, 'read_namespaced_job', name, namespace, **kwargs)
+
+    def list_job(self, namespace, **kwargs):
+        return self._action(self.batch_client, 'list_namespaced_job', namespace, **kwargs)
+
+    # NetworkPolicy
+    def create_network_policy(self, namespace, body, **kwargs):
+        return self._action(self.networking_client, 'create_namespaced_network_policy', namespace, body, **kwargs)
+
+    def update_network_policy(self, name, namespace, body, **kwargs):
+        return self._action(self.networking_client, 'patch_namespaced_network_policy', name, namespace, body, **kwargs)
+
+    def delete_network_policy(self, name, namespace, **kwargs):
+        return self._action(self.networking_client, 'delete_namespaced_network_policy', name, namespace, **kwargs)
+
+    def get_network_policy(self, name, namespace, **kwargs):
+        return self._action_detail(self.networking_client, 'read_namespaced_network_policy', name, namespace, **kwargs)

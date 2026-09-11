@@ -1,0 +1,106 @@
+# ------------------- ClusterIP Service -------------------
+# 使用普通 ClusterIP，kube-proxy 做 8002→8080 的端口转发
+# gateway.yml 中 AUTH_SERVER_ADDRESS=wecube-auth-server:8002 使用此 Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: wecube-auth-server
+  namespace: demo-myapp
+spec:
+  type: ClusterIP
+  selector:
+    app: wecube-auth-server
+  ports:
+  - name: http
+    port: 8002
+    targetPort: 8002
+
+---
+# ------------------- StatefulSet -------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wecube-auth-server
+  namespace: demo-myapp
+spec:
+  serviceName: wecube-auth-server
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wecube-auth-server
+  template:
+    metadata:
+      labels:
+        app: wecube-auth-server
+    spec:
+      containers:
+      - name: wecube-auth-server
+        image: 192.168.150.6:30816/library/platform-auth-server:v4.5.7.12
+        ports:
+        - containerPort: 8002
+        env:
+        - name: LOG_LEVEL
+          value: "info"
+        - name: MYSQL_SERVER_ADDR
+          value: "wecube-mysql"
+        - name: MYSQL_SERVER_PORT
+          value: "3306"
+        - name: MYSQL_USER_NAME
+          value: "root"
+        - name: MYSQL_USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: mysql-password
+        - name: MYSQL_SERVER_DATABASE_NAME
+          value: "auth_server"
+        - name: WECUBE_CORE_ADDRESS
+          value: "wecube-platform-core:8000"
+        - name: PASSWORD_PRIVATE_KEY_PATH
+          value: "/app/platform-auth-server/config/certs/rsa_private_key.pem"
+        - name: SIGNING_KEY
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: signing-key
+        - name: USER_ACCESS_TOKEN
+          value: "20000"
+        - name: USER_REFRESH_TOKEN
+          value: "30000"
+        - name: SENDER_NAME
+          value: ""
+        - name: SENDER_MAIL
+          value: ""
+        - name: AUTH_SERVER
+          value: ""
+        - name: AUTH_PASSWORD
+          value: ""
+        - name: SSL
+          value: "Y"
+        - name: NOTIFY_PERCENT
+          value: "80"
+        - name: ENCRYPT_SEED
+          valueFrom:
+            secretKeyRef:
+              name: wecube-secret
+              key: auth-encrypt-seed
+        - name: TZ
+          value: "Asia/Shanghai"
+        volumeMounts:
+        - name: auth-server-certs
+          mountPath: /app/platform-auth-server/config/certs
+      volumes:
+      - name: localtime
+        hostPath:
+          path: /etc/localtime
+
+  # PVC 模板（证书持久化）
+  volumeClaimTemplates:
+  - metadata:
+      name: auth-server-certs
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "nfs"  # 你用的是 nfs，所以这里写 nfs
+      resources:
+        requests:
+          storage: 1Gi

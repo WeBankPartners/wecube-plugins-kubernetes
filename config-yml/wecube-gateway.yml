@@ -1,0 +1,68 @@
+# ------------------- ClusterIP Service -------------------
+# 使用普通 ClusterIP（非 Headless），kube-proxy 才能做 8005→8080 的端口转发
+# portal Nginx upstream 连接 wecube-gateway:8005，kube-proxy 转发到容器的 8080
+apiVersion: v1
+kind: Service
+metadata:
+  name: wecube-gateway
+  namespace: demo-myapp
+spec:
+  selector:
+    app: wecube-gateway
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8005
+    targetPort: 8080
+
+---
+# ------------------- StatefulSet -------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wecube-gateway
+  namespace: demo-myapp
+spec:
+  serviceName: wecube-gateway
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wecube-gateway
+  template:
+    metadata:
+      labels:
+        app: wecube-gateway
+    spec:
+      containers:
+      - name: wecube-gateway
+        image: 192.168.150.6:30816/library/platform-gateway:v4.5.7
+        ports:
+        - containerPort: 8080
+        env:
+          - name: LOG_LEVEL
+            value: "info"
+          - name: GATEWAY_ROUTE_CONFIG_SERVER
+            value: "http://wecube-platform-core:8000"
+          - name: GATEWAY_ROUTE_CONFIG_URI
+            value: "/platform/v1/route-items"
+          - name: WECUBE_CORE_ADDRESS
+            value: "wecube-platform-core:8000"
+          - name: AUTH_SERVER_ADDRESS
+            value: "wecube-auth-server:8002"
+          - name: HTTP_TIMEOUT_MINUTE
+            value: "30"
+          - name: WECUBE_SUB_SYSTEM_AUTH_CODE
+            value: "U663"
+          - name: WECUBE_SUB_SYSTEM_CORE_CODE
+            value: "U664"
+          - name: WECUBE_SUB_SYSTEM_PLUGIN_CODE
+            value: "U665"
+          - name: TZ
+            value: "Asia/Shanghai"
+        volumeMounts:
+        - name: localtime
+          mountPath: /etc/localtime
+      volumes:
+      - name: localtime
+        hostPath:
+          path: /etc/localtime

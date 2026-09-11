@@ -1,0 +1,15 @@
+# Git 相关
+.git
+.gitignore
+.gitattributes
+
+# 文档
+README.md
+*.md
+
+# 其他
+.DS_Store
+*.swp
+*.swo
+*~
+
