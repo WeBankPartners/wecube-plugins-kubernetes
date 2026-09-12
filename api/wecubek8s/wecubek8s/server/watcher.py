@@ -52,6 +52,7 @@ except Exception as e:
     traceback.print_exc()
 
 from wecubek8s.apps.model import api
+from wecubek8s.common import const
 from wecubek8s.common import wecube
 
 LOG = logging.getLogger(__name__)
@@ -200,7 +201,7 @@ def get_cmdb_client_with_fallback(pod_data, operation_name='CMDB operation'):
     #         }
     #         
     #         try:
-    #             cmdb_client.query('wecmdb', 'pod', test_query)
+    #             cmdb_client.query('wecmdb', const.CmdbCI.POD, test_query)
     #             # 查询成功（即使没有数据），说明token有效
     #             LOG.info('[%s] ✅ Creator token is VALID', operation_name)
     #             LOG.info('[%s] Using creator token for CMDB access (maintains data isolation)', 
@@ -348,7 +349,7 @@ def query_host_resource_guid(cmdb_client, pod_host_ip):
         }
         
         LOG.debug('Querying host_resource from CMDB for IP: %s', pod_host_ip)
-        response = cmdb_client.query('wecmdb', 'host_resource', query_data)
+        response = cmdb_client.query('wecmdb', const.CmdbCI.HOST_RESOURCE, query_data)
         
         if response and response.get('data') and len(response['data']) > 0:
             host_resource_guid = response['data'][0].get('guid')
@@ -424,7 +425,7 @@ def test_query_all_pods_from_cmdb(cmdb_client):
         LOG.info('[TEST-Query-1] Attempting to query all pods without any filter...')
         try:
             # 空查询或者使用一个总是为真的条件
-            all_pods_response = cmdb_client.query('wecmdb', 'pod', {})
+            all_pods_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, {})
             
             if all_pods_response:
                 LOG.info('[TEST-Query-1] ✅ Query successful!')
@@ -468,7 +469,7 @@ def test_query_all_pods_from_cmdb(cmdb_client):
             }
             LOG.info('[TEST-Query-2] Query data: %s', state_query)
             
-            state_pods_response = cmdb_client.query('wecmdb', 'pod', state_query)
+            state_pods_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, state_query)
             
             if state_pods_response:
                 LOG.info('[TEST-Query-2] ✅ Query successful!')
@@ -746,7 +747,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 LOG.info('[HYBRID-CHECK] Querying CMDB for pre-created record by code (pod name): %s', pod_name)
                 LOG.info('[HYBRID-CHECK] Query data: %s', query_data)
                 
-                cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
+                cmdb_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, query_data)
                 found_count = len(cmdb_response.get('data', [])) if cmdb_response else 0
                 
                 LOG.info('[HYBRID-CHECK] Query result: found %d record(s)', found_count)
@@ -813,7 +814,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
             LOG.info('[Step 1.1] Initial query: Checking if Pod record exists by code (pod name): %s', pod_name)
             LOG.info('[Step 1.1] Query data: %s', query_data)
             
-            cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
+            cmdb_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, query_data)
             found_count = len(cmdb_response.get('data', [])) if cmdb_response else 0
             
             LOG.info('[Step 1.1] Query result: found %d record(s)', found_count)
@@ -839,7 +840,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
             }
             
             LOG.info('[BACKUP-DRIFT-CHECK] Querying CMDB with exact match...')
-            drift_response = cmdb_client.query('wecmdb', 'pod', drift_query_data)
+            drift_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, drift_query_data)
             drift_records = drift_response.get('data', []) if drift_response else []
             
             LOG.info('[BACKUP-DRIFT-CHECK] Found %d record(s) with same pod name', len(drift_records))
@@ -875,7 +876,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 
                 try:
                     # 删除旧记录
-                    cmdb_client.delete('wecmdb', 'pod', [{'guid': old_record.get('guid')}])
+                    cmdb_client.delete('wecmdb', const.CmdbCI.POD, [{'guid': old_record.get('guid')}])
                     LOG.info('[BACKUP-DRIFT-DELETE] ✅ Successfully deleted stale Pod record')
                     LOG.info('[BACKUP-DRIFT-DELETE]    GUID: %s', old_record.get('guid'))
                     LOG.info('[BACKUP-DRIFT-DELETE]    asset_id: %s', old_record.get('asset_id'))
@@ -938,7 +939,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 LOG.info('[Step 1.3] [Retry %d/%d] Querying CMDB by code (pod name): %s', 
                         attempt, actual_max_retries, pod_name)
                 
-                cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
+                cmdb_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, query_data)
                 found_count = len(cmdb_response.get('data', [])) if cmdb_response else 0
                 
                 LOG.info('[Step 1.3] [Retry %d/%d] Query result: found %d record(s)', 
@@ -1087,7 +1088,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
             try:
                 # CMDB 的 code 字段有唯一性约束，天然支持跨进程去重
                 # 如果多个 watcher 同时创建，只有一个会成功，其他会失败（然后查询到已存在的记录）
-                create_response = cmdb_client.create('wecmdb', 'pod', [create_data])
+                create_response = cmdb_client.create('wecmdb', const.CmdbCI.POD, [create_data])
                 
                 if create_response and create_response.get('data') and len(create_response['data']) > 0:
                     created_pod = create_response['data'][0]
@@ -1125,7 +1126,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     time.sleep(1)  # 等待 1 秒确保其他 watcher 创建完成
                     
                     # 重新查询
-                    retry_response = cmdb_client.query('wecmdb', 'pod', query_data)
+                    retry_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, query_data)
                     if retry_response and retry_response.get('data') and len(retry_response['data']) > 0:
                         existing_pod = retry_response['data'][0]
                         existing_guid = existing_pod.get('guid')
@@ -1142,7 +1143,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                                 'host_resource': host_resource_guid  # 确保 host_resource 也更新
                             }
                             
-                            cmdb_client.update('wecmdb', 'pod', [update_data])
+                            cmdb_client.update('wecmdb', const.CmdbCI.POD, [update_data])
                             LOG.info('[CREATE-Step-4] ✅ Updated asset_id and host_resource successfully')
                         
                         LOG.info('='*60)
@@ -1201,7 +1202,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                         "condition": pod_id
                     }
                 }
-                check_response = cmdb_client.query('wecmdb', 'pod', check_query)
+                check_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, check_query)
                 
                 if check_response and check_response.get('data'):
                     for duplicate_pod in check_response['data']:
@@ -1210,7 +1211,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                             LOG.warning('⚠️  Found duplicate pod with same asset_id %s (guid=%s), deleting...', 
                                        pod_id, dup_guid)
                             try:
-                                cmdb_client.delete('wecmdb', 'pod', [{'guid': dup_guid}])
+                                cmdb_client.delete('wecmdb', const.CmdbCI.POD, [{'guid': dup_guid}])
                                 LOG.info('✅ Deleted duplicate pod record: guid=%s', dup_guid)
                             except Exception as del_err:
                                 LOG.error('Failed to delete duplicate pod: %s', str(del_err))
@@ -1270,7 +1271,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
             # 只有在 apply API 没设置时才可能需要更新，但那是 apply 的 bug，watcher 不处理
             
             try:
-                update_response = cmdb_client.update('wecmdb', 'pod', [update_data])
+                update_response = cmdb_client.update('wecmdb', const.CmdbCI.POD, [update_data])
                 LOG.info('[Step 2] ✅ Successfully UPDATED pod in CMDB')
                 LOG.info('   Pod: %s (guid: %s)', pod_name, pod_guid)
                 LOG.info('   asset_id: %s', pod_id)
@@ -1356,7 +1357,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     LOG.info('[Step 2-Fallback] Create data: %s', create_data)
                     
                     try:
-                        create_response = cmdb_client.create('wecmdb', 'pod', [create_data])
+                        create_response = cmdb_client.create('wecmdb', const.CmdbCI.POD, [create_data])
                         
                         if create_response and create_response.get('data') and len(create_response['data']) > 0:
                             created_pod = create_response['data'][0]
@@ -1464,7 +1465,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
         }
         
         LOG.info('[Query-1] Querying CMDB by code (pod name): %s', pod_name)
-        cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
+        cmdb_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, query_data)
         LOG.info('[Query-1] Response status: %s', 
                 'SUCCESS' if cmdb_response and cmdb_response.get('data') else 'NO DATA')
         
@@ -1492,7 +1493,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
                     "condition": pod_name
                 }
             }
-            cmdb_response_keyname = cmdb_client.query('wecmdb', 'pod', query_by_keyname)
+            cmdb_response_keyname = cmdb_client.query('wecmdb', const.CmdbCI.POD, query_by_keyname)
             LOG.info('[Query-2] Response status: %s', 
                     'SUCCESS' if cmdb_response_keyname and cmdb_response_keyname.get('data') else 'NO DATA')
             
@@ -1518,7 +1519,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
                         }
                     }
                     
-                    cmdb_response_by_id = cmdb_client.query('wecmdb', 'pod', query_by_asset_id)
+                    cmdb_response_by_id = cmdb_client.query('wecmdb', const.CmdbCI.POD, query_by_asset_id)
                     LOG.info('[Query-3] Response status: %s', 
                             'SUCCESS' if cmdb_response_by_id and cmdb_response_by_id.get('data') else 'NO DATA')
                     
@@ -1548,7 +1549,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             try:
                 LOG.info('[Query-4-Fuzzy] Step 1: Query all pods')
                 fuzzy_query = {}
-                fuzzy_response = cmdb_client.query('wecmdb', 'pod', fuzzy_query)
+                fuzzy_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, fuzzy_query)
                 
                 if fuzzy_response and fuzzy_response.get('data') and len(fuzzy_response['data']) > 0:
                     total_pods = len(fuzzy_response['data'])
@@ -1747,7 +1748,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
             LOG.info('')
             
             LOG.info('[DELETE] Executing CMDB delete operation...')
-            cmdb_client.delete('wecmdb', 'pod', [{'guid': pod_guid}])
+            cmdb_client.delete('wecmdb', const.CmdbCI.POD, [{'guid': pod_guid}])
             
             LOG.info('='*60)
             LOG.info('✅ Successfully deleted pod from CMDB')

@@ -1498,7 +1498,7 @@ class StatefulSet:
             }
             
             LOG.debug('Querying CMDB for host_resource with ip_address: %s', pod_host_ip)
-            response = cmdb_client.query('wecmdb', 'host_resource', query_data)
+            response = cmdb_client.query('wecmdb', const.CmdbCI.HOST_RESOURCE, query_data)
             
             if response and response.get('data'):
                 if len(response['data']) > 0:
@@ -1872,7 +1872,7 @@ class StatefulSet:
             }
             
             LOG.info('Querying CMDB for pods with instanceId: %s', instance_id)
-            cmdb_response = cmdb_client.query('wecmdb', 'pod', query_data)
+            cmdb_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, query_data)
             
             # 记录 CMDB 响应（用于调试）
             if cmdb_response:
@@ -1969,7 +1969,7 @@ class StatefulSet:
             if creates:
                 LOG.info('Creating %d new pods in CMDB', len(creates))
                 try:
-                    cmdb_client.create('wecmdb', 'pod', creates)
+                    cmdb_client.create('wecmdb', const.CmdbCI.POD, creates)
                     LOG.info('Successfully created %d pods in CMDB', len(creates))
                 except Exception as e:
                     LOG.error('Failed to create pods in CMDB: %s', str(e))
@@ -1977,7 +1977,7 @@ class StatefulSet:
             if updates:
                 LOG.info('Updating %d existing pods in CMDB', len(updates))
                 try:
-                    cmdb_client.update('wecmdb', 'pod', updates)
+                    cmdb_client.update('wecmdb', const.CmdbCI.POD, updates)
                     LOG.info('Successfully updated %d pods in CMDB', len(updates))
                 except Exception as e:
                     LOG.error('Failed to update pods in CMDB: %s', str(e))

@@ -10,6 +10,7 @@ from talos.core import config
 from talos.core.i18n import _
 
 from wecubek8s.common import controller
+from wecubek8s.common import const
 from wecubek8s.common import exceptions
 from wecubek8s.common import utils as k8s_utils
 from wecubek8s.apps.plugin import rules
@@ -189,7 +190,7 @@ class StatefulSet(controller.Plugin):
             }
             
             LOG.info('Querying pvc from CMDB with guid: %s, query_data: %s', guid, query_data)
-            response = cmdb_client.query('wecmdb', 'pvc', query_data)
+            response = cmdb_client.query('wecmdb', const.CmdbCI.PVC, query_data)
             LOG.debug('CMDB response received: %s', response)
             
             if response and response.get('data') and len(response['data']) > 0:
