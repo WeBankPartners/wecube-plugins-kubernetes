@@ -82,6 +82,11 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get", "list"]
+
+  # ⭐ Pod 终端 exec 权限（terminal 插件需要）
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
   
   # ⭐ Node 监控相关权限
   - apiGroups: [""]

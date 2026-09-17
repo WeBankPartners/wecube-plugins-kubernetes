@@ -26,6 +26,42 @@ Watcher：提供持续的事件监听，触发wecube编排
 
 应用部署：支持无状态的应用部署管理，支持私有化镜像，以及LB配置
 
+容器化部署时，WeCube 先完成差异化变量替换并生成应用配置包，再调用本插件的 StatefulSet apply：
+
+```mermaid
+flowchart TD
+  A[1 编排读取实例与模板] --> B[2 差异化变量替换]
+  B --> C[3 生成配置 tar.gz]
+  C --> D[4 上传对象存储得到 packageUrl]
+  D --> E[5 POST /statefulsets/apply]
+
+  E --> F[A 校验 envs / PVC / 默认值]
+  F --> G[B 组装 STS 模板]
+  G --> G1[镜像 + 探针 + 部署脚本]
+  G --> G2[packageUrl 挂 initContainer]
+  G --> G3[Headless / LB Service]
+  G --> G4[ensure namespace]
+  G1 --> H{C STS 是否已存在}
+  G2 --> H
+  G3 --> H
+  G4 --> H
+  H -->|否| I[create]
+  H -->|是| J[replace 并删除 CrashLoop Pod]
+  I --> K[D wait_for_ready 循环]
+  J --> K
+
+  K --> L[init 下载解压后退出]
+  L --> M[应用容器拷配置并启动]
+  M --> N[每 5 秒读 ready 与 revision]
+  N -->|未齐| N
+  N -->|齐| O[Running 且 Ready]
+  O --> P[30s 后检查 Pod 失败]
+  P -->|镜像/配置/CrashLoop 大于等于 3 次/Failed| Q[立即失败]
+  P -->|Evicted / NodeLost| N
+  O -->|全部 Ready| R[E 回写 CMDB 并返回]
+  N -->|超时 480s| S[拉日志后失败]
+```
+
 多k8s集群：支持多套K8s集群管理，应用部署更统一
 
 事件监听：根据场景自定义编排任务快速响应，自动化处理
