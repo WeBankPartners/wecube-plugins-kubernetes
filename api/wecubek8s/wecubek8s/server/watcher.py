@@ -440,14 +440,15 @@ def test_query_all_pods_from_cmdb(cmdb_client):
                 if pod_count > 0:
                     LOG.info('[TEST-Query-1] 📋 Listing all pods:')
                     for idx, pod in enumerate(pods_data, 1):
-                        LOG.info('[TEST-Query-1]   [%d] guid=%s, code=%s, key_name=%s, asset_id=%s, state=%s, app_instance=%s',
+                        LOG.info('[TEST-Query-1]   [%d] guid=%s, code=%s, key_name=%s, asset_id=%s, state=%s, %s=%s',
                                 idx,
                                 pod.get('guid', 'N/A'),
                                 pod.get('code', 'N/A'),
                                 pod.get('key_name', 'N/A'),
                                 pod.get('asset_id', 'N/A'),
                                 pod.get('state', 'N/A'),
-                                pod.get('app_instance', 'N/A'))
+                                const.CmdbAttr.APP_INSTANCE,
+                                pod.get(const.CmdbAttr.APP_INSTANCE, 'N/A'))
                 else:
                     LOG.warning('[TEST-Query-1] ⚠️  No pods found in CMDB')
             else:
@@ -481,13 +482,14 @@ def test_query_all_pods_from_cmdb(cmdb_client):
                 if pod_count > 0:
                     LOG.info('[TEST-Query-2] 📋 Listing pods in created_0 state:')
                     for idx, pod in enumerate(pods_data, 1):
-                        LOG.info('[TEST-Query-2]   [%d] guid=%s, code=%s, key_name=%s, asset_id=%s, app_instance=%s',
+                        LOG.info('[TEST-Query-2]   [%d] guid=%s, code=%s, key_name=%s, asset_id=%s, %s=%s',
                                 idx,
                                 pod.get('guid', 'N/A'),
                                 pod.get('code', 'N/A'),
                                 pod.get('key_name', 'N/A'),
                                 pod.get('asset_id', 'N/A'),
-                                pod.get('app_instance', 'N/A'))
+                                const.CmdbAttr.APP_INSTANCE,
+                                pod.get(const.CmdbAttr.APP_INSTANCE, 'N/A'))
                 else:
                     LOG.warning('[TEST-Query-2] ⚠️  No pods in created_0 state')
             else:
@@ -887,7 +889,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                         'timestamp': time.time(),
                         'guid': old_record.get('guid'),
                         'old_asset_id': old_record.get('asset_id'),
-                        'host_ip': old_record.get('host_resource'),
+                        'host_ip': old_record.get(const.CmdbAttr.HOST_RESOURCE),
                         'cluster_id': cluster_id
                     }
                     with _recently_deleted_pods_lock:
@@ -1078,8 +1080,8 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 'code': pod_name,
                 'key_name': pod_name,
                 'asset_id': pod_id,  # K8s UID（带 cluster_id 前缀）
-                'app_instance': app_instance_guid,  # 从 StatefulSet 继承（必需）
-                'host_resource': host_resource_guid,  # 从 host_ip 查询（必需）
+                const.CmdbAttr.APP_INSTANCE: app_instance_guid,  # 从 StatefulSet 继承（必需）
+                const.CmdbAttr.HOST_RESOURCE: host_resource_guid,  # 从 host_ip 查询（必需）
                 'state': 'created_0'  # 默认状态
             }
             
@@ -1140,7 +1142,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                             update_data = {
                                 'guid': existing_guid,
                                 'asset_id': pod_id,
-                                'host_resource': host_resource_guid  # 确保 host_resource 也更新
+                                const.CmdbAttr.HOST_RESOURCE: host_resource_guid
                             }
                             
                             cmdb_client.update('wecmdb', const.CmdbCI.POD, [update_data])
@@ -1164,8 +1166,8 @@ def sync_pod_to_cmdb_on_added(pod_data):
             existing_pod = cmdb_response['data'][0]
             pod_guid = existing_pod.get('guid')
             existing_asset_id = existing_pod.get('asset_id')
-            existing_host_resource = existing_pod.get('host_resource')
-            existing_app_instance = existing_pod.get('app_instance')  # 读取已有的 app_instance
+            existing_host_resource = existing_pod.get(const.CmdbAttr.HOST_RESOURCE)
+            existing_app_instance = existing_pod.get(const.CmdbAttr.APP_INSTANCE)
             
             LOG.info('[Step 2] Found existing pod by code: guid=%s, asset_id=%s', 
                     pod_guid, existing_asset_id or 'NULL')
@@ -1236,7 +1238,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     else:
                         LOG.info('✓ Host unchanged: %s (IP: %s)', host_resource_guid, pod_host_ip)
                     # 设置 host_resource（确保数据一致性）
-                    update_data['host_resource'] = host_resource_guid
+                    update_data[const.CmdbAttr.HOST_RESOURCE] = host_resource_guid
                 else:
                     LOG.error('[Step 2] ❌ Cannot find host_resource for IP %s in CMDB', pod_host_ip)
                     LOG.error('[Step 2] Cannot update Pod without host_resource')
@@ -1275,7 +1277,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 LOG.info('[Step 2] ✅ Successfully UPDATED pod in CMDB')
                 LOG.info('   Pod: %s (guid: %s)', pod_name, pod_guid)
                 LOG.info('   asset_id: %s', pod_id)
-                LOG.info('   host_resource: %s', update_data.get('host_resource', 'NOT_CHANGED'))
+                LOG.info('   %s: %s', const.CmdbAttr.HOST_RESOURCE, update_data.get(const.CmdbAttr.HOST_RESOURCE, 'NOT_CHANGED'))
                 LOG.info('='*60)
                 
                 # 【修复】判断是否需要发送通知
@@ -1349,8 +1351,8 @@ def sync_pod_to_cmdb_on_added(pod_data):
                         'code': pod_name,
                         'key_name': pod_name,
                         'asset_id': pod_id,
-                        'app_instance': app_instance_guid,  # 必需
-                        'host_resource': host_resource_guid,  # 必需
+                        const.CmdbAttr.APP_INSTANCE: app_instance_guid,  # 必需
+                        const.CmdbAttr.HOST_RESOURCE: host_resource_guid,  # 必需
                         'state': 'created_0'
                     }
                     
@@ -1369,7 +1371,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                             LOG.info('   Pod GUID: %s', created_guid)
                             LOG.info('   asset_id: %s', pod_id)
                             LOG.info('   app_instance: %s', app_instance_guid)
-                            LOG.info('   host_resource: %s', create_data.get('host_resource', 'N/A'))
+                            LOG.info('   %s: %s', const.CmdbAttr.HOST_RESOURCE, create_data.get(const.CmdbAttr.HOST_RESOURCE, 'N/A'))
                             LOG.info('   🔔 This is a POD DRIFT scenario - WeCube notification WILL be sent')
                             LOG.info('='*60)
                             # 返回 (guid, is_pod_drift=True) 标记这是 Pod 漂移场景，需要发送通知
@@ -1767,7 +1769,7 @@ def sync_pod_to_cmdb_on_deleted(pod_data):
                 'timestamp': time.time(),
                 'guid': pod_guid,
                 'old_asset_id': existing_asset_id,  # 使用 CMDB 中的 asset_id（可能是旧的）
-                'host_ip': existing_pod.get('host_resource') if existing_pod else None,  # 保存旧的 host_resource
+                'host_ip': existing_pod.get(const.CmdbAttr.HOST_RESOURCE) if existing_pod else None,
                 'cluster_id': cluster_id,  # 保存 cluster_id 供日志使用（非 key 的一部分）
                 'uid_mismatch': uid_mismatch_detected  # 标记是否 UID 不匹配
             }

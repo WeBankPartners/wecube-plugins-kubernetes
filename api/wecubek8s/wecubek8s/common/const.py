@@ -29,6 +29,19 @@ class CmdbCI:
     )
 
 
+class CmdbAttr:
+    """WeCMDB attribute names on the Pod CI, injected by Kubernetes plugin system parameters."""
+
+    APP_INSTANCE = (
+        os.getenv('KUBERNETES_CMDB_APP_INSTANCE_ATTR', 'app_instance').strip()
+        or 'app_instance'
+    )
+    HOST_RESOURCE = (
+        os.getenv('KUBERNETES_CMDB_HOST_RESOURCE_ATTR', 'host_resource').strip()
+        or 'host_resource'
+    )
+
+
 class Registry:
     """镜像仓库相关常量"""
     # initContainer 镜像名称（不含仓库地址）

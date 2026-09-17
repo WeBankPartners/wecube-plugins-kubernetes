@@ -1865,13 +1865,13 @@ class StatefulSet:
             # 1. 查询 CMDB 中该 instanceId 下的所有 Pod
             query_data = {
                 "criteria": {
-                    "attrName": "app_instance",  # CMDB 字段名：app_instance
+                    "attrName": const.CmdbAttr.APP_INSTANCE,
                     "op": "eq",
                     "condition": instance_id
                 }
             }
             
-            LOG.info('Querying CMDB for pods with instanceId: %s', instance_id)
+            LOG.info('Querying CMDB for pods with %s: %s', const.CmdbAttr.APP_INSTANCE, instance_id)
             cmdb_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, query_data)
             
             # 记录 CMDB 响应（用于调试）
@@ -1933,9 +1933,9 @@ class StatefulSet:
                         if pod_host_ip:
                             host_resource_guid = self._query_host_resource_guid(cmdb_client, pod_host_ip)
                             if host_resource_guid:
-                                update_data['host_resource'] = host_resource_guid  # CMDB 字段名：host_resource（关联的 host_resource GUID）
-                                LOG.info('Pod %s will update with host_resource GUID: %s (IP: %s)', 
-                                        pod_name, host_resource_guid, pod_host_ip)
+                                update_data[const.CmdbAttr.HOST_RESOURCE] = host_resource_guid
+                                LOG.info('Pod %s will update with %s GUID: %s (IP: %s)',
+                                        pod_name, const.CmdbAttr.HOST_RESOURCE, host_resource_guid, pod_host_ip)
                             else:
                                 LOG.warning('Pod %s has host_ip %s but no matching host_resource found in CMDB', 
                                            pod_name, pod_host_ip)
@@ -1949,15 +1949,15 @@ class StatefulSet:
                     create_data = {
                         'code': pod_name,  # CMDB 字段名：code（Pod 名称）
                         'asset_id': pod_id,  # CMDB 字段名：asset_id（K8s Pod UID）
-                        'app_instance': instance_id  # CMDB 字段名：app_instance（关联的 StatefulSet）
+                        const.CmdbAttr.APP_INSTANCE: instance_id
                     }
                     # 如果有 host_ip，查询对应的 host_resource GUID
                     if pod_host_ip:
                         host_resource_guid = self._query_host_resource_guid(cmdb_client, pod_host_ip)
                         if host_resource_guid:
-                            create_data['host_resource'] = host_resource_guid  # CMDB 字段名：host_resource（关联的 host_resource GUID）
-                            LOG.info('Pod %s will create with host_resource GUID: %s (IP: %s)', 
-                                    pod_name, host_resource_guid, pod_host_ip)
+                            create_data[const.CmdbAttr.HOST_RESOURCE] = host_resource_guid
+                            LOG.info('Pod %s will create with %s GUID: %s (IP: %s)',
+                                    pod_name, const.CmdbAttr.HOST_RESOURCE, host_resource_guid, pod_host_ip)
                         else:
                             LOG.warning('Pod %s has host_ip %s but no matching host_resource found in CMDB', 
                                        pod_name, pod_host_ip)
