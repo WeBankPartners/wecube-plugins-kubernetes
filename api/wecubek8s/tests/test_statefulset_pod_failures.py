@@ -59,21 +59,46 @@ plugin_api = _load_plugin_api()
 
 class FakeK8sClient:
     def __init__(self, pods):
-        self._pods = pods
+        self._pods = {pod.metadata.name: pod for pod in pods}
+        self.deleted = []
 
     def list_pod(self, namespace, label_selector=None):
-        return types.SimpleNamespace(items=self._pods)
+        return types.SimpleNamespace(items=list(self._pods.values()))
+
+    def get_pod(self, name, namespace):
+        return self._pods.get(name)
+
+    def delete_pod(self, name, namespace):
+        self.deleted.append(name)
+        self._pods.pop(name, None)
 
 
-def _pod(name, phase, reason=None, message=None, container_statuses=None):
+def _pod(name, phase, reason=None, message=None, container_statuses=None,
+         image=None, deletion_timestamp=None):
+    containers = []
+    if image:
+        containers.append(types.SimpleNamespace(image=image))
     return types.SimpleNamespace(
-        metadata=types.SimpleNamespace(name=name),
+        metadata=types.SimpleNamespace(name=name, deletion_timestamp=deletion_timestamp),
+        spec=types.SimpleNamespace(containers=containers),
         status=types.SimpleNamespace(
             phase=phase,
             reason=reason,
             message=message,
             container_statuses=container_statuses or [],
             init_container_statuses=[],
+        ),
+    )
+
+
+def _waiting_container(name, reason, message='', restart_count=0):
+    return types.SimpleNamespace(
+        name=name,
+        restart_count=restart_count,
+        state=types.SimpleNamespace(
+            waiting=types.SimpleNamespace(reason=reason, message=message),
+            running=None,
+            terminated=None,
         ),
     )
 
@@ -150,3 +175,131 @@ def test_pod_ready_timeout_request_overrides_system_parameter():
     })
 
     assert timeout == 120
+
+
+def test_image_pull_backoff_pod_is_deleted_to_unblock_rollout():
+    pod = _pod(
+        'onboarding-0',
+        'Pending',
+        container_statuses=[
+            _waiting_container(
+                'ials-onboarding',
+                'ImagePullBackOff',
+                message='Back-off pulling image "old-tag"',
+            )
+        ],
+        image='registry.example/app:old-tag',
+    )
+    client = FakeK8sClient([pod])
+
+    deleted = plugin_api.StatefulSet()._delete_stuck_pods_blocking_rollout(
+        client, 'onboarding', 'adm-loan', 1
+    )
+
+    assert deleted == ['onboarding-0']
+    assert client.deleted == ['onboarding-0']
+
+
+def test_crashloop_pod_is_still_deleted_to_unblock_rollout():
+    pod = _pod(
+        'repayment-h5-0',
+        'Running',
+        container_statuses=[
+            _waiting_container('ials-repaymenth5', 'CrashLoopBackOff', restart_count=5)
+        ],
+        image='registry.example/app:same-tag',
+    )
+    client = FakeK8sClient([pod])
+
+    deleted = plugin_api.StatefulSet()._delete_stuck_pods_blocking_rollout(
+        client, 'repayment-h5', 'adm-loan', 1
+    )
+
+    assert deleted == ['repayment-h5-0']
+
+
+def test_running_pod_is_not_deleted_during_rollout_check():
+    pod = _pod('onboarding-0', 'Running', image='registry.example/app:new-tag')
+    client = FakeK8sClient([pod])
+
+    deleted = plugin_api.StatefulSet()._delete_stuck_pods_blocking_rollout(
+        client, 'onboarding', 'adm-loan', 1
+    )
+
+    assert deleted == []
+    assert client.deleted == []
+
+
+def test_stale_image_pull_error_is_not_fatal_for_new_apply():
+    pod = _pod(
+        'onboarding-0',
+        'Pending',
+        container_statuses=[
+            _waiting_container(
+                'ials-onboarding',
+                'ImagePullBackOff',
+                message='Back-off pulling image "old-tag"',
+            )
+        ],
+        image='registry.example/app:old-tag',
+    )
+
+    has_error, error_message = plugin_api.StatefulSet()._check_pod_failures(
+        FakeK8sClient([pod]),
+        'onboarding',
+        'adm-loan',
+        desired_images={'registry.example/app:new-tag'},
+    )
+
+    assert has_error is False
+    assert error_message is None
+
+
+def test_current_image_pull_error_is_still_fatal():
+    pod = _pod(
+        'onboarding-0',
+        'Pending',
+        container_statuses=[
+            _waiting_container(
+                'ials-onboarding',
+                'ImagePullBackOff',
+                message='Back-off pulling image "new-tag"',
+            )
+        ],
+        image='registry.example/app:new-tag',
+    )
+
+    has_error, error_message = plugin_api.StatefulSet()._check_pod_failures(
+        FakeK8sClient([pod]),
+        'onboarding',
+        'adm-loan',
+        desired_images={'registry.example/app:new-tag'},
+    )
+
+    assert has_error is True
+    assert 'ImagePullBackOff' in error_message
+    assert 'new-tag' in error_message
+
+
+def test_terminating_pod_is_not_fatal_and_not_deleted():
+    pod = _pod(
+        'onboarding-0',
+        'Pending',
+        container_statuses=[
+            _waiting_container('ials-onboarding', 'ImagePullBackOff')
+        ],
+        image='registry.example/app:old-tag',
+        deletion_timestamp='2026-09-18T08:00:00Z',
+    )
+    client = FakeK8sClient([pod])
+
+    deleted = plugin_api.StatefulSet()._delete_stuck_pods_blocking_rollout(
+        client, 'onboarding', 'adm-loan', 1
+    )
+    has_error, error_message = plugin_api.StatefulSet()._check_pod_failures(
+        client, 'onboarding', 'adm-loan'
+    )
+
+    assert deleted == []
+    assert has_error is False
+    assert error_message is None

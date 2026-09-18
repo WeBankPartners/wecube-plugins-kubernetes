@@ -17,6 +17,20 @@ from wecubek8s.apps.plugin import utils as api_utils
 CONF = config.CONF
 LOG = logging.getLogger(__name__)
 
+# Waiting reasons that mean a Pod will never become Ready.
+# StatefulSet OrderedReady RollingUpdate waits for the current Pod to be Ready
+# before applying a new template, so these states deadlock the rollout until
+# the stuck Pod is deleted and recreated from the latest spec.
+STUCK_WAITING_REASONS = frozenset((
+    'ImagePullBackOff',
+    'ErrImagePull',
+    'CrashLoopBackOff',
+    'CreateContainerConfigError',
+    'InvalidImageName',
+    'ImageInspectError',
+    'ErrImageNeverPull',
+))
+
 
 # ==================== 健康检查探针辅助函数 ====================
 
@@ -1656,14 +1670,107 @@ class StatefulSet:
                     details.append(detail)
 
         return '; '.join(details)
+
+    @staticmethod
+    def _is_pod_terminating(pod):
+        metadata = getattr(pod, 'metadata', None)
+        return bool(getattr(metadata, 'deletion_timestamp', None))
+
+    @staticmethod
+    def _iter_container_statuses(pod):
+        status = getattr(pod, 'status', None)
+        if not status:
+            return
+        for container_status in getattr(status, 'init_container_statuses', None) or []:
+            yield container_status
+        for container_status in getattr(status, 'container_statuses', None) or []:
+            yield container_status
+
+    @classmethod
+    def _find_stuck_waiting(cls, pod):
+        """Return (container_name, reason, restart_count) if the Pod is stuck."""
+        for container_status in cls._iter_container_statuses(pod):
+            state = getattr(container_status, 'state', None)
+            waiting = getattr(state, 'waiting', None) if state else None
+            reason = getattr(waiting, 'reason', None) if waiting else None
+            if reason in STUCK_WAITING_REASONS:
+                return (
+                    getattr(container_status, 'name', '') or '',
+                    reason,
+                    getattr(container_status, 'restart_count', 0) or 0,
+                )
+        return None
+
+    @staticmethod
+    def _container_image(container):
+        if isinstance(container, dict):
+            return container.get('image') or ''
+        return getattr(container, 'image', None) or ''
+
+    @classmethod
+    def _pod_main_images(cls, pod):
+        spec = getattr(pod, 'spec', None)
+        containers = getattr(spec, 'containers', None) if spec else None
+        return {cls._container_image(container) for container in (containers or [])
+                if cls._container_image(container)}
+
+    @classmethod
+    def _template_main_images(cls, resource_template):
+        try:
+            containers = (((resource_template or {}).get('spec') or {})
+                          .get('template', {}).get('spec', {}).get('containers')) or []
+        except AttributeError:
+            return set()
+        return {cls._container_image(container) for container in containers
+                if cls._container_image(container)}
+
+    def _delete_stuck_pods_blocking_rollout(self, k8s_client, resource_name, namespace, replicas):
+        """Delete never-Ready Pods so OrderedReady RollingUpdate can apply the new template.
+
+        ImagePullBackOff / ErrImagePull / CrashLoopBackOff (and similar waiting
+        reasons) never become Ready, so the StatefulSet controller will not
+        replace them after a spec change. Delete once; the controller recreates
+        from the latest template.
+        """
+        deleted = []
+        for index in range(int(replicas or 1)):
+            pod_name = '%s-%d' % (resource_name, index)
+            try:
+                pod = k8s_client.get_pod(pod_name, namespace)
+                if not pod or self._is_pod_terminating(pod):
+                    continue
+                stuck = self._find_stuck_waiting(pod)
+                if not stuck:
+                    continue
+                container_name, reason, restart_count = stuck
+                LOG.warning(
+                    '[RollingUpdate] Pod %s/%s container "%s" is in %s '
+                    '(restarts=%d), deleting to unblock OrderedReady RollingUpdate.',
+                    namespace, pod_name, container_name, reason, restart_count,
+                )
+                k8s_client.delete_pod(pod_name, namespace)
+                deleted.append(pod_name)
+            except Exception as exc:
+                LOG.warning('[RollingUpdate] Failed to check/delete Pod %s: %s',
+                            pod_name, str(exc))
+        if deleted:
+            LOG.info('[RollingUpdate] Deleted %d stuck pod(s): %s. '
+                     'StatefulSet will recreate them with the new template.',
+                     len(deleted), deleted)
+        else:
+            LOG.info('[RollingUpdate] No stuck never-Ready pods found, '
+                     'RollingUpdate proceeds normally.')
+        return deleted
     
-    def _check_pod_failures(self, k8s_client, statefulset_name, namespace):
+    def _check_pod_failures(self, k8s_client, statefulset_name, namespace, desired_images=None):
         """检查 Pod 是否有创建失败的情况
         
         Args:
             k8s_client: Kubernetes 客户端
             statefulset_name: StatefulSet 名称
             namespace: 命名空间
+            desired_images: 本次 apply 的主容器镜像集合。若 Pod 仍使用旧镜像，
+                视为滚动更新尚未完成，不把旧错误当成本次部署的致命失败。
         
         Returns:
             tuple: (has_fatal_error: bool, error_message: str or None)
@@ -1689,6 +1796,17 @@ class StatefulSet:
             
             for pod in pod_list.items:
                 pod_name = pod.metadata.name
+                if self._is_pod_terminating(pod):
+                    LOG.info('Skipping terminating Pod %s during failure check', pod_name)
+                    continue
+                if desired_images:
+                    pod_images = self._pod_main_images(pod)
+                    if pod_images and pod_images != set(desired_images):
+                        LOG.warning(
+                            'Skipping stale Pod %s during failure check '
+                            '(pod images %s != desired %s)',
+                            pod_name, pod_images, desired_images)
+                        continue
                 phase = pod.status.phase if pod.status else 'Unknown'
                 
                 # 检查 Pod Phase 失败状态
@@ -2144,43 +2262,17 @@ class StatefulSet:
             # 注意: replace 需要保留 resourceVersion
             resource_template['metadata']['resourceVersion'] = exists_resource.metadata.resource_version
             exists_resource = k8s_client.replace_statefulset(resource_name, data['namespace'], resource_template)
-            # StatefulSet 配置了 updateStrategy.type=RollingUpdate，K8s 会自动从最高序号 Pod 开始
-            # 逐个滚动更新，确保每个 Pod Ready 后再更新下一个，无需手动删除 Pod。
-            LOG.info('StatefulSet %s/%s updated, K8s RollingUpdate will handle pod restarts automatically.',
+            # OrderedReady RollingUpdate 会等当前 Pod Ready 再滚下一个。
+            # ImagePullBackOff / CrashLoopBackOff 等状态永远不会 Ready，必须主动删除
+            # 卡住的旧 Pod，控制器才会用新模板重建。
+            LOG.info('StatefulSet %s/%s updated, checking for stuck pods that block RollingUpdate.',
                      data['namespace'], resource_name)
-
-            # ==================== 处理 CrashLoopBackOff Pod（RollingUpdate 的死锁问题）====================
-            # K8s RollingUpdate 要求"旧 Pod Ready 才滚下一个"，而 CrashLoopBackOff 的 Pod 永远不会 Ready，
-            # 导致新模板永远无法被应用。检测到这种情况时，主动删除 CrashLoopBackOff 的 Pod，
-            # 让 StatefulSet 控制器用新模板重建，打破死锁。
             try:
-                replicas_count = int(data.get('replicas', 1))
-                crash_pods_deleted = []
-                for i in range(replicas_count):
-                    pod_name = f"{resource_name}-{i}"
-                    try:
-                        pod = k8s_client.get_pod(pod_name, data['namespace'])
-                        if pod and pod.status and pod.status.container_statuses:
-                            for cs in pod.status.container_statuses:
-                                if (cs.state and cs.state.waiting
-                                        and cs.state.waiting.reason == 'CrashLoopBackOff'):
-                                    LOG.warning('[CrashLoopBackOff] Pod %s/%s container "%s" is in '
-                                                'CrashLoopBackOff (restarts=%d), deleting to unblock RollingUpdate.',
-                                                data['namespace'], pod_name, cs.name,
-                                                cs.restart_count or 0)
-                                    k8s_client.delete_pod(pod_name, data['namespace'])
-                                    crash_pods_deleted.append(pod_name)
-                                    break
-                    except Exception as e:
-                        LOG.warning('[CrashLoopBackOff] Failed to check/delete Pod %s: %s', pod_name, str(e))
-                if crash_pods_deleted:
-                    LOG.info('[CrashLoopBackOff] Deleted %d CrashLoopBackOff pod(s): %s. '
-                             'StatefulSet will recreate them with the new template.',
-                             len(crash_pods_deleted), crash_pods_deleted)
-                else:
-                    LOG.info('[CrashLoopBackOff] No CrashLoopBackOff pods found, RollingUpdate proceeds normally.')
+                self._delete_stuck_pods_blocking_rollout(
+                    k8s_client, resource_name, data['namespace'],
+                    data.get('replicas', 1))
             except Exception as e:
-                LOG.warning('[CrashLoopBackOff] Error during CrashLoopBackOff check: %s (non-fatal, continuing)',
+                LOG.warning('[RollingUpdate] Error during stuck-pod check: %s (non-fatal, continuing)',
                             str(e))
         
         # ==================== 等待 Pod 就绪（解决异步创建问题）====================
@@ -2240,7 +2332,8 @@ class StatefulSet:
                             # 检查是否有 Pod 创建失败（30秒后开始检查）
                             if attempt > 6:
                                 has_fatal_error, error_message = self._check_pod_failures(
-                                    k8s_client, resource_name, data['namespace']
+                                    k8s_client, resource_name, data['namespace'],
+                                    desired_images=self._template_main_images(resource_template),
                                 )
                                 
                                 # 检测到致命错误，立即退出
