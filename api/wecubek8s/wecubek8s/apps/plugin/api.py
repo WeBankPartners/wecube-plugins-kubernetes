@@ -20,7 +20,9 @@ LOG = logging.getLogger(__name__)
 # Waiting reasons that mean a Pod will never become Ready.
 # StatefulSet OrderedReady RollingUpdate waits for the current Pod to be Ready
 # before applying a new template, so these states deadlock the rollout until
-# the stuck Pod is deleted and recreated from the latest spec.
+# the stuck Pod is deleted and recreated from the latest spec. A Running-but-
+# not-Ready Pod on the previous image / conf PACKAGE_URL is handled the same
+# way by _stale_not_ready_template (OrderedReady will not replace it either).
 STUCK_WAITING_REASONS = frozenset((
     'ImagePullBackOff',
     'ErrImagePull',
@@ -1677,6 +1679,33 @@ class StatefulSet:
         return bool(getattr(metadata, 'deletion_timestamp', None))
 
     @staticmethod
+    def _is_pod_ready(pod):
+        """True when the Pod Ready condition is True (fallback: all containers ready)."""
+        status = getattr(pod, 'status', None)
+        if not status:
+            return False
+        for condition in getattr(status, 'conditions', None) or []:
+            if isinstance(condition, dict):
+                cond_type = condition.get('type')
+                cond_status = condition.get('status')
+            else:
+                cond_type = getattr(condition, 'type', None)
+                cond_status = getattr(condition, 'status', None)
+            if cond_type == 'Ready':
+                return cond_status in (True, 'True')
+        container_statuses = getattr(status, 'container_statuses', None) or []
+        if not container_statuses:
+            return False
+        for container_status in container_statuses:
+            if isinstance(container_status, dict):
+                ready = container_status.get('ready')
+            else:
+                ready = getattr(container_status, 'ready', False)
+            if not ready:
+                return False
+        return True
+
+    @staticmethod
     def _iter_container_statuses(pod):
         status = getattr(pod, 'status', None)
         if not status:
@@ -1702,6 +1731,72 @@ class StatefulSet:
         return None
 
     @staticmethod
+    def _env_name_value(item):
+        if isinstance(item, dict):
+            return item.get('name'), item.get('value')
+        return getattr(item, 'name', None), getattr(item, 'value', None)
+
+    @classmethod
+    def _package_urls_from_containers(cls, containers):
+        urls = set()
+        for container in containers or []:
+            if isinstance(container, dict):
+                env_list = container.get('env') or []
+            else:
+                env_list = getattr(container, 'env', None) or []
+            for item in env_list:
+                name, value = cls._env_name_value(item)
+                if name == 'PACKAGE_URL' and value:
+                    urls.add(value)
+        return urls
+
+    @classmethod
+    def _pod_init_package_urls(cls, pod):
+        spec = getattr(pod, 'spec', None)
+        if not spec:
+            return set()
+        if isinstance(spec, dict):
+            inits = spec.get('initContainers') or spec.get('init_containers') or []
+        else:
+            inits = (getattr(spec, 'init_containers', None)
+                     or getattr(spec, 'initContainers', None)
+                     or [])
+        return cls._package_urls_from_containers(inits)
+
+    @classmethod
+    def _template_init_package_urls(cls, resource_template):
+        try:
+            inits = (((resource_template or {}).get('spec') or {})
+                     .get('template', {}).get('spec', {}).get('initContainers')) or []
+        except AttributeError:
+            return set()
+        return cls._package_urls_from_containers(inits)
+
+    @classmethod
+    def _stale_not_ready_template(cls, pod, desired_images=None, desired_package_urls=None):
+        """Reason string if a NotReady Pod is still on the previous apply template.
+
+        OrderedReady RollingUpdate will not replace an unhealthy Pod, even when
+        the StatefulSet spec already points at a new image / conf package.
+        """
+        if cls._is_pod_ready(pod):
+            return None
+        if desired_images:
+            pod_images = cls._pod_main_images(pod)
+            desired = set(desired_images)
+            if pod_images and pod_images != desired:
+                return 'image %s != %s' % (
+                    ','.join(sorted(pod_images)),
+                    ','.join(sorted(desired)),
+                )
+        if desired_package_urls:
+            pod_urls = cls._pod_init_package_urls(pod)
+            desired_urls = set(desired_package_urls)
+            if pod_urls and pod_urls != desired_urls:
+                return 'PACKAGE_URL mismatch'
+        return None
+
+    @staticmethod
     def _container_image(container):
         if isinstance(container, dict):
             return container.get('image') or ''
@@ -1724,13 +1819,17 @@ class StatefulSet:
         return {cls._container_image(container) for container in containers
                 if cls._container_image(container)}
 
-    def _delete_stuck_pods_blocking_rollout(self, k8s_client, resource_name, namespace, replicas):
-        """Delete never-Ready Pods so OrderedReady RollingUpdate can apply the new template.
+    def _delete_stuck_pods_blocking_rollout(self, k8s_client, resource_name, namespace,
+                                            replicas, desired_images=None,
+                                            desired_package_urls=None):
+        """Delete never-Ready / stale-template Pods so OrderedReady can roll.
 
-        ImagePullBackOff / ErrImagePull / CrashLoopBackOff (and similar waiting
-        reasons) never become Ready, so the StatefulSet controller will not
-        replace them after a spec change. Delete once; the controller recreates
-        from the latest template.
+        ImagePullBackOff / CrashLoopBackOff (and similar waiting reasons) never
+        become Ready. A Running-but-not-Ready Pod on the *previous* image or
+        conf PACKAGE_URL also deadlocks OrderedReady: the controller waits for
+        Ready before applying the new template. Delete once; it recreates from
+        the latest spec. Ready Pods and NotReady Pods already on the new
+        template are left alone.
         """
         deleted = []
         for index in range(int(replicas or 1)):
@@ -1740,14 +1839,24 @@ class StatefulSet:
                 if not pod or self._is_pod_terminating(pod):
                     continue
                 stuck = self._find_stuck_waiting(pod)
-                if not stuck:
+                stale = self._stale_not_ready_template(
+                    pod, desired_images=desired_images,
+                    desired_package_urls=desired_package_urls)
+                if stuck:
+                    container_name, reason, restart_count = stuck
+                    LOG.warning(
+                        '[RollingUpdate] Pod %s/%s container "%s" is in %s '
+                        '(restarts=%d), deleting to unblock OrderedReady RollingUpdate.',
+                        namespace, pod_name, container_name, reason, restart_count,
+                    )
+                elif stale:
+                    LOG.warning(
+                        '[RollingUpdate] Pod %s/%s is not Ready and still on '
+                        'old template (%s), deleting to unblock OrderedReady RollingUpdate.',
+                        namespace, pod_name, stale,
+                    )
+                else:
                     continue
-                container_name, reason, restart_count = stuck
-                LOG.warning(
-                    '[RollingUpdate] Pod %s/%s container "%s" is in %s '
-                    '(restarts=%d), deleting to unblock OrderedReady RollingUpdate.',
-                    namespace, pod_name, container_name, reason, restart_count,
-                )
                 k8s_client.delete_pod(pod_name, namespace)
                 deleted.append(pod_name)
             except Exception as exc:
@@ -2263,14 +2372,18 @@ class StatefulSet:
             resource_template['metadata']['resourceVersion'] = exists_resource.metadata.resource_version
             exists_resource = k8s_client.replace_statefulset(resource_name, data['namespace'], resource_template)
             # OrderedReady RollingUpdate 会等当前 Pod Ready 再滚下一个。
-            # ImagePullBackOff / CrashLoopBackOff 等状态永远不会 Ready，必须主动删除
-            # 卡住的旧 Pod，控制器才会用新模板重建。
+            # ImagePullBackOff / CrashLoopBackOff、以及 Running 但未 Ready 且
+            # 仍停留在旧镜像/旧 conf 包上的 Pod，都不会 Ready，必须主动删除，
+            # 控制器才会用新模板重建。
             LOG.info('StatefulSet %s/%s updated, checking for stuck pods that block RollingUpdate.',
                      data['namespace'], resource_name)
             try:
                 self._delete_stuck_pods_blocking_rollout(
                     k8s_client, resource_name, data['namespace'],
-                    data.get('replicas', 1))
+                    data.get('replicas', 1),
+                    desired_images=self._template_main_images(resource_template),
+                    desired_package_urls=self._template_init_package_urls(resource_template),
+                )
             except Exception as e:
                 LOG.warning('[RollingUpdate] Error during stuck-pod check: %s (non-fatal, continuing)',
                             str(e))
