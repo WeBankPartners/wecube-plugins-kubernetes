@@ -46,6 +46,7 @@ def _install_import_stubs():
             NAMESPACE='k8s_namespace',
             WORKLOAD='k8s_workload',
             POD='pod',
+            HOST_RESOURCE='host_resource_instance',
         ),
         CmdbAttr=types.SimpleNamespace(
             SERVICE_NAMESPACE='k8s_namespace',
@@ -110,7 +111,7 @@ class FakeK8sClient:
 
 def _pod(name, phase, reason=None, message=None, container_statuses=None,
          image=None, deletion_timestamp=None, ready=None, init_package_url=None,
-         uid=None, host_ip=''):
+         uid=None, host_ip='', pod_ip=''):
     containers = []
     if image:
         containers.append(types.SimpleNamespace(image=image))
@@ -136,6 +137,7 @@ def _pod(name, phase, reason=None, message=None, container_statuses=None,
             container_statuses=container_statuses or [],
             init_container_statuses=[],
             host_ip=host_ip,
+            pod_ip=pod_ip,
         ),
     )
 
@@ -612,6 +614,10 @@ class FakeCmdbClient:
             return {'data': [{'guid': cond, 'unit': 'unit-guid'}]}
         if entity == 'k8s_service':
             return {'data': []}
+        if entity == 'pod':
+            return {'data': []}
+        if entity == 'host_resource_instance':
+            return {'data': [{'guid': 'host-guid', 'ip_address': cond}]}
         return {'data': []}
 
     def create(self, package, entity, data):
@@ -721,3 +727,48 @@ def test_sync_services_to_cmdb_writes_one_row_per_port_not_ingress():
         assert row['unit'] == 'unit-guid'
         assert 'ingress' not in row
     assert not any(entity == 'k8s_ingress' for entity, _ in fake_cmdb.created)
+
+
+def test_list_workload_pod_infos_collects_pod_ip():
+    pod = _pod(
+        'repayment-555994b9c4-m88gs',
+        'Running',
+        ready=True,
+        uid='uid-pod-1',
+        host_ip='10.0.132.9',
+        pod_ip='172.20.1.15',
+    )
+    pod_list, unused_pods, unused_selector = plugin_api.Deployment()._list_workload_pod_infos(
+        FakeK8sClient([pod]), 'repayment', 'adm-loan', {'id': 'cluster-DEV_Loan'}
+    )
+
+    assert len(pod_list) == 1
+    assert pod_list[0]['ip_address'] == '172.20.1.15'
+    assert pod_list[0]['host_ip'] == '10.0.132.9'
+    assert pod_list[0]['id'] == 'cluster-DEV_Loan_uid-pod-1'
+
+
+def test_sync_pods_to_cmdb_writes_ip_address():
+    fake_cmdb = FakeCmdbClient()
+    api = plugin_api.Deployment()
+    api._cmdb_entity_client = lambda: fake_cmdb
+
+    api._sync_pods_to_cmdb(
+        None,
+        'adm-loan',
+        [{
+            'name': 'repayment-555994b9c4-m88gs',
+            'id': 'cluster-DEV_Loan_uid-pod-1',
+            'host_ip': '10.0.132.9',
+            'ip_address': '172.20.1.15',
+        }],
+        'k8s_workload_1',
+    )
+
+    assert len(fake_cmdb.created) == 1
+    entity, rows = fake_cmdb.created[0]
+    assert entity == 'pod'
+    assert rows[0]['code'] == 'repayment-555994b9c4-m88gs'
+    assert rows[0]['ip_address'] == '172.20.1.15'
+    assert rows[0]['host_resource'] == 'host-guid'
+    assert rows[0]['app_instance'] == 'k8s_workload_1'

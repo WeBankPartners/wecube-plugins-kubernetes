@@ -512,6 +512,21 @@ class WorkloadPodOps:
             LOG.error('Failed to query host_resource from CMDB for IP %s: %s', pod_host_ip, str(e))
         
         return None
+
+    def _fill_pod_cmdb_runtime_fields(self, cmdb_client, payload, pod_name, pod_ip, pod_host_ip):
+        """Write Pod IP and host_resource onto a CMDB create/update payload."""
+        if pod_ip:
+            payload['ip_address'] = pod_ip
+        if pod_host_ip:
+            host_resource_guid = self._query_host_resource_guid(cmdb_client, pod_host_ip)
+            if host_resource_guid:
+                payload[const.CmdbAttr.HOST_RESOURCE] = host_resource_guid
+                LOG.info('Pod %s will write %s GUID: %s (node IP: %s, pod IP: %s)',
+                         pod_name, const.CmdbAttr.HOST_RESOURCE, host_resource_guid,
+                         pod_host_ip, pod_ip or 'N/A')
+            else:
+                LOG.warning('Pod %s has host_ip %s but no matching host_resource found in CMDB',
+                            pod_name, pod_host_ip)
     
     def _validate_pod_health(self, k8s_client, statefulset_name, namespace, expected_replicas):
         """验证 Pod 的健康状态
@@ -1071,21 +1086,9 @@ class WorkloadPodOps:
             return
         
         try:
-            from wecubek8s.common import wecmdb
-            from wecubek8s.common import wecube
-            
-            # 获取 CMDB 客户端（需要从配置中获取 CMDB 地址）
-            cmdb_server = CONF.wecube.base_url
-            if not cmdb_server:
-                LOG.warning('CMDB base_url not configured, skipping CMDB sync')
+            cmdb_client = self._cmdb_entity_client()
+            if not cmdb_client:
                 return
-            
-            # 使用子系统身份登录获取 token，不依赖浏览器请求携带的用户 token
-            wecube_client = wecube.WeCubeClient(cmdb_server, None)
-            subsystem_token = wecube_client.login_subsystem(set_self=False)
-            LOG.info('Using subsystem token for CMDB operations (token prefix: %s...)',
-                     subsystem_token[:20] if subsystem_token else 'None')
-            cmdb_client = wecmdb.EntityClient(cmdb_server, subsystem_token)
             
             # 1. 查询 CMDB 中该 instanceId 下的所有 Pod
             query_data = {
@@ -1139,6 +1142,7 @@ class WorkloadPodOps:
                 pod_name = pod_info['name']
                 pod_id = pod_info['id']
                 pod_host_ip = pod_info.get('host_ip', '')  # Pod 所在 Node 的 IP
+                pod_ip = (pod_info.get('ip_address') or '').strip()
                 
                 # 如果 Pod ID 为空，说明 Pod 还没有创建，跳过
                 if not pod_id:
@@ -1148,25 +1152,17 @@ class WorkloadPodOps:
                 if pod_name in cmdb_pods:
                     # Pod 已存在于 CMDB，检查是否需要更新
                     cmdb_pod = cmdb_pods[pod_name]
+                    update_data = {
+                        'guid': cmdb_pod['guid'],  # CMDB 字段名：guid（记录标识符）
+                    }
                     if cmdb_pod['asset_id'] != pod_id:
-                        # Pod ID 发生变化（可能是 Pod 被重建），需要更新
-                        update_data = {
-                            'guid': cmdb_pod['guid'],  # CMDB 字段名：guid（记录标识符）
-                            'asset_id': pod_id  # CMDB 字段名：asset_id（新的 K8s Pod UID）
-                        }
-                        # 如果有 host_ip，查询对应的 host_resource GUID
-                        if pod_host_ip:
-                            host_resource_guid = self._query_host_resource_guid(cmdb_client, pod_host_ip)
-                            if host_resource_guid:
-                                update_data[const.CmdbAttr.HOST_RESOURCE] = host_resource_guid
-                                LOG.info('Pod %s will update with %s GUID: %s (IP: %s)',
-                                        pod_name, const.CmdbAttr.HOST_RESOURCE, host_resource_guid, pod_host_ip)
-                            else:
-                                LOG.warning('Pod %s has host_ip %s but no matching host_resource found in CMDB', 
-                                           pod_name, pod_host_ip)
+                        update_data['asset_id'] = pod_id  # CMDB 字段名：asset_id（新的 K8s Pod UID）
+                    self._fill_pod_cmdb_runtime_fields(
+                        cmdb_client, update_data, pod_name, pod_ip, pod_host_ip)
+                    if len(update_data) > 1:
                         updates.append(update_data)
-                        LOG.info('Pod %s ID changed: %s -> %s, will update (host_ip: %s)', 
-                                pod_name, cmdb_pod['asset_id'], pod_id, pod_host_ip or 'N/A')
+                        LOG.info('Pod %s will update CMDB (asset_id: %s -> %s, ip_address: %s, host_ip: %s)',
+                                 pod_name, cmdb_pod['asset_id'], pod_id, pod_ip or 'N/A', pod_host_ip or 'N/A')
                     else:
                         LOG.debug('Pod %s ID unchanged: %s', pod_name, pod_id)
                 else:
@@ -1176,19 +1172,11 @@ class WorkloadPodOps:
                         'asset_id': pod_id,  # CMDB 字段名：asset_id（K8s Pod UID）
                         const.CmdbAttr.APP_INSTANCE: instance_id
                     }
-                    # 如果有 host_ip，查询对应的 host_resource GUID
-                    if pod_host_ip:
-                        host_resource_guid = self._query_host_resource_guid(cmdb_client, pod_host_ip)
-                        if host_resource_guid:
-                            create_data[const.CmdbAttr.HOST_RESOURCE] = host_resource_guid
-                            LOG.info('Pod %s will create with %s GUID: %s (IP: %s)',
-                                    pod_name, const.CmdbAttr.HOST_RESOURCE, host_resource_guid, pod_host_ip)
-                        else:
-                            LOG.warning('Pod %s has host_ip %s but no matching host_resource found in CMDB', 
-                                       pod_name, pod_host_ip)
+                    self._fill_pod_cmdb_runtime_fields(
+                        cmdb_client, create_data, pod_name, pod_ip, pod_host_ip)
                     creates.append(create_data)
-                    LOG.info('Pod %s (ID: %s, host_ip: %s) not found in CMDB, will create', 
-                            pod_name, pod_id, pod_host_ip or 'N/A')
+                    LOG.info('Pod %s (ID: %s, ip_address: %s, host_ip: %s) not found in CMDB, will create',
+                             pod_name, pod_id, pod_ip or 'N/A', pod_host_ip or 'N/A')
             
             # 3. 批量创建和更新 CMDB
             if creates:
@@ -1747,17 +1735,20 @@ class WorkloadPodOps:
                 pod_uid = pod.metadata.uid if pod.metadata.uid else ''
                 asset_id = '%s_%s' % (cluster_id, pod_uid) if cluster_id and pod_uid else (pod_uid or '')
                 host_ip = ''
-                if pod.status and getattr(pod.status, 'host_ip', None):
-                    host_ip = pod.status.host_ip
+                pod_ip = ''
+                if pod.status:
+                    host_ip = getattr(pod.status, 'host_ip', None) or ''
+                    pod_ip = getattr(pod.status, 'pod_ip', None) or ''
                 pod_list.append({
                     'name': pod.metadata.name,
                     'id': asset_id,
-                    'host_ip': host_ip
+                    'host_ip': host_ip,
+                    'ip_address': pod_ip
                 })
         return pod_list, pods, label_selector
 
     def _ordinal_pod_placeholders(self, resource_name, replicas):
-        return [{'name': '%s-%d' % (resource_name, i), 'id': '', 'host_ip': ''}
+        return [{'name': '%s-%d' % (resource_name, i), 'id': '', 'host_ip': '', 'ip_address': ''}
                 for i in range(int(replicas or 1))]
 
     def _collect_sync_and_mark_pods(self, k8s_client, cluster_info, data, resource_name, resource_id):

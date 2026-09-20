@@ -366,6 +366,14 @@ def query_host_resource_guid(cmdb_client, pod_host_ip):
     return None
 
 
+def apply_pod_ip_address(payload, pod_data):
+    """Copy K8s pod IP onto a CMDB create/update payload when present."""
+    pod_ip = (pod_data.get('ip_address') or '').strip()
+    if pod_ip:
+        payload['ip_address'] = pod_ip
+    return payload
+
+
 def query_statefulset_app_instance(k8s_client, statefulset_name, namespace):
     """查询 StatefulSet 的 app_instance（用于 Pod 漂移时创建新 Pod 记录）
     
@@ -593,6 +601,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
         pod_name = pod_data.get('name')
         pod_id = pod_data.get('asset_id')  # 使用 asset_id（cluster_id_pod_uid）而不是 id
         pod_host_ip = pod_data.get('host_ip')
+        pod_ip = (pod_data.get('ip_address') or '').strip()
         cluster_id = pod_data.get('cluster_id')
         pod_namespace = pod_data.get('namespace')
         
@@ -600,13 +609,13 @@ def sync_pod_to_cmdb_on_added(pod_data):
             LOG.warning('Pod name, asset_id or cluster_id missing, skipping CMDB sync: %s', pod_data)
             return (None, False)
         
-        # ===== 【新增】等待 Pod 调度完成（获取 host_ip）=====
+        # ===== 【新增】等待 Pod 调度完成（获取 host_ip / pod_ip）=====
         # Pod 在 Pending 状态时没有 host_ip，需要等待调度完成
         # 总共等待 120 秒（通常 Pod 调度很快），每 5 秒检查一次
         POD_SCHEDULE_MAX_WAIT = 120  # 最多等待 120 秒（缩短等待时间）
         POD_SCHEDULE_CHECK_INTERVAL = 5  # 每 5 秒检查一次（加快检查频率）
         
-        if not pod_host_ip:
+        if not pod_host_ip or not pod_ip:
             LOG.info('='*60)
             LOG.info('⏳ Pod has no host_ip yet (Pending状态), waiting for scheduling...')
             LOG.info('   Will check every %d seconds (max wait: %d seconds)', 
@@ -642,17 +651,22 @@ def sync_pod_to_cmdb_on_added(pod_data):
                     
                     try:
                         pod_obj = k8s_client.get_pod(pod_name, pod_namespace)
-                        if pod_obj and pod_obj.status and pod_obj.status.host_ip:
-                            pod_host_ip = pod_obj.status.host_ip
-                            # 更新 pod_data，供后续使用
-                            pod_data['host_ip'] = pod_host_ip
-                            LOG.info('[Wait %d/%d] ✅ Pod scheduled! host_ip: %s', 
-                                     wait_attempt, int(POD_SCHEDULE_MAX_WAIT / POD_SCHEDULE_CHECK_INTERVAL), 
-                                     pod_host_ip)
-                            break
-                        else:
-                            LOG.info('[Wait %d/%d] Still pending, no host_ip yet', 
-                                     wait_attempt, int(POD_SCHEDULE_MAX_WAIT / POD_SCHEDULE_CHECK_INTERVAL))
+                        if pod_obj and pod_obj.status:
+                            if pod_obj.status.host_ip:
+                                pod_host_ip = pod_obj.status.host_ip
+                                pod_data['host_ip'] = pod_host_ip
+                            pod_status_ip = getattr(pod_obj.status, 'pod_ip', None) or ''
+                            if pod_status_ip:
+                                pod_ip = pod_status_ip
+                                pod_data['ip_address'] = pod_ip
+                            if pod_host_ip and pod_ip:
+                                LOG.info('[Wait %d/%d] ✅ Pod scheduled! host_ip: %s, ip_address: %s',
+                                         wait_attempt, int(POD_SCHEDULE_MAX_WAIT / POD_SCHEDULE_CHECK_INTERVAL),
+                                         pod_host_ip, pod_ip)
+                                break
+                        LOG.info('[Wait %d/%d] Still pending, host_ip: %s, ip_address: %s',
+                                 wait_attempt, int(POD_SCHEDULE_MAX_WAIT / POD_SCHEDULE_CHECK_INTERVAL),
+                                 pod_host_ip or 'N/A', pod_ip or 'N/A')
                     except Exception as pod_check_err:
                         LOG.warning('[Wait %d/%d] Failed to query Pod: %s', 
                                     wait_attempt, int(POD_SCHEDULE_MAX_WAIT / POD_SCHEDULE_CHECK_INTERVAL), 
@@ -680,8 +694,8 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 return (None, False)
         
         LOG.info('='*60)
-        LOG.info('Syncing POD.ADDED to CMDB: pod=%s, namespace=%s, asset_id=%s, host_ip=%s, cluster_id=%s', 
-                 pod_name, pod_namespace or 'N/A', pod_id, pod_host_ip or 'N/A', cluster_id)
+        LOG.info('Syncing POD.ADDED to CMDB: pod=%s, namespace=%s, asset_id=%s, ip_address=%s, host_ip=%s, cluster_id=%s',
+                 pod_name, pod_namespace or 'N/A', pod_id, pod_ip or 'N/A', pod_host_ip or 'N/A', cluster_id)
         
         # 检查是否是预期创建的 Pod（调用但不消费缓存，仅用于日志）
         # 真正的消费会在 notify_pod 中进行
@@ -1130,6 +1144,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 const.CmdbAttr.HOST_RESOURCE: host_resource_guid,  # 从 host_ip 查询（必需）
                 'state': 'created_0'  # 默认状态
             }
+            apply_pod_ip_address(create_data, pod_data)
             
             LOG.info('[CREATE-Step-4] Create data: %s', create_data)
             
@@ -1190,6 +1205,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                                 'asset_id': pod_id,
                                 const.CmdbAttr.HOST_RESOURCE: host_resource_guid
                             }
+                            apply_pod_ip_address(update_data, pod_data)
                             
                             cmdb_client.update('wecmdb', const.CmdbCI.POD, [update_data])
                             LOG.info('[CREATE-Step-4] ✅ Updated asset_id and host_resource successfully')
@@ -1268,6 +1284,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                 'guid': pod_guid,
                 'asset_id': pod_id  # 更新 K8s UID
             }
+            apply_pod_ip_address(update_data, pod_data)
             
             # 查询并更新 host_resource（Pod 可能调度到不同节点或发生漂移）
             host_resource_guid = None
@@ -1401,6 +1418,7 @@ def sync_pod_to_cmdb_on_added(pod_data):
                         const.CmdbAttr.HOST_RESOURCE: host_resource_guid,  # 必需
                         'state': 'created_0'
                     }
+                    apply_pod_ip_address(create_data, pod_data)
                     
                     LOG.info('[Step 2-Fallback] Create data: %s', create_data)
                     
