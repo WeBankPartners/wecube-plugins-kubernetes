@@ -1602,6 +1602,8 @@ class WorkloadPodOps:
 
     def _parse_wait_for_ready(self, data):
         wait_raw = data.get('wait_for_ready', 'true')
+        if wait_raw is None or str(wait_raw).strip() == '':
+            return True
         if isinstance(wait_raw, bool):
             return wait_raw
         return str(wait_raw).strip().lower() == 'true'
@@ -1711,7 +1713,8 @@ class WorkloadPodOps:
                             attempt, max_attempts, kind, str(e))
         else:
             resource = self._get_workload(k8s_client, resource_name, namespace)
-            ready_replicas, _, _, _ = self._rollout_progress(resource, replicas)
+            ready_replicas, unused_updated, unused_complete, unused_extra = self._rollout_progress(
+                resource, replicas)
             if ready_replicas < replicas:
                 error_msg = self._get_pod_failure_details(k8s_client, resource_name, namespace)
                 LOG.error('Timeout waiting for Pods to be ready: %d/%d ready after %d seconds',
@@ -1763,7 +1766,7 @@ class WorkloadPodOps:
         replicas = int(data.get('replicas', 1))
         namespace = data['namespace']
         try:
-            pod_list, _, label_selector = self._list_workload_pod_infos(
+            pod_list, unused_pods, label_selector = self._list_workload_pod_infos(
                 k8s_client, resource_name, namespace, cluster_info)
             if pod_list:
                 LOG.info('Found %d pods for %s %s in namespace %s (some may not have UID yet)',
@@ -1795,7 +1798,7 @@ class WorkloadPodOps:
                     time.sleep(wait_interval)
                     waited_time += wait_interval
                     try:
-                        listed, pods, _ = self._list_workload_pod_infos(
+                        listed, pods, unused_selector = self._list_workload_pod_infos(
                             k8s_client, resource_name, namespace, cluster_info)
                         if pods and pods.items:
                             for pod in pods.items:
@@ -1850,7 +1853,7 @@ class WorkloadPodOps:
 
             try:
                 LOG.info('Performing final pod status check...')
-                listed, pods, _ = self._list_workload_pod_infos(
+                listed, pods, unused_selector = self._list_workload_pod_infos(
                     k8s_client, resource_name, namespace, cluster_info)
                 if listed:
                     by_name = {p['name']: p for p in pod_list}
@@ -1940,7 +1943,7 @@ class WorkloadPodOps:
         k8s_client = k8s.Client(k8s.AuthToken(api_server, cluster_info['token']))
         resource_name = self._resource_name_from_data(data)
         correlation_id = data['correlation_id']
-        pod_list, _, _ = self._list_workload_pod_infos(
+        pod_list, unused_pods, unused_selector = self._list_workload_pod_infos(
             k8s_client, resource_name, data['namespace'], cluster_info)
         kind = self.workload_kind
         if not pod_list:

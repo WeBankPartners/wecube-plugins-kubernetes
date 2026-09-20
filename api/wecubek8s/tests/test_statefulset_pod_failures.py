@@ -109,7 +109,8 @@ class FakeK8sClient:
 
 
 def _pod(name, phase, reason=None, message=None, container_statuses=None,
-         image=None, deletion_timestamp=None, ready=None, init_package_url=None):
+         image=None, deletion_timestamp=None, ready=None, init_package_url=None,
+         uid=None, host_ip=''):
     containers = []
     if image:
         containers.append(types.SimpleNamespace(image=image))
@@ -125,7 +126,7 @@ def _pod(name, phase, reason=None, message=None, container_statuses=None,
     elif ready is False:
         conditions = [types.SimpleNamespace(type='Ready', status='False')]
     return types.SimpleNamespace(
-        metadata=types.SimpleNamespace(name=name, deletion_timestamp=deletion_timestamp),
+        metadata=types.SimpleNamespace(name=name, deletion_timestamp=deletion_timestamp, uid=uid),
         spec=types.SimpleNamespace(containers=containers, init_containers=init_containers),
         status=types.SimpleNamespace(
             phase=phase,
@@ -134,6 +135,7 @@ def _pod(name, phase, reason=None, message=None, container_statuses=None,
             conditions=conditions,
             container_statuses=container_statuses or [],
             init_container_statuses=[],
+            host_ip=host_ip,
         ),
     )
 
@@ -235,6 +237,53 @@ def test_pod_ready_timeout_request_overrides_system_parameter():
     })
 
     assert timeout == 120
+
+
+def test_pod_ready_timeout_empty_string_uses_system_parameter():
+    plugin_api.CONF.pod_ready_timeout = '600'
+
+    timeout = plugin_api.StatefulSet()._get_pod_ready_timeout({
+        'pod_ready_timeout': '',
+    })
+
+    assert timeout == 600
+
+
+def test_wait_for_ready_empty_or_missing_defaults_to_true():
+    api = plugin_api.Deployment()
+
+    assert api._parse_wait_for_ready({}) is True
+    assert api._parse_wait_for_ready({'wait_for_ready': ''}) is True
+    assert api._parse_wait_for_ready({'wait_for_ready': '  '}) is True
+    assert api._parse_wait_for_ready({'wait_for_ready': 'true'}) is True
+    assert api._parse_wait_for_ready({'wait_for_ready': 'false'}) is False
+    assert api._parse_wait_for_ready({'wait_for_ready': False}) is False
+
+
+def test_collect_sync_raises_plugin_error_instead_of_str_not_callable():
+    pod = _pod(
+        'repayment-d9c56fbf7-5hlhd',
+        'Running',
+        ready=False,
+        uid='uid-1',
+        host_ip='10.0.132.6',
+        image='registry.example/app:1',
+    )
+    client = FakeK8sClient([pod])
+
+    try:
+        plugin_api.Deployment()._collect_sync_and_mark_pods(
+            client,
+            {'id': 'cluster-1'},
+            {'namespace': 'adm-loan', 'replicas': 1},
+            'repayment',
+            'k8s_workload_1',
+        )
+        assert False, 'expected PluginError'
+    except plugin_api.exceptions.PluginError as exc:
+        message = str(exc)
+        assert 'failed to become ready' in message
+        assert 'str' not in message or 'not callable' not in message
 
 
 def test_image_pull_backoff_pod_is_deleted_to_unblock_rollout():
