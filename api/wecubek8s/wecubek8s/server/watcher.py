@@ -407,6 +407,36 @@ def query_statefulset_app_instance(k8s_client, statefulset_name, namespace):
     return None
 
 
+def query_deployment_app_instance(k8s_client, deployment_name, namespace):
+    """查询 Deployment 的 app_instance（用于 Pod 漂移时创建新 Pod 记录）
+
+    从 K8s Deployment 的 annotations 中读取 app_instance（instanceId）。
+    """
+    if not k8s_client or not deployment_name or not namespace:
+        return None
+
+    try:
+        LOG.info('Reading Deployment from K8s: %s/%s', namespace, deployment_name)
+        deployment = k8s_client.get_deployment(deployment_name, namespace)
+
+        if deployment and deployment.metadata:
+            annotations = deployment.metadata.annotations or {}
+            app_instance_guid = annotations.get('wecube.io/app-instance')
+
+            if app_instance_guid:
+                LOG.info('Found app_instance from Deployment annotation: %s', app_instance_guid)
+                return app_instance_guid
+            LOG.warning('Deployment found but no wecube.io/app-instance annotation: %s/%s',
+                        namespace, deployment_name)
+        else:
+            LOG.warning('No Deployment found in K8s: %s/%s', namespace, deployment_name)
+    except Exception as e:
+        LOG.error('Failed to read Deployment from K8s: %s', str(e))
+        LOG.exception(e)
+
+    return None
+
+
 def test_query_all_pods_from_cmdb(cmdb_client):
     """测试函数：查询 CMDB 中所有 Pod 数据（不加过滤条件）
     
@@ -976,15 +1006,27 @@ def sync_pod_to_cmdb_on_added(pod_data):
             # ===== 新增逻辑：创建 Pod 记录（处理 Pod 漂移场景）=====
             LOG.info('🆕 Attempting to CREATE new Pod record in CMDB (drift/eviction scenario)')
             
-            # 步骤1：获取 app_instance（从 StatefulSet 的 annotation）
+            # 步骤1：获取 app_instance（从 StatefulSet / Deployment 的 annotation）
             statefulset_name = pod_data.get('statefulset_name')  # 从 Pod 的 owner_references 获取
+            deployment_name = pod_data.get('deployment_name')
             pod_namespace = pod_data.get('namespace')
-            app_instance_guid = None
-            
-            if statefulset_name and pod_namespace:
-                LOG.info('[CREATE-Step-1] Pod belongs to StatefulSet: %s/%s', pod_namespace, statefulset_name)
-                LOG.info('[CREATE-Step-1] Reading app_instance from StatefulSet annotation...')
-                
+            app_instance_guid = (pod_data.get('annotations') or {}).get('wecube.io/app-instance')
+            if app_instance_guid:
+                LOG.info('[CREATE-Step-1] Found app_instance from Pod annotation: %s', app_instance_guid)
+            workload_kind = None
+            workload_name = None
+            if statefulset_name:
+                workload_kind, workload_name = 'StatefulSet', statefulset_name
+            elif deployment_name:
+                workload_kind, workload_name = 'Deployment', deployment_name
+
+            if app_instance_guid:
+                pass
+            elif workload_name and pod_namespace:
+                LOG.info('[CREATE-Step-1] Pod belongs to %s: %s/%s',
+                         workload_kind, pod_namespace, workload_name)
+                LOG.info('[CREATE-Step-1] Reading app_instance from %s annotation...', workload_kind)
+
                 # 查询集群配置以创建 K8s 客户端
                 try:
                     cluster_list = api.db_resource.Cluster().list({'id': cluster_id})
@@ -993,45 +1035,49 @@ def sync_pod_to_cmdb_on_added(pod_data):
                         LOG.error('[CREATE-Step-1] Cannot create K8s client, aborting')
                         LOG.warning('='*60)
                         return (None, False)
-                    
+
                     cluster_info = cluster_list[0]
-                    
+
                     # 确保 api_server 有正确的协议前缀
                     from wecubek8s.common import k8s
                     api_server = cluster_info['api_server']
                     if not api_server.startswith('https://') and not api_server.startswith('http://'):
                         api_server = 'https://' + api_server
-                    
+
                     # 创建 K8s 客户端
                     k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
                     k8s_client = k8s.Client(k8s_auth)
-                    
-                    # 从 StatefulSet 的 annotation 中读取 app_instance
-                    app_instance_guid = query_statefulset_app_instance(k8s_client, statefulset_name, pod_namespace)
-                    
+
+                    if workload_kind == 'StatefulSet':
+                        app_instance_guid = query_statefulset_app_instance(
+                            k8s_client, workload_name, pod_namespace)
+                    else:
+                        app_instance_guid = query_deployment_app_instance(
+                            k8s_client, workload_name, pod_namespace)
+
                     if app_instance_guid:
                         LOG.info('[CREATE-Step-1] ✅ Found app_instance: %s', app_instance_guid)
                     else:
-                        LOG.error('[CREATE-Step-1] ❌ Cannot find app_instance from StatefulSet annotation')
-                        LOG.error('[CREATE-Step-1] StatefulSet: %s/%s', pod_namespace, statefulset_name)
-                        LOG.error('[CREATE-Step-1] This StatefulSet was created without instanceId parameter')
+                        LOG.error('[CREATE-Step-1] ❌ Cannot find app_instance from %s annotation', workload_kind)
+                        LOG.error('[CREATE-Step-1] %s: %s/%s', workload_kind, pod_namespace, workload_name)
+                        LOG.error('[CREATE-Step-1] This %s was created without instanceId parameter', workload_kind)
                         LOG.error('[CREATE-Step-1] Solution: Add annotation manually or recreate with instanceId:')
-                        LOG.error('[CREATE-Step-1]   kubectl annotate statefulset %s -n %s wecube.io/app-instance=<guid> --overwrite', 
-                                 statefulset_name, pod_namespace)
+                        LOG.error('[CREATE-Step-1]   kubectl annotate %s %s -n %s wecube.io/app-instance=<guid> --overwrite',
+                                 workload_kind.lower(), workload_name, pod_namespace)
                         LOG.error('[CREATE-Step-1] Cannot create Pod without app_instance, aborting')
                         LOG.warning('='*60)
                         return (None, False)
-                        
+
                 except Exception as e:
-                    LOG.error('[CREATE-Step-1] ❌ Failed to read StatefulSet annotation: %s', str(e))
+                    LOG.error('[CREATE-Step-1] ❌ Failed to read %s annotation: %s', workload_kind, str(e))
                     LOG.exception(e)
                     LOG.error('[CREATE-Step-1] Cannot create Pod without app_instance, aborting')
                     LOG.warning('='*60)
                     return (None, False)
             else:
-                LOG.error('[CREATE-Step-1] ❌ Pod has no StatefulSet owner or namespace is missing')
-                LOG.error('[CREATE-Step-1] statefulset_name: %s, namespace: %s', statefulset_name or 'None', pod_namespace or 'None')
-                LOG.error('[CREATE-Step-1] This Pod may not be managed by StatefulSet')
+                LOG.error('[CREATE-Step-1] ❌ Pod has no StatefulSet/Deployment owner or namespace is missing')
+                LOG.error('[CREATE-Step-1] statefulset_name: %s, deployment_name: %s, namespace: %s',
+                           statefulset_name or 'None', deployment_name or 'None', pod_namespace or 'None')
                 LOG.error('[CREATE-Step-1] Cannot create Pod without app_instance, aborting')
                 LOG.warning('='*60)
                 return (None, False)

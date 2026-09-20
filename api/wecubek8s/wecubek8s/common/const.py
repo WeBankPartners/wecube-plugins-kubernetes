@@ -14,6 +14,8 @@ class Tag:
     STATEFULSET_ID_TAG = 'wecube-statefulset-correlation-id'
     DAEMONSET_ID_TAG = 'wecube-daemonset-correlation-id'
     SERVICE_ID_TAG = 'wecube-service-correlation-id'
+    SERVICE_ROLE_TAG = 'wecube-service-role'
+    WORKLOAD_NAME_TAG = 'wecube-workload-name'
     POD_ID_TAG = 'wecube-pod-correlation-id'
     PVC_ID_TAG = 'wecube-pvc-correlation-id'
 
@@ -26,6 +28,13 @@ class CmdbCI:
     HOST_RESOURCE = (
         os.getenv('KUBERNETES_CMDB_HOST_RESOURCE_CI_NAME', 'host_resource_instance').strip()
         or 'host_resource_instance'
+    )
+    SERVICE = os.getenv('KUBERNETES_CMDB_SERVICE_CI_NAME', 'k8s_service').strip() or 'k8s_service'
+    NAMESPACE = (
+        os.getenv('KUBERNETES_CMDB_NAMESPACE_CI_NAME', 'k8s_namespace').strip() or 'k8s_namespace'
+    )
+    WORKLOAD = (
+        os.getenv('KUBERNETES_CMDB_WORKLOAD_CI_NAME', 'k8s_workload').strip() or 'k8s_workload'
     )
 
 
@@ -40,6 +49,15 @@ class CmdbAttr:
         os.getenv('KUBERNETES_CMDB_HOST_RESOURCE_ATTR', 'host_resource').strip()
         or 'host_resource'
     )
+    SERVICE_NAMESPACE = (
+        os.getenv('KUBERNETES_CMDB_SERVICE_NAMESPACE_ATTR', 'k8s_namespace').strip()
+        or 'k8s_namespace'
+    )
+    SERVICE_WORKLOAD = (
+        os.getenv('KUBERNETES_CMDB_SERVICE_WORKLOAD_ATTR', 'k8s_workload').strip()
+        or 'k8s_workload'
+    )
+    SERVICE_UNIT = os.getenv('KUBERNETES_CMDB_SERVICE_UNIT_ATTR', 'unit').strip() or 'unit'
 
 
 class Registry:

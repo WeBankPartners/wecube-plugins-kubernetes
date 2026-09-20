@@ -118,6 +118,9 @@ class Deployment(controller.Plugin):
                 )
 
     def validate_item_apply(self, item_index, item):
+        # 先解析 envs 字符串（如果需要），与 StatefulSet 保持一致，方便 WeCube 传入
+        StatefulSet.parse_envs_if_string(self, item)
+        StatefulSet.add_default_envs(self, item)
         clean_item = crud.ColumnValidator.get_clean_data(rules.deployment_rules, item, 'check')
         self.set_item_default(clean_item)
         self.validate_log_path(clean_item)
@@ -134,6 +137,22 @@ class Deployment(controller.Plugin):
 
     def destroy(self, reqid, operator, item_index, item, **kwargs):
         return plugin_api.Deployment().remove(item)
+
+    def validate_item_sync_pods_to_cmdb(self, item_index, item):
+        clean_item = crud.ColumnValidator.get_clean_data(rules.destroy_rules, item, 'check')
+        correlation_id = item.get('correlation_id')
+        if not correlation_id:
+            raise exceptions.ValidationError(
+                attribute='correlation_id',
+                msg=_('correlation_id is required')
+            )
+        clean_item['correlation_id'] = correlation_id
+        if not clean_item.get('namespace'):
+            clean_item['namespace'] = 'default'
+        return clean_item
+
+    def sync_pods_to_cmdb(self, reqid, operator, item_index, item, **kwargs):
+        return plugin_api.Deployment().sync_pods_to_cmdb(item)
 
 
 class StatefulSet(controller.Plugin):
@@ -731,6 +750,22 @@ class StatefulSet(controller.Plugin):
 
     def destroy(self, reqid, operator, item_index, item, **kwargs):
         return plugin_api.StatefulSet().remove(item)
+
+    def validate_item_sync_pods_to_cmdb(self, item_index, item):
+        clean_item = crud.ColumnValidator.get_clean_data(rules.destroy_rules, item, 'check')
+        correlation_id = item.get('correlation_id')
+        if not correlation_id:
+            raise exceptions.ValidationError(
+                attribute='correlation_id',
+                msg=_('correlation_id is required')
+            )
+        clean_item['correlation_id'] = correlation_id
+        if not clean_item.get('namespace'):
+            clean_item['namespace'] = 'default'
+        return clean_item
+
+    def sync_pods_to_cmdb(self, reqid, operator, item_index, item, **kwargs):
+        return plugin_api.StatefulSet().sync_pods_to_cmdb(item)
 
 
 class DaemonSet(controller.Plugin):

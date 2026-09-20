@@ -83,6 +83,9 @@
         <systemParameter name="KUBERNETES_CMDB_HOST_RESOURCE_CI_NAME" scopeType="plugins" defaultValue="host_resource_instance" />
         <systemParameter name="KUBERNETES_CMDB_APP_INSTANCE_ATTR" scopeType="plugins" defaultValue="app_instance" />
         <systemParameter name="KUBERNETES_CMDB_HOST_RESOURCE_ATTR" scopeType="plugins" defaultValue="host_resource" />
+        <systemParameter name="KUBERNETES_CMDB_SERVICE_CI_NAME" scopeType="plugins" defaultValue="k8s_service" />
+        <systemParameter name="KUBERNETES_CMDB_NAMESPACE_CI_NAME" scopeType="plugins" defaultValue="k8s_namespace" />
+        <systemParameter name="KUBERNETES_CMDB_WORKLOAD_CI_NAME" scopeType="plugins" defaultValue="k8s_workload" />
     </systemParameters>
 
     <!-- 5.权限设定 -->
@@ -91,7 +94,7 @@
 
     <!-- 6.运行资源 - 描述部署运行本插件包需要的基础资源(如主机、虚拟机、容器、数据库等) -->
     <resourceDependencies>
-        <docker imageName="{{IMAGENAME}}" containerName="{{CONTAINERNAME}}" portBindings="{{ALLOCATE_PORT}}:9001" volumeBindings="/etc/localtime:/etc/localtime,{{BASE_MOUNT_PATH}}/kubernetes/logs:/var/log/wecubek8s,{{BASE_MOUNT_PATH}}/certs:/certs" envVariables="GATEWAY_URL={{GATEWAY_URL}},JWT_SIGNING_KEY={{JWT_SIGNING_KEY}},SUB_SYSTEM_CODE={{SUB_SYSTEM_CODE}},SUB_SYSTEM_KEY={{SUB_SYSTEM_KEY}},KUBERNETES_DB_USERNAME={{DB_USER}},KUBERNETES_DB_PASSWORD={{DB_PWD}},KUBERNETES_DB_HOSTIP={{DB_HOST}},KUBERNETES_DB_HOSTPORT={{DB_PORT}},KUBERNETES_DB_SCHEMA={{DB_SCHEMA}},ENCRYPT_SEED={{ENCRYPT_SEED}},NOTIFY_POD_ADDED={{KUBERNETES_NOTIFY_POD_ADDED}},NOTIFY_POD_DELETED={{KUBERNETES_NOTIFY_POD_DELETED}},KUBERNETES_LOG_LEVEL={{KUBERNETES_LOG_LEVEL}},APP_TIMEZONE={{KUBERNETES_APP_TIMEZONE}},POD_READY_TIMEOUT={{KUBERNETES_POD_READY_TIMEOUT}},S3_ACCESS_KEY={{S3_ACCESS_KEY}},S3_SECRET_KEY={{S3_SECRET_KEY}},ENABLE_HOST_PATH={{KUBERNETES_ENABLE_HOST_PATH}},KUBERNETES_CMDB_PVC_CI_NAME={{KUBERNETES_CMDB_PVC_CI_NAME}},KUBERNETES_CMDB_POD_CI_NAME={{KUBERNETES_CMDB_POD_CI_NAME}},KUBERNETES_CMDB_HOST_RESOURCE_CI_NAME={{KUBERNETES_CMDB_HOST_RESOURCE_CI_NAME}},KUBERNETES_CMDB_APP_INSTANCE_ATTR={{KUBERNETES_CMDB_APP_INSTANCE_ATTR}},KUBERNETES_CMDB_HOST_RESOURCE_ATTR={{KUBERNETES_CMDB_HOST_RESOURCE_ATTR}}" />
+        <docker imageName="{{IMAGENAME}}" containerName="{{CONTAINERNAME}}" portBindings="{{ALLOCATE_PORT}}:9001" volumeBindings="/etc/localtime:/etc/localtime,{{BASE_MOUNT_PATH}}/kubernetes/logs:/var/log/wecubek8s,{{BASE_MOUNT_PATH}}/certs:/certs" envVariables="GATEWAY_URL={{GATEWAY_URL}},JWT_SIGNING_KEY={{JWT_SIGNING_KEY}},SUB_SYSTEM_CODE={{SUB_SYSTEM_CODE}},SUB_SYSTEM_KEY={{SUB_SYSTEM_KEY}},KUBERNETES_DB_USERNAME={{DB_USER}},KUBERNETES_DB_PASSWORD={{DB_PWD}},KUBERNETES_DB_HOSTIP={{DB_HOST}},KUBERNETES_DB_HOSTPORT={{DB_PORT}},KUBERNETES_DB_SCHEMA={{DB_SCHEMA}},ENCRYPT_SEED={{ENCRYPT_SEED}},NOTIFY_POD_ADDED={{KUBERNETES_NOTIFY_POD_ADDED}},NOTIFY_POD_DELETED={{KUBERNETES_NOTIFY_POD_DELETED}},KUBERNETES_LOG_LEVEL={{KUBERNETES_LOG_LEVEL}},APP_TIMEZONE={{KUBERNETES_APP_TIMEZONE}},POD_READY_TIMEOUT={{KUBERNETES_POD_READY_TIMEOUT}},S3_ACCESS_KEY={{S3_ACCESS_KEY}},S3_SECRET_KEY={{S3_SECRET_KEY}},ENABLE_HOST_PATH={{KUBERNETES_ENABLE_HOST_PATH}},KUBERNETES_CMDB_PVC_CI_NAME={{KUBERNETES_CMDB_PVC_CI_NAME}},KUBERNETES_CMDB_POD_CI_NAME={{KUBERNETES_CMDB_POD_CI_NAME}},KUBERNETES_CMDB_HOST_RESOURCE_CI_NAME={{KUBERNETES_CMDB_HOST_RESOURCE_CI_NAME}},KUBERNETES_CMDB_APP_INSTANCE_ATTR={{KUBERNETES_CMDB_APP_INSTANCE_ATTR}},KUBERNETES_CMDB_HOST_RESOURCE_ATTR={{KUBERNETES_CMDB_HOST_RESOURCE_ATTR}},KUBERNETES_CMDB_SERVICE_CI_NAME={{KUBERNETES_CMDB_SERVICE_CI_NAME}},KUBERNETES_CMDB_NAMESPACE_CI_NAME={{KUBERNETES_CMDB_NAMESPACE_CI_NAME}},KUBERNETES_CMDB_WORKLOAD_CI_NAME={{KUBERNETES_CMDB_WORKLOAD_CI_NAME}}" />
         <mysql schema="kubernetes" initFileName="init.sql" upgradeFileName="upgrade.sql" />
     </resourceDependencies>
 
@@ -171,6 +174,11 @@
                     <parameter datatype="string" mappingType="constant" required="N" description="instance deployment path for log mount">deployment_path</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="process name for liveness probe">process_name</parameter>
                     <parameter datatype="string" mappingType="constant" required="N" description="process keyword for liveness probe">process_keyword</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="deploy script to run before container starts">image_deploy_script</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="logs path for container">log_path</parameter>
+                    <parameter datatype="object" mappingType="constant" required="N" multiple="Y" description="deployment metadata annotations in JSON format, e.g. [{&quot;key1&quot;:&quot;value1&quot;,&quot;key2&quot;:&quot;value2&quot;}]">annotations</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="wait until pods are ready before return, default true">wait_for_ready</parameter>
+                    <parameter datatype="string" mappingType="constant" required="N" description="pod ready timeout in seconds, default from system parameter">pod_ready_timeout</parameter>
                 </inputParameters>
                 <outputParameters>
                     <parameter datatype="string">errorCode</parameter>
@@ -180,6 +188,9 @@
                     <parameter datatype="string">correlation_id</parameter>
                     <parameter datatype="string">clusterIP</parameter>
                     <parameter datatype="string">port</parameter>
+                    <parameter datatype="string">services</parameter>
+                    <parameter datatype="string">pods</parameter>
+                    <parameter datatype="string">podName</parameter>
                 </outputParameters>
             </interface>
             <interface action="destroy" path="/kubernetes/v1/deployments/destroy" httpMethod="POST" isAsyncProcessing="N" type="EXECUTION">
@@ -271,6 +282,8 @@
                     <parameter datatype="string">correlation_id</parameter>
                     <parameter datatype="string">clusterIP</parameter>
                     <parameter datatype="string">port</parameter>
+                    <parameter datatype="string">services</parameter>
+                    <parameter datatype="string">pods</parameter>
                     <parameter datatype="string">podName</parameter>
                 </outputParameters>
             </interface>

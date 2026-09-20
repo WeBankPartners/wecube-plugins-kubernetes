@@ -171,10 +171,12 @@ class ReplicaSet(BaseEntity):
     @classmethod
     def to_dict(cls, cluster, item):
         controll_by = None
+        deployment_name = None
         if item.metadata.owner_references:
             for owner in item.metadata.owner_references:
                 if owner.controller and owner.kind == 'Deployment':
                     controll_by = owner.uid
+                    deployment_name = owner.name
                     break
         result = {
             'id': item.metadata.uid,
@@ -182,6 +184,7 @@ class ReplicaSet(BaseEntity):
             'displayName': f'{cluster["name"]}-{item.metadata.namespace}-{item.metadata.name}',
             'namespace': item.metadata.namespace,
             'deployment_id': controll_by,
+            'deployment_name': deployment_name,
             'cluster_id': cluster["id"]
         }
         return result
@@ -301,6 +304,7 @@ class Pod(BaseEntity):
             'statefulset_id': statefulset_id,
             'statefulset_name': statefulset_name,  # StatefulSet 名称（用于从 K8s 读取 annotation）
             'deployment_id': None,
+            'deployment_name': None,
             'correlation_id': correlation_id,
             'node_id': item.spec.node_name,
             'cluster_id': cluster["id"],
@@ -312,13 +316,16 @@ class Pod(BaseEntity):
         nodes = Node().cached_all([cluster])
         for node in nodes:
             node_mapping.setdefault(node['cluster_id'], {}).setdefault(node['name'], node['id'])
-        # patch deployment_id
-        rs_mapping = {}
+        # patch deployment_id / deployment_name from ReplicaSet owner
+        rs_id_mapping = {}
+        rs_name_mapping = {}
         rss = ReplicaSet().cached_all([cluster])
         for rs in rss:
-            rs_mapping.setdefault(rs['cluster_id'], {}).setdefault(rs['id'], rs['deployment_id'])
+            rs_id_mapping.setdefault(rs['cluster_id'], {}).setdefault(rs['id'], rs['deployment_id'])
+            rs_name_mapping.setdefault(rs['cluster_id'], {}).setdefault(rs['id'], rs.get('deployment_name'))
         result['node_id'] = node_mapping.get(result['cluster_id'], {}).get(result['node_id'], None)
-        result['deployment_id'] = rs_mapping.get(result['cluster_id'], {}).get(result['replicaset_id'], None)
+        result['deployment_id'] = rs_id_mapping.get(result['cluster_id'], {}).get(result['replicaset_id'], None)
+        result['deployment_name'] = rs_name_mapping.get(result['cluster_id'], {}).get(result['replicaset_id'], None)
         return result
 
     def all(self, clusters):

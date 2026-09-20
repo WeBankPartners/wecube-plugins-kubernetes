@@ -176,6 +176,76 @@ def convert_service_port(items):
     return rets
 
 
+def _ports_from_image_port_string(item):
+    """Convert image_port / port string (comma or semicolon separated) to Service port dicts."""
+    rets = []
+    if not item:
+        return rets
+    for idx, port_info in enumerate(convert_pod_ports(str(item))):
+        port = port_info.get('containerPort')
+        if not port:
+            continue
+        protocol = port_info.get('protocol') or 'TCP'
+        port_name = '%s-%s' % (str(protocol).lower(), port)
+        if len(port_name) > 15:
+            port_name = 'port-%d' % idx
+        rets.append({
+            'name': port_name,
+            'port': int(port),
+            'targetPort': int(port),
+            'protocol': protocol
+        })
+    return rets
+
+
+def resolve_workload_service_ports(data):
+    """
+    Resolve ClusterIP Service ports from workload apply input.
+
+    Priority: servicePorts > image_port > port.
+    Each returned item is a single Service port (port / targetPort / protocol / name).
+    """
+    if not data:
+        return []
+    if data.get('servicePorts'):
+        return convert_service_port(data['servicePorts'])
+    if data.get('image_port'):
+        ports = _ports_from_image_port_string(data.get('image_port', ''))
+        if ports:
+            return ports
+    if data.get('port') is not None and str(data.get('port')).strip() != '':
+        raw_port = str(data['port']).strip()
+        if ',' in raw_port or ';' in raw_port:
+            return _ports_from_image_port_string(raw_port)
+        target_port = data.get('targetPort', data['port'])
+        protocol = data.get('protocol') or 'TCP'
+        port_item = {
+            'port': int(data['port']),
+            'targetPort': int(target_port) if isinstance(target_port, (int, float)) or str(target_port).isdigit() else target_port,
+            'protocol': protocol
+        }
+        if data.get('portName'):
+            port_item['name'] = data['portName']
+        if data.get('nodePort'):
+            port_item['nodePort'] = int(data['nodePort'])
+        return [port_item]
+    return []
+
+
+def port_service_base_name(data, max_length=52):
+    raw = data.get('serviceName') or data.get('name') or ''
+    raw = normalize_statefulset_name(raw)
+    return escape_service_name(raw, max_length=max_length)
+
+
+def build_port_service_name(base_name, port, protocol='TCP'):
+    """One ClusterIP Service name per port, e.g. repayment-8080 / repayment-53-udp."""
+    suffix = '-%s' % int(port)
+    if protocol and str(protocol).upper() != 'TCP':
+        suffix += '-%s' % str(protocol).lower()
+    return escape_service_name('%s%s' % (base_name, suffix))
+
+
 def convert_env(items):
     # convert envs
     rets = []

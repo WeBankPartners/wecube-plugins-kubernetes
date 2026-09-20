@@ -465,7 +465,1537 @@ class Cluster:
         return result
 
 
-class Deployment:
+class WorkloadPodOps:
+    """Shared wait / health / CMDB / watcher logic for Deployment and StatefulSet."""
+    workload_kind = 'Workload'
+    apply_source = 'workload_apply'
+    use_ordinal_pod_placeholders = False
+
+    def _query_host_resource_guid(self, cmdb_client, pod_host_ip):
+        """根据 IP 地址查询 CMDB 中对应的 host_resource 的 GUID
+        
+        Args:
+            cmdb_client: CMDB 客户端
+            pod_host_ip: Pod 所在 Node 的 IP 地址
+        
+        Returns:
+            str: host_resource 的 GUID，如果查询失败或未找到则返回 None
+        """
+        if not pod_host_ip:
+            return None
+        
+        try:
+            query_data = {
+                "criteria": {
+                    "attrName": "ip_address",
+                    "op": "eq",
+                    "condition": pod_host_ip
+                }
+            }
+            
+            LOG.debug('Querying CMDB for host_resource with ip_address: %s', pod_host_ip)
+            response = cmdb_client.query('wecmdb', const.CmdbCI.HOST_RESOURCE, query_data)
+            
+            if response and response.get('data'):
+                if len(response['data']) > 0:
+                    host_resource_guid = response['data'][0].get('guid')
+                    if host_resource_guid:
+                        LOG.info('Found host_resource GUID: %s for IP: %s', host_resource_guid, pod_host_ip)
+                        return host_resource_guid
+                    else:
+                        LOG.warning('host_resource record found but no guid field for IP: %s', pod_host_ip)
+                else:
+                    LOG.warning('No host_resource found in CMDB for IP: %s', pod_host_ip)
+            else:
+                LOG.warning('CMDB query for host_resource returned no data for IP: %s', pod_host_ip)
+        except Exception as e:
+            LOG.error('Failed to query host_resource from CMDB for IP %s: %s', pod_host_ip, str(e))
+        
+        return None
+    
+    def _validate_pod_health(self, k8s_client, statefulset_name, namespace, expected_replicas):
+        """验证 Pod 的健康状态
+        
+        Args:
+            k8s_client: Kubernetes 客户端
+            statefulset_name: StatefulSet 名称
+            namespace: 命名空间
+            expected_replicas: 预期的副本数
+        
+        Returns:
+            bool: 如果所有 Pod 都健康则返回 True，否则返回 False
+        """
+        try:
+            # 获取 StatefulSet 的所有 Pod
+            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
+            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
+            
+            if not pod_list or not pod_list.items:
+                LOG.warning('No pods found for StatefulSet %s', statefulset_name)
+                return False
+            
+            ready_count = 0
+            for pod in pod_list.items:
+                pod_name = pod.metadata.name
+                phase = pod.status.phase if pod.status else 'Unknown'
+                
+                # 检查 Pod 的 Ready condition
+                is_ready = False
+                if pod.status and pod.status.conditions:
+                    for condition in pod.status.conditions:
+                        if condition.type == 'Ready' and condition.status == 'True':
+                            is_ready = True
+                            break
+                
+                if phase == 'Running' and is_ready:
+                    ready_count += 1
+                    LOG.info('Pod %s is Running and Ready', pod_name)
+                else:
+                    LOG.warning('Pod %s - Phase: %s, Ready: %s', pod_name, phase, is_ready)
+                    
+                    # 记录容器状态
+                    if pod.status and pod.status.container_statuses:
+                        for container_status in pod.status.container_statuses:
+                            if container_status.state.waiting:
+                                LOG.warning('  Container %s waiting: %s - %s',
+                                          container_status.name,
+                                          container_status.state.waiting.reason,
+                                          container_status.state.waiting.message or '')
+                            elif container_status.state.terminated:
+                                LOG.error('  Container %s terminated: %s (exit code %d)',
+                                        container_status.name,
+                                        container_status.state.terminated.reason or 'Unknown',
+                                        container_status.state.terminated.exit_code or 0)
+            
+            return ready_count >= expected_replicas
+        
+        except Exception as e:
+            LOG.error('Failed to validate pod health: %s', str(e))
+            return False
+
+    _RECOVERABLE_FAILED_POD_REASONS = {
+        'Evicted',
+        'NodeLost',
+        'Shutdown',
+        'Preempting',
+    }
+
+    def _get_pod_ready_timeout(self, data):
+        raw_timeout = data.get('pod_ready_timeout')
+        if raw_timeout is None or str(raw_timeout).strip() == '':
+            raw_timeout = getattr(CONF, 'pod_ready_timeout', '') or 480
+
+        try:
+            timeout = int(raw_timeout)
+        except (TypeError, ValueError):
+            LOG.warning('Invalid pod_ready_timeout value %s, using default 480 seconds', raw_timeout)
+            return 480
+
+        if timeout <= 0:
+            LOG.warning('pod_ready_timeout must be positive, got %s, using default 480 seconds', raw_timeout)
+            return 480
+
+        return timeout
+
+    def _is_recoverable_failed_pod(self, pod):
+        """判断 Failed Pod 是否属于可等待恢复的调度/节点类失败。"""
+        status = getattr(pod, 'status', None)
+        phase = getattr(status, 'phase', None) if status else None
+        reason = getattr(status, 'reason', None) if status else None
+        return phase == 'Failed' and reason in self._RECOVERABLE_FAILED_POD_REASONS
+
+    def _build_pod_failure_detail(self, pod):
+        """构造简短的 Pod 失败详情，避免界面只看到 Failed state。"""
+        pod_name = getattr(getattr(pod, 'metadata', None), 'name', 'Unknown')
+        status = getattr(pod, 'status', None)
+        phase = getattr(status, 'phase', 'Unknown') if status else 'Unknown'
+        reason = getattr(status, 'reason', None) if status else None
+        message = getattr(status, 'message', None) if status else None
+
+        details = [f"Pod {pod_name}: phase={phase}"]
+        if reason:
+            details.append(f"reason={reason}")
+        if message:
+            details.append(f"message={message[:200]}")
+
+        for attr_name, status_type in (
+                ('init_container_statuses', 'init container'),
+                ('container_statuses', 'container')):
+            for container_status in (getattr(status, attr_name, None) or []):
+                container_name = getattr(container_status, 'name', 'Unknown')
+                restart_count = getattr(container_status, 'restart_count', 0) or 0
+                state = getattr(container_status, 'state', None)
+                if not state:
+                    continue
+                waiting = getattr(state, 'waiting', None)
+                terminated = getattr(state, 'terminated', None)
+                if waiting:
+                    wait_reason = getattr(waiting, 'reason', None) or 'Unknown'
+                    wait_message = getattr(waiting, 'message', None) or ''
+                    detail = (f"{container_name}: waiting - {wait_reason} "
+                              f"(restarts {restart_count})")
+                    if wait_message:
+                        detail += f" - {wait_message[:200]}"
+                    details.append(detail)
+                elif terminated:
+                    term_reason = getattr(terminated, 'reason', None) or 'Unknown'
+                    exit_code = getattr(terminated, 'exit_code', 0) or 0
+                    term_message = getattr(terminated, 'message', None) or ''
+                    detail = (f"{container_name}: terminated - {term_reason} "
+                              f"(exit {exit_code})")
+                    if restart_count:
+                        detail += f", restarts {restart_count}"
+                    if term_message:
+                        detail += f" - {term_message[:200]}"
+                    if status_type == 'init container':
+                        detail = 'init ' + detail
+                    details.append(detail)
+
+        return '; '.join(details)
+
+    @staticmethod
+    def _is_pod_terminating(pod):
+        metadata = getattr(pod, 'metadata', None)
+        return bool(getattr(metadata, 'deletion_timestamp', None))
+
+    @staticmethod
+    def _is_pod_ready(pod):
+        """True when the Pod Ready condition is True (fallback: all containers ready)."""
+        status = getattr(pod, 'status', None)
+        if not status:
+            return False
+        for condition in getattr(status, 'conditions', None) or []:
+            if isinstance(condition, dict):
+                cond_type = condition.get('type')
+                cond_status = condition.get('status')
+            else:
+                cond_type = getattr(condition, 'type', None)
+                cond_status = getattr(condition, 'status', None)
+            if cond_type == 'Ready':
+                return cond_status in (True, 'True')
+        container_statuses = getattr(status, 'container_statuses', None) or []
+        if not container_statuses:
+            return False
+        for container_status in container_statuses:
+            if isinstance(container_status, dict):
+                ready = container_status.get('ready')
+            else:
+                ready = getattr(container_status, 'ready', False)
+            if not ready:
+                return False
+        return True
+
+    @staticmethod
+    def _iter_container_statuses(pod):
+        status = getattr(pod, 'status', None)
+        if not status:
+            return
+        for container_status in getattr(status, 'init_container_statuses', None) or []:
+            yield container_status
+        for container_status in getattr(status, 'container_statuses', None) or []:
+            yield container_status
+
+    @classmethod
+    def _find_stuck_waiting(cls, pod):
+        """Return (container_name, reason, restart_count) if the Pod is stuck."""
+        for container_status in cls._iter_container_statuses(pod):
+            state = getattr(container_status, 'state', None)
+            waiting = getattr(state, 'waiting', None) if state else None
+            reason = getattr(waiting, 'reason', None) if waiting else None
+            if reason in STUCK_WAITING_REASONS:
+                return (
+                    getattr(container_status, 'name', '') or '',
+                    reason,
+                    getattr(container_status, 'restart_count', 0) or 0,
+                )
+        return None
+
+    @staticmethod
+    def _env_name_value(item):
+        if isinstance(item, dict):
+            return item.get('name'), item.get('value')
+        return getattr(item, 'name', None), getattr(item, 'value', None)
+
+    @classmethod
+    def _package_urls_from_containers(cls, containers):
+        urls = set()
+        for container in containers or []:
+            if isinstance(container, dict):
+                env_list = container.get('env') or []
+            else:
+                env_list = getattr(container, 'env', None) or []
+            for item in env_list:
+                name, value = cls._env_name_value(item)
+                if name == 'PACKAGE_URL' and value:
+                    urls.add(value)
+        return urls
+
+    @classmethod
+    def _pod_init_package_urls(cls, pod):
+        spec = getattr(pod, 'spec', None)
+        if not spec:
+            return set()
+        if isinstance(spec, dict):
+            inits = spec.get('initContainers') or spec.get('init_containers') or []
+        else:
+            inits = (getattr(spec, 'init_containers', None)
+                     or getattr(spec, 'initContainers', None)
+                     or [])
+        return cls._package_urls_from_containers(inits)
+
+    @classmethod
+    def _template_init_package_urls(cls, resource_template):
+        try:
+            inits = (((resource_template or {}).get('spec') or {})
+                     .get('template', {}).get('spec', {}).get('initContainers')) or []
+        except AttributeError:
+            return set()
+        return cls._package_urls_from_containers(inits)
+
+    @classmethod
+    def _stale_not_ready_template(cls, pod, desired_images=None, desired_package_urls=None):
+        """Reason string if a NotReady Pod is still on the previous apply template.
+
+        OrderedReady RollingUpdate will not replace an unhealthy Pod, even when
+        the StatefulSet spec already points at a new image / conf package.
+        """
+        if cls._is_pod_ready(pod):
+            return None
+        if desired_images:
+            pod_images = cls._pod_main_images(pod)
+            desired = set(desired_images)
+            if pod_images and pod_images != desired:
+                return 'image %s != %s' % (
+                    ','.join(sorted(pod_images)),
+                    ','.join(sorted(desired)),
+                )
+        if desired_package_urls:
+            pod_urls = cls._pod_init_package_urls(pod)
+            desired_urls = set(desired_package_urls)
+            if pod_urls and pod_urls != desired_urls:
+                return 'PACKAGE_URL mismatch'
+        return None
+
+    @staticmethod
+    def _container_image(container):
+        if isinstance(container, dict):
+            return container.get('image') or ''
+        return getattr(container, 'image', None) or ''
+
+    @classmethod
+    def _pod_main_images(cls, pod):
+        spec = getattr(pod, 'spec', None)
+        containers = getattr(spec, 'containers', None) if spec else None
+        return {cls._container_image(container) for container in (containers or [])
+                if cls._container_image(container)}
+
+    @classmethod
+    def _template_main_images(cls, resource_template):
+        try:
+            containers = (((resource_template or {}).get('spec') or {})
+                          .get('template', {}).get('spec', {}).get('containers')) or []
+        except AttributeError:
+            return set()
+        return {cls._container_image(container) for container in containers
+                if cls._container_image(container)}
+
+    def _delete_stuck_pods_blocking_rollout(self, k8s_client, resource_name, namespace,
+                                            replicas, desired_images=None,
+                                            desired_package_urls=None):
+        """Delete never-Ready / stale-template Pods so OrderedReady can roll.
+
+        ImagePullBackOff / CrashLoopBackOff (and similar waiting reasons) never
+        become Ready. A Running-but-not-Ready Pod on the *previous* image or
+        conf PACKAGE_URL also deadlocks OrderedReady: the controller waits for
+        Ready before applying the new template. Delete once; it recreates from
+        the latest spec. Ready Pods and NotReady Pods already on the new
+        template are left alone.
+        """
+        deleted = []
+        pods = []
+        label_selector = '%s=%s' % (const.Tag.POD_AUTO_TAG, resource_name)
+        try:
+            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
+            if pod_list and pod_list.items:
+                pods = list(pod_list.items)
+        except Exception as exc:
+            LOG.warning('[RollingUpdate] Failed to list pods for %s: %s',
+                        resource_name, str(exc))
+        if not pods:
+            for index in range(int(replicas or 1)):
+                pod_name = '%s-%d' % (resource_name, index)
+                try:
+                    pod = k8s_client.get_pod(pod_name, namespace)
+                    if pod:
+                        pods.append(pod)
+                except Exception as exc:
+                    LOG.warning('[RollingUpdate] Failed to check Pod %s: %s',
+                                pod_name, str(exc))
+        for pod in pods:
+            pod_name = getattr(getattr(pod, 'metadata', None), 'name', '') or ''
+            try:
+                if not pod or self._is_pod_terminating(pod):
+                    continue
+                stuck = self._find_stuck_waiting(pod)
+                stale = self._stale_not_ready_template(
+                    pod, desired_images=desired_images,
+                    desired_package_urls=desired_package_urls)
+                if stuck:
+                    container_name, reason, restart_count = stuck
+                    LOG.warning(
+                        '[RollingUpdate] Pod %s/%s container "%s" is in %s '
+                        '(restarts=%d), deleting to unblock RollingUpdate.',
+                        namespace, pod_name, container_name, reason, restart_count,
+                    )
+                elif stale:
+                    LOG.warning(
+                        '[RollingUpdate] Pod %s/%s is not Ready and still on '
+                        'old template (%s), deleting to unblock RollingUpdate.',
+                        namespace, pod_name, stale,
+                    )
+                else:
+                    continue
+                k8s_client.delete_pod(pod_name, namespace)
+                deleted.append(pod_name)
+            except Exception as exc:
+                LOG.warning('[RollingUpdate] Failed to check/delete Pod %s: %s',
+                            pod_name, str(exc))
+        if deleted:
+            LOG.info('[RollingUpdate] Deleted %d stuck pod(s): %s. '
+                     '%s will recreate them with the new template.',
+                     len(deleted), deleted, self.workload_kind)
+        else:
+            LOG.info('[RollingUpdate] No stuck never-Ready pods found, '
+                     'RollingUpdate proceeds normally.')
+        return deleted
+    
+    def _check_pod_failures(self, k8s_client, statefulset_name, namespace, desired_images=None):
+        """检查 Pod 是否有创建失败的情况
+        
+        Args:
+            k8s_client: Kubernetes 客户端
+            statefulset_name: StatefulSet 名称
+            namespace: 命名空间
+            desired_images: 本次 apply 的主容器镜像集合。若 Pod 仍使用旧镜像，
+                视为滚动更新尚未完成，不把旧错误当成本次部署的致命失败。
+        
+        Returns:
+            tuple: (has_fatal_error: bool, error_message: str or None)
+        """
+        try:
+            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
+            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
+            
+            if not pod_list or not pod_list.items:
+                LOG.warning('No pods found for StatefulSet %s, may still be creating', statefulset_name)
+                return False, None
+            
+            # 定义致命错误状态（需要立即退出的）
+            FATAL_REASONS = {
+                'ImagePullBackOff': 'Image cannot be pulled',
+                'ErrImagePull': 'Failed to pull image',
+                'CreateContainerConfigError': 'Container configuration error',
+                'InvalidImageName': 'Invalid image name',
+            }
+            
+            # CrashLoopBackOff 需要检查重启次数（避免误判暂时性失败）
+            CRASH_THRESHOLD = 3  # 重启3次以上才判定为致命错误
+            
+            for pod in pod_list.items:
+                pod_name = pod.metadata.name
+                if self._is_pod_terminating(pod):
+                    LOG.info('Skipping terminating Pod %s during failure check', pod_name)
+                    continue
+                if desired_images:
+                    pod_images = self._pod_main_images(pod)
+                    if pod_images and pod_images != set(desired_images):
+                        LOG.warning(
+                            'Skipping stale Pod %s during failure check '
+                            '(pod images %s != desired %s)',
+                            pod_name, pod_images, desired_images)
+                        continue
+                phase = pod.status.phase if pod.status else 'Unknown'
+                
+                # 检查 Pod Phase 失败状态
+                if phase == 'Failed':
+                    error_msg = self._build_pod_failure_detail(pod)
+                    if self._is_recoverable_failed_pod(pod):
+                        LOG.warning('Recoverable Failed Pod detected, keep waiting: %s', error_msg)
+                        continue
+                    LOG.error('❌ %s - exiting immediately', error_msg)
+                    return True, error_msg
+                
+                # 检查容器状态
+                if pod.status and pod.status.container_statuses:
+                    for container_status in pod.status.container_statuses:
+                        container_name = container_status.name
+                        
+                        # 检查 Waiting 状态
+                        if container_status.state and container_status.state.waiting:
+                            reason = container_status.state.waiting.reason
+                            message = container_status.state.waiting.message or ''
+                            
+                            # 检查是否是致命错误（镜像拉取失败、配置错误等）
+                            if reason in FATAL_REASONS:
+                                error_msg = (f"Pod {pod_name}, Container {container_name}: "
+                                           f"{reason} - {message}")
+                                LOG.error('❌ %s - exiting immediately', error_msg)
+                                return True, error_msg
+                            
+                            # 检查 CrashLoopBackOff（需要验证重启次数）
+                            if reason == 'CrashLoopBackOff':
+                                restart_count = container_status.restart_count or 0
+                                LOG.error('❌ Pod %s, Container %s: %s (restarts: %d) - %s',
+                                        pod_name, container_name, reason, restart_count, message)
+                                
+                                # 重启次数达到阈值，判定为致命错误
+                                if restart_count >= CRASH_THRESHOLD:
+                                    error_msg = (f"Pod {pod_name}, Container {container_name}: "
+                                               f"CrashLoopBackOff with {restart_count} restarts - {message}")
+                                    LOG.error('🔥 Fatal: %s - exiting immediately', error_msg)
+                                    return True, error_msg
+        
+        except Exception as e:
+            LOG.warning('Failed to check pod failures: %s', str(e))
+            return False, None
+        
+        return False, None  # 没有致命错误
+    
+    def _get_pod_failure_details(self, k8s_client, statefulset_name, namespace):
+        """获取 Pod 失败的详细信息
+        
+        Args:
+            k8s_client: Kubernetes 客户端
+            statefulset_name: StatefulSet 名称
+            namespace: 命名空间
+        
+        Returns:
+            str: Pod 失败的详细描述
+        """
+        try:
+            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
+            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
+            
+            if not pod_list or not pod_list.items:
+                return "No pods found"
+            
+            errors = []
+            for pod in pod_list.items:
+                pod_name = pod.metadata.name
+                phase = pod.status.phase if pod.status else 'Unknown'
+                
+                if phase != 'Running':
+                    errors.append(self._build_pod_failure_detail(pod))
+                
+                if pod.status and pod.status.container_statuses:
+                    for container_status in pod.status.container_statuses:
+                        if container_status.state:
+                            if container_status.state.waiting:
+                                reason = container_status.state.waiting.reason or 'Unknown'
+                                message = container_status.state.waiting.message or ''
+                                errors.append(f"{pod_name}/{container_status.name}: {reason} - {message[:100]}")
+                            elif container_status.state.terminated:
+                                reason = container_status.state.terminated.reason or 'Unknown'
+                                exit_code = container_status.state.terminated.exit_code or 0
+                                errors.append(f"{pod_name}/{container_status.name}: terminated - {reason} (exit {exit_code})")
+            
+            return '; '.join(errors) if errors else "Unknown error"
+        
+        except Exception as e:
+            return f"Failed to get details: {str(e)}"
+
+    def _get_pod_logs_summary(self, k8s_client, statefulset_name, namespace, tail_lines=50):
+        """
+        获取 StatefulSet 下各 Pod 的最近日志（包含当前和上一次容器实例），
+        等价于对每个 Pod 执行：
+            kubectl logs -n <namespace> <pod> --tail=<tail_lines>
+            kubectl logs -n <namespace> <pod> --previous --tail=<tail_lines>
+
+        只在出现故障时调用，结果拼入错误信息供快速定位。
+        日志拉取失败不影响主流程，直接跳过对应 Pod。
+        """
+        try:
+            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
+            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
+            if not pod_list or not pod_list.items:
+                return ''
+
+            log_parts = []
+            for pod in pod_list.items:
+                pod_name = pod.metadata.name
+                phase = pod.status.phase if pod.status else 'Unknown'
+
+                # Succeeded 的 Pod 不拉日志（正常退出，无需诊断）
+                # Running 但 not-ready（健康检查持续失败）也需要拉当前日志
+                if phase == 'Succeeded':
+                    continue
+
+                # 判断是否有重启记录，决定是否同时拉 previous 日志
+                has_restarts = False
+                if pod.status and pod.status.container_statuses:
+                    has_restarts = any(
+                        (cs.restart_count or 0) > 0
+                        for cs in pod.status.container_statuses
+                    )
+
+                # 当前容器日志（始终拉取）
+                current_log = k8s_client.get_pod_log(
+                    pod_name, namespace, previous=False, tail_lines=tail_lines
+                )
+                # 上一次容器实例日志（仅在有重启记录时有意义）
+                previous_log = None
+                if has_restarts:
+                    previous_log = k8s_client.get_pod_log(
+                        pod_name, namespace, previous=True, tail_lines=tail_lines
+                    )
+
+                pod_log_lines = [f'--- Pod: {pod_name} (phase={phase}) ---']
+                if current_log:
+                    pod_log_lines.append(f'[Current logs (last {tail_lines} lines)]:\n{current_log.strip()}')
+                if previous_log:
+                    pod_log_lines.append(f'[Previous logs (last {tail_lines} lines)]:\n{previous_log.strip()}')
+                if not current_log and not previous_log:
+                    pod_log_lines.append('[No logs available]')
+
+                log_parts.append('\n'.join(pod_log_lines))
+
+            return '\n\n'.join(log_parts)
+        except Exception as e:
+            LOG.warning('[StatefulSet] Failed to collect pod logs: %s', str(e))
+            return ''
+
+    def _sync_pods_to_cmdb(self, k8s_client, namespace, pod_list, instance_id):
+        """同步 Pod 信息到 CMDB"""
+        if not instance_id:
+            LOG.warning('No instanceId provided, skipping CMDB sync')
+            return
+        
+        try:
+            from wecubek8s.common import wecmdb
+            from wecubek8s.common import wecube
+            
+            # 获取 CMDB 客户端（需要从配置中获取 CMDB 地址）
+            cmdb_server = CONF.wecube.base_url
+            if not cmdb_server:
+                LOG.warning('CMDB base_url not configured, skipping CMDB sync')
+                return
+            
+            # 使用子系统身份登录获取 token，不依赖浏览器请求携带的用户 token
+            wecube_client = wecube.WeCubeClient(cmdb_server, None)
+            subsystem_token = wecube_client.login_subsystem(set_self=False)
+            LOG.info('Using subsystem token for CMDB operations (token prefix: %s...)',
+                     subsystem_token[:20] if subsystem_token else 'None')
+            cmdb_client = wecmdb.EntityClient(cmdb_server, subsystem_token)
+            
+            # 1. 查询 CMDB 中该 instanceId 下的所有 Pod
+            query_data = {
+                "criteria": {
+                    "attrName": const.CmdbAttr.APP_INSTANCE,
+                    "op": "eq",
+                    "condition": instance_id
+                }
+            }
+            
+            LOG.info('Querying CMDB for pods with %s: %s', const.CmdbAttr.APP_INSTANCE, instance_id)
+            cmdb_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, query_data)
+            
+            # 记录 CMDB 响应（用于调试）
+            if cmdb_response:
+                LOG.info('CMDB response status: %s', cmdb_response.get('status', 'unknown'))
+                if cmdb_response.get('data'):
+                    LOG.info('CMDB query returned %d pod records', len(cmdb_response['data']))
+                else:
+                    LOG.warning('CMDB query returned empty data for instanceId: %s', instance_id)
+            else:
+                LOG.warning('CMDB query returned None for instanceId: %s', instance_id)
+            
+            # 解析 CMDB 返回的 Pod 列表
+            cmdb_pods = {}
+            if cmdb_response and cmdb_response.get('data'):
+                for idx, pod_data in enumerate(cmdb_response['data']):
+                    # 记录第一个 pod 的所有字段（用于调试字段名问题）
+                    if idx == 0:
+                        LOG.info('CMDB pod record fields: %s', ', '.join(pod_data.keys()) if pod_data else 'empty')
+                    
+                    pod_code = pod_data.get('code')  # CMDB 字段名：code（Pod 名称）
+                    if pod_code:
+                        cmdb_pods[pod_code] = {
+                            'guid': pod_data.get('guid'),  # CMDB 字段名：guid（记录标识符）
+                            'asset_id': pod_data.get('asset_id')  # CMDB 字段名：asset_id（K8s Pod UID）
+                        }
+                        LOG.info('Found CMDB pod [%d]: code=%s, guid=%s, asset_id=%s', 
+                                idx + 1, pod_code, pod_data.get('guid'), pod_data.get('asset_id'))
+                    else:
+                        LOG.warning('CMDB pod record [%d] has no "code" field: %s', idx + 1, list(pod_data.keys()))
+                LOG.info('Total CMDB pod names found: [%s]', ', '.join(cmdb_pods.keys()) if cmdb_pods else 'None')
+            
+            # 2. 对比 K8s 实际的 Pod 列表，找出需要创建和更新的 Pod
+            LOG.info('K8s running pods: %s', ', '.join([p['name'] for p in pod_list]) if pod_list else 'None')
+            
+            creates = []  # 需要创建的 Pod
+            updates = []  # 需要更新的 Pod
+            
+            for pod_info in pod_list:
+                pod_name = pod_info['name']
+                pod_id = pod_info['id']
+                pod_host_ip = pod_info.get('host_ip', '')  # Pod 所在 Node 的 IP
+                
+                # 如果 Pod ID 为空，说明 Pod 还没有创建，跳过
+                if not pod_id:
+                    LOG.info('Pod %s has no ID yet (not created), skipping CMDB sync', pod_name)
+                    continue
+                
+                if pod_name in cmdb_pods:
+                    # Pod 已存在于 CMDB，检查是否需要更新
+                    cmdb_pod = cmdb_pods[pod_name]
+                    if cmdb_pod['asset_id'] != pod_id:
+                        # Pod ID 发生变化（可能是 Pod 被重建），需要更新
+                        update_data = {
+                            'guid': cmdb_pod['guid'],  # CMDB 字段名：guid（记录标识符）
+                            'asset_id': pod_id  # CMDB 字段名：asset_id（新的 K8s Pod UID）
+                        }
+                        # 如果有 host_ip，查询对应的 host_resource GUID
+                        if pod_host_ip:
+                            host_resource_guid = self._query_host_resource_guid(cmdb_client, pod_host_ip)
+                            if host_resource_guid:
+                                update_data[const.CmdbAttr.HOST_RESOURCE] = host_resource_guid
+                                LOG.info('Pod %s will update with %s GUID: %s (IP: %s)',
+                                        pod_name, const.CmdbAttr.HOST_RESOURCE, host_resource_guid, pod_host_ip)
+                            else:
+                                LOG.warning('Pod %s has host_ip %s but no matching host_resource found in CMDB', 
+                                           pod_name, pod_host_ip)
+                        updates.append(update_data)
+                        LOG.info('Pod %s ID changed: %s -> %s, will update (host_ip: %s)', 
+                                pod_name, cmdb_pod['asset_id'], pod_id, pod_host_ip or 'N/A')
+                    else:
+                        LOG.debug('Pod %s ID unchanged: %s', pod_name, pod_id)
+                else:
+                    # Pod 不存在于 CMDB，需要创建
+                    create_data = {
+                        'code': pod_name,  # CMDB 字段名：code（Pod 名称）
+                        'asset_id': pod_id,  # CMDB 字段名：asset_id（K8s Pod UID）
+                        const.CmdbAttr.APP_INSTANCE: instance_id
+                    }
+                    # 如果有 host_ip，查询对应的 host_resource GUID
+                    if pod_host_ip:
+                        host_resource_guid = self._query_host_resource_guid(cmdb_client, pod_host_ip)
+                        if host_resource_guid:
+                            create_data[const.CmdbAttr.HOST_RESOURCE] = host_resource_guid
+                            LOG.info('Pod %s will create with %s GUID: %s (IP: %s)',
+                                    pod_name, const.CmdbAttr.HOST_RESOURCE, host_resource_guid, pod_host_ip)
+                        else:
+                            LOG.warning('Pod %s has host_ip %s but no matching host_resource found in CMDB', 
+                                       pod_name, pod_host_ip)
+                    creates.append(create_data)
+                    LOG.info('Pod %s (ID: %s, host_ip: %s) not found in CMDB, will create', 
+                            pod_name, pod_id, pod_host_ip or 'N/A')
+            
+            # 3. 批量创建和更新 CMDB
+            if creates:
+                LOG.info('Creating %d new pods in CMDB', len(creates))
+                try:
+                    cmdb_client.create('wecmdb', const.CmdbCI.POD, creates)
+                    LOG.info('Successfully created %d pods in CMDB', len(creates))
+                except Exception as e:
+                    LOG.error('Failed to create pods in CMDB: %s', str(e))
+            
+            if updates:
+                LOG.info('Updating %d existing pods in CMDB', len(updates))
+                try:
+                    cmdb_client.update('wecmdb', const.CmdbCI.POD, updates)
+                    LOG.info('Successfully updated %d pods in CMDB', len(updates))
+                except Exception as e:
+                    LOG.error('Failed to update pods in CMDB: %s', str(e))
+            
+            if not creates and not updates:
+                LOG.info('All pods in sync with CMDB, no changes needed')
+                
+        except Exception as e:
+            LOG.error('Failed to sync pods to CMDB: %s', str(e))
+            # 不抛出异常，避免影响主流程
+
+    def _cmdb_entity_client(self):
+        """Build a subsystem-authenticated WeCMDB entity client. Returns None if unconfigured."""
+        from wecubek8s.common import wecmdb
+        from wecubek8s.common import wecube
+
+        cmdb_server = CONF.wecube.base_url if getattr(CONF, 'wecube', None) else None
+        if not cmdb_server:
+            LOG.warning('CMDB base_url not configured, skipping CMDB sync')
+            return None
+        wecube_client = wecube.WeCubeClient(cmdb_server, None)
+        subsystem_token = wecube_client.login_subsystem(set_self=False)
+        LOG.info('Using subsystem token for CMDB operations (token prefix: %s...)',
+                 subsystem_token[:20] if subsystem_token else 'None')
+        return wecmdb.EntityClient(cmdb_server, subsystem_token)
+
+    def _query_cmdb_guid(self, cmdb_client, ci_name, attr_name, condition):
+        if not condition:
+            return None
+        try:
+            response = cmdb_client.query('wecmdb', ci_name, {
+                'criteria': {
+                    'attrName': attr_name,
+                    'op': 'eq',
+                    'condition': condition
+                }
+            })
+            if response and response.get('data'):
+                return response['data'][0].get('guid')
+        except Exception as e:
+            LOG.warning('Failed to query CMDB %s by %s=%s: %s', ci_name, attr_name, condition, str(e))
+        return None
+
+    def _cmdb_ref_guid(self, value):
+        if not value:
+            return None
+        if isinstance(value, dict):
+            return value.get('guid') or value.get('guidPath')
+        return value
+
+    def _resolve_service_ports(self, data):
+        return api_utils.resolve_workload_service_ports(data)
+
+    def _port_service_base_name(self, data):
+        return api_utils.port_service_base_name(data)
+
+    def _port_service_name(self, base_name, port, protocol='TCP'):
+        return api_utils.build_port_service_name(base_name, port, protocol)
+
+    def _workload_pod_selector(self, data, resource_name):
+        selector = api_utils.convert_tag(data.get('pod_tags', []))
+        selector[const.Tag.POD_AUTO_TAG] = resource_name
+        selector[const.Tag.POD_AFFINITY_TAG] = resource_name
+        return selector
+
+    def _port_service_result(self, cluster_info, service_obj, svc_name, port, protocol, service_type):
+        uid = ''
+        cluster_ip = None
+        if service_obj is not None:
+            uid = getattr(service_obj.metadata, 'uid', None) or ''
+            cluster_ip = getattr(service_obj.spec, 'cluster_ip', None)
+            if cluster_ip == 'None':
+                cluster_ip = None
+        cluster_id = (cluster_info or {}).get('id', '')
+        asset_id = '%s_%s' % (cluster_id, uid) if cluster_id and uid else uid
+        return {
+            'name': svc_name,
+            'port': int(port),
+            'protocol': protocol or 'TCP',
+            'cluster_ip': cluster_ip,
+            'uid': uid,
+            'asset_id': asset_id,
+            'service_type': service_type or 'ClusterIP',
+            'cluster_ip_mode': 'AUTO'
+        }
+
+    def _apply_clusterip_service_body(self, k8s_client, namespace, body):
+        svc_name = body['metadata']['name']
+        exists = k8s_client.get_service(svc_name, namespace)
+        if exists is None:
+            created = k8s_client.create_service(namespace, body)
+            LOG.info('Created port Service %s/%s', namespace, svc_name)
+            return created
+        body['metadata']['resourceVersion'] = exists.metadata.resource_version
+        existing_ip = getattr(exists.spec, 'cluster_ip', None)
+        if existing_ip and existing_ip != 'None':
+            body['spec']['clusterIP'] = existing_ip
+        updated = k8s_client.update_service(svc_name, namespace, body)
+        LOG.info('Updated port Service %s/%s', namespace, svc_name)
+        return updated
+
+    def _cleanup_stale_port_services(self, k8s_client, namespace, resource_name, desired_names):
+        label_selector = '%s=%s,%s=port' % (
+            const.Tag.WORKLOAD_NAME_TAG,
+            api_utils.escape_label_value(resource_name),
+            const.Tag.SERVICE_ROLE_TAG
+        )
+        try:
+            listed = k8s_client.list_service(namespace, label_selector=label_selector)
+        except Exception as e:
+            LOG.warning('Failed to list port Services for cleanup (%s): %s', label_selector, str(e))
+            return
+        if not listed or not listed.items:
+            return
+        desired = set(desired_names)
+        for svc in listed.items:
+            name = svc.metadata.name
+            if name in desired:
+                continue
+            try:
+                LOG.info('Deleting stale port Service %s/%s', namespace, name)
+                k8s_client.delete_service(name, namespace)
+            except Exception as e:
+                LOG.warning('Failed to delete stale port Service %s/%s: %s', namespace, name, str(e))
+
+    def _cleanup_legacy_multiport_service(self, k8s_client, data, desired_names, keep_names=None):
+        """Remove the old one-Service-all-ports objects (-lb / bare name) when they are not kept."""
+        namespace = data['namespace']
+        keep = set(desired_names or [])
+        if keep_names:
+            keep.update(keep_names)
+        try:
+            base_name = self._port_service_base_name(data)
+        except Exception as e:
+            LOG.warning('Skip legacy Service cleanup, invalid base name: %s', str(e))
+            return
+        candidates = [base_name + '-lb']
+        if self.workload_kind != 'StatefulSet':
+            candidates.append(base_name)
+        for name in candidates:
+            if name in keep:
+                continue
+            try:
+                exists = k8s_client.get_service(name, namespace)
+            except Exception as e:
+                LOG.warning('Failed to query legacy Service %s/%s: %s', namespace, name, str(e))
+                continue
+            if exists is None:
+                continue
+            try:
+                LOG.info('Deleting legacy multi-port Service %s/%s', namespace, name)
+                k8s_client.delete_service(name, namespace)
+            except Exception as e:
+                LOG.warning('Failed to delete legacy Service %s/%s: %s', namespace, name, str(e))
+
+    def _ensure_port_services(self, k8s_client, data, resource_name, cluster_info, keep_names=None):
+        """Create one ClusterIP Service per port. Headless Services are not created here."""
+        service_ports = self._resolve_service_ports(data)
+        if not service_ports:
+            self._cleanup_stale_port_services(k8s_client, data['namespace'], resource_name, [])
+            self._cleanup_legacy_multiport_service(k8s_client, data, [], keep_names=keep_names)
+            return []
+
+        namespace = data['namespace']
+        base_name = self._port_service_base_name(data)
+        selector = self._workload_pod_selector(data, resource_name)
+        service_type = data.get('serviceType') or 'ClusterIP'
+        session_affinity = data.get('sessionAffinity')
+        results = []
+        desired_names = []
+
+        for idx, port_cfg in enumerate(service_ports):
+            port = int(port_cfg['port'])
+            protocol = port_cfg.get('protocol') or 'TCP'
+            svc_name = self._port_service_name(base_name, port, protocol)
+            desired_names.append(svc_name)
+            service_resource_id = '%s-svc-%s' % (data.get('correlation_id', resource_name), port)
+            if str(protocol).upper() != 'TCP':
+                service_resource_id += '-%s' % str(protocol).lower()
+            labels = api_utils.convert_tag(data.get('service_tags', data.get('tags', [])))
+            labels[const.Tag.SERVICE_ID_TAG] = api_utils.escape_label_value(service_resource_id)
+            labels[const.Tag.SERVICE_ROLE_TAG] = 'port'
+            labels[const.Tag.WORKLOAD_NAME_TAG] = api_utils.escape_label_value(resource_name)
+            port_name = port_cfg.get('name')
+            if not port_name:
+                port_name = '%s-%s' % (str(protocol).lower(), port)
+                if len(port_name) > 15:
+                    port_name = 'port-%d' % idx
+            spec_port = {
+                'name': port_name,
+                'port': port,
+                'targetPort': port_cfg.get('targetPort', port),
+                'protocol': protocol
+            }
+            if port_cfg.get('nodePort'):
+                spec_port['nodePort'] = int(port_cfg['nodePort'])
+            body = {
+                'apiVersion': 'v1',
+                'kind': 'Service',
+                'metadata': {
+                    'labels': labels,
+                    'name': svc_name
+                },
+                'spec': {
+                    'type': service_type,
+                    'selector': selector,
+                    'ports': [spec_port]
+                }
+            }
+            if session_affinity:
+                body['spec']['sessionAffinity'] = session_affinity
+            created = self._apply_clusterip_service_body(k8s_client, namespace, body)
+            if created is None:
+                created = k8s_client.get_service(svc_name, namespace)
+            results.append(self._port_service_result(
+                cluster_info, created, svc_name, port, protocol, service_type))
+
+        self._cleanup_stale_port_services(k8s_client, namespace, resource_name, desired_names)
+        self._cleanup_legacy_multiport_service(k8s_client, data, desired_names, keep_names=keep_names)
+        return results
+
+    def _delete_port_services(self, k8s_client, data, resource_name):
+        """Delete per-port ClusterIP Services created for this workload. Does not touch Headless."""
+        namespace = data.get('namespace', 'default')
+        deleted = []
+        label_selector = '%s=%s,%s=port' % (
+            const.Tag.WORKLOAD_NAME_TAG,
+            api_utils.escape_label_value(resource_name),
+            const.Tag.SERVICE_ROLE_TAG
+        )
+        try:
+            listed = k8s_client.list_service(namespace, label_selector=label_selector)
+            if listed and listed.items:
+                for svc in listed.items:
+                    name = svc.metadata.name
+                    LOG.info('Deleting port Service %s/%s', namespace, name)
+                    k8s_client.delete_service(name, namespace)
+                    deleted.append(name)
+        except Exception as e:
+            LOG.warning('Failed to list/delete port Services by label %s: %s', label_selector, str(e))
+
+        # Reconstruct names from current apply input when labels are missing (legacy / partial).
+        try:
+            base_name = self._port_service_base_name(data)
+            for port_cfg in self._resolve_service_ports(data):
+                name = self._port_service_name(base_name, port_cfg['port'], port_cfg.get('protocol') or 'TCP')
+                if name in deleted:
+                    continue
+                exists = k8s_client.get_service(name, namespace)
+                if exists is not None:
+                    LOG.info('Deleting port Service %s/%s', namespace, name)
+                    k8s_client.delete_service(name, namespace)
+                    deleted.append(name)
+            lb_name = api_utils.escape_service_name(base_name + '-lb')
+            if lb_name not in deleted:
+                exists_lb = k8s_client.get_service(lb_name, namespace)
+                if exists_lb is not None:
+                    LOG.info('Deleting legacy LoadBalancer Service %s/%s', namespace, lb_name)
+                    k8s_client.delete_service(lb_name, namespace)
+                    deleted.append(lb_name)
+            if self.workload_kind != 'StatefulSet' and base_name not in deleted:
+                exists_bare = k8s_client.get_service(base_name, namespace)
+                if exists_bare is not None:
+                    LOG.info('Deleting legacy Service %s/%s', namespace, base_name)
+                    k8s_client.delete_service(base_name, namespace)
+                    deleted.append(base_name)
+        except Exception as e:
+            LOG.warning('Failed to delete reconstructed port Services: %s', str(e))
+        return deleted
+
+    def _sync_services_to_cmdb(self, service_list, data, instance_id):
+        """Write one k8s_service CI per ClusterIP port Service. Does not write Ingress."""
+        if not instance_id:
+            LOG.warning('No instanceId provided, skipping Service CMDB sync')
+            return
+        if not service_list:
+            LOG.info('No port Services to sync to CMDB')
+            return
+        try:
+            cmdb_client = self._cmdb_entity_client()
+            if not cmdb_client:
+                return
+
+            namespace_name = data.get('namespace') or 'default'
+            namespace_guid = self._query_cmdb_guid(
+                cmdb_client, const.CmdbCI.NAMESPACE, 'code', namespace_name)
+            if not namespace_guid:
+                namespace_guid = self._query_cmdb_guid(
+                    cmdb_client, const.CmdbCI.NAMESPACE, 'key_name', namespace_name)
+            if not namespace_guid:
+                LOG.error('CMDB namespace CI not found for %s, skip Service writeback', namespace_name)
+                return
+
+            unit_guid = None
+            try:
+                workload_resp = cmdb_client.query('wecmdb', const.CmdbCI.WORKLOAD, {
+                    'criteria': {
+                        'attrName': 'guid',
+                        'op': 'eq',
+                        'condition': instance_id
+                    }
+                })
+                if workload_resp and workload_resp.get('data'):
+                    unit_guid = self._cmdb_ref_guid(workload_resp['data'][0].get('unit'))
+            except Exception as e:
+                LOG.warning('Failed to query workload %s for unit: %s', instance_id, str(e))
+
+            query_data = {
+                'criteria': {
+                    'attrName': const.CmdbAttr.SERVICE_WORKLOAD,
+                    'op': 'eq',
+                    'condition': instance_id
+                }
+            }
+            LOG.info('Querying CMDB for services with %s: %s',
+                     const.CmdbAttr.SERVICE_WORKLOAD, instance_id)
+            cmdb_response = cmdb_client.query('wecmdb', const.CmdbCI.SERVICE, query_data)
+            cmdb_services = {}
+            if cmdb_response and cmdb_response.get('data'):
+                for svc_data in cmdb_response['data']:
+                    svc_code = svc_data.get('code')
+                    if svc_code:
+                        cmdb_services[svc_code] = svc_data
+
+            creates = []
+            updates = []
+            for svc in service_list:
+                svc_name = svc.get('name')
+                asset_id = svc.get('asset_id')
+                if not svc_name or not asset_id:
+                    LOG.info('Service %s has no name/asset_id yet, skipping CMDB sync', svc_name)
+                    continue
+                payload = {
+                    'code': svc_name,
+                    'asset_id': asset_id,
+                    'service_type': svc.get('service_type') or 'ClusterIP',
+                    'cluster_ip_mode': svc.get('cluster_ip_mode') or 'AUTO',
+                    'port': str(svc.get('port')),
+                    const.CmdbAttr.SERVICE_NAMESPACE: namespace_guid,
+                    const.CmdbAttr.SERVICE_WORKLOAD: instance_id
+                }
+                if svc.get('cluster_ip'):
+                    payload['cluster_ip'] = svc['cluster_ip']
+                if unit_guid:
+                    payload[const.CmdbAttr.SERVICE_UNIT] = unit_guid
+
+                existing = cmdb_services.get(svc_name)
+                if existing:
+                    update_data = {'guid': existing.get('guid')}
+                    changed = False
+                    for key, value in payload.items():
+                        current = existing.get(key)
+                        if key in (const.CmdbAttr.SERVICE_NAMESPACE, const.CmdbAttr.SERVICE_WORKLOAD,
+                                   const.CmdbAttr.SERVICE_UNIT):
+                            current = self._cmdb_ref_guid(current) or current
+                        if current != value:
+                            update_data[key] = value
+                            changed = True
+                    if changed:
+                        updates.append(update_data)
+                        LOG.info('Service %s will update in CMDB (asset_id=%s, port=%s)',
+                                 svc_name, asset_id, payload['port'])
+                    else:
+                        LOG.debug('Service %s already in sync with CMDB', svc_name)
+                else:
+                    creates.append(payload)
+                    LOG.info('Service %s (asset_id=%s, port=%s) not found in CMDB, will create',
+                             svc_name, asset_id, payload['port'])
+
+            if creates:
+                LOG.info('Creating %d new services in CMDB', len(creates))
+                try:
+                    cmdb_client.create('wecmdb', const.CmdbCI.SERVICE, creates)
+                    LOG.info('Successfully created %d services in CMDB', len(creates))
+                except Exception as e:
+                    LOG.error('Failed to create services in CMDB: %s', str(e))
+            if updates:
+                LOG.info('Updating %d existing services in CMDB', len(updates))
+                try:
+                    cmdb_client.update('wecmdb', const.CmdbCI.SERVICE, updates)
+                    LOG.info('Successfully updated %d services in CMDB', len(updates))
+                except Exception as e:
+                    LOG.error('Failed to update services in CMDB: %s', str(e))
+            if not creates and not updates:
+                LOG.info('All services in sync with CMDB, no changes needed')
+        except Exception as e:
+            LOG.error('Failed to sync services to CMDB: %s', str(e))
+
+    def _service_apply_outputs(self, service_list):
+        if not service_list:
+            return None, '', ''
+        cluster_ips = [str(s['cluster_ip']) for s in service_list if s.get('cluster_ip')]
+        ports = [str(s['port']) for s in service_list if s.get('port') is not None]
+        names = [s['name'] for s in service_list if s.get('name')]
+        cluster_ip = cluster_ips[0] if len(cluster_ips) == 1 else (';'.join(cluster_ips) if cluster_ips else None)
+        return cluster_ip, ';'.join(ports), ';'.join(names)
+
+    def _parse_wait_for_ready(self, data):
+        wait_raw = data.get('wait_for_ready', 'true')
+        if isinstance(wait_raw, bool):
+            return wait_raw
+        return str(wait_raw).strip().lower() == 'true'
+
+    def _get_workload(self, k8s_client, resource_name, namespace):
+        raise NotImplementedError
+
+    def _rollout_progress(self, resource, replicas):
+        """Return (ready, updated, complete, extra_log)."""
+        raise NotImplementedError
+
+    def _resource_name_from_data(self, data):
+        return api_utils.escape_name(data['name'])
+
+    def _inject_app_timezone(self, pod_spec_envs):
+        app_timezone = getattr(CONF, 'app_timezone', '') or ''
+        if not app_timezone:
+            return
+        has_tz = any(env.get('name') == 'TZ' for env in pod_spec_envs)
+        if not has_tz:
+            pod_spec_envs.append({'name': 'TZ', 'value': app_timezone})
+            LOG.info('Auto-injected TZ=%s from system parameter KUBERNETES_APP_TIMEZONE',
+                     app_timezone)
+
+    def _build_wecube_annotations(self, data):
+        """Return (resource_annotations, pod_annotations) for apply templates."""
+        from wecubek8s.common import utils
+        pod_annotations = {}
+        resource_annotations = {}
+        user_token = utils.get_token()
+        if user_token:
+            pod_annotations['wecube.io/creator-token'] = user_token
+            LOG.info('Adding creator token to Pod annotations for CMDB access (token prefix: %s...)',
+                     user_token[:20])
+        pod_annotations['wecube.io/created-by'] = 'api'
+        LOG.info('Marking Pod as created by API to prevent duplicate orchestration notifications')
+        if data.get('instanceId'):
+            resource_annotations['wecube.io/app-instance'] = data['instanceId']
+            pod_annotations['wecube.io/app-instance'] = data['instanceId']
+            LOG.info('Adding app-instance to %s annotations: %s',
+                     self.workload_kind, data['instanceId'])
+        user_annotations_list = data.get('annotations') or []
+        user_annotations = {}
+        if user_annotations_list:
+            for item in user_annotations_list:
+                if isinstance(item, dict):
+                    user_annotations.update(item)
+            if user_annotations:
+                resource_annotations.update(user_annotations)
+                pod_annotations.update(user_annotations)
+                LOG.info('Merged %d user-defined annotations into %s and Pod annotations: %s',
+                         len(user_annotations), self.workload_kind, list(user_annotations.keys()))
+        return resource_annotations, pod_annotations
+
+    def _wait_for_workload_ready(self, k8s_client, resource_name, namespace, data,
+                                 resource_template):
+        replicas = int(data.get('replicas', 1))
+        if not self._parse_wait_for_ready(data):
+            LOG.info('Skipping Pod readiness wait (wait_for_ready=false)')
+            return
+        kind = self.workload_kind
+        LOG.info('Waiting for %s Pods to be ready (replicas: %d)...', kind, replicas)
+        pod_ready_timeout = self._get_pod_ready_timeout(data)
+        check_interval = 5
+        max_attempts = pod_ready_timeout // check_interval
+        desired_images = self._template_main_images(resource_template)
+
+        for attempt in range(1, max_attempts + 1):
+            time.sleep(check_interval)
+            try:
+                resource = self._get_workload(k8s_client, resource_name, namespace)
+                ready_replicas, updated_replicas, rollout_complete, extra = self._rollout_progress(
+                    resource, replicas)
+                LOG.info('[Wait %d/%d] %s status: ready=%d/%d, updated=%d/%d%s',
+                         attempt, max_attempts, kind,
+                         ready_replicas, replicas, updated_replicas, replicas,
+                         (', ' + extra) if extra else '')
+                if ready_replicas >= replicas and rollout_complete:
+                    LOG.info('All Pods are ready and updated! (%d/%d)', ready_replicas, replicas)
+                    if self._validate_pod_health(k8s_client, resource_name, namespace, replicas):
+                        LOG.info('Pod health validation passed!')
+                        return
+                    LOG.warning('Pod health validation failed, continuing to wait...')
+                else:
+                    LOG.info('Still waiting: %d/%d replicas ready', ready_replicas, replicas)
+                    if attempt > 6:
+                        has_fatal_error, error_message = self._check_pod_failures(
+                            k8s_client, resource_name, namespace,
+                            desired_images=desired_images)
+                        if has_fatal_error:
+                            elapsed_time = attempt * check_interval
+                            LOG.error('Fatal Pod error detected after %d seconds: %s',
+                                      elapsed_time, error_message)
+                            raise exceptions.PluginError(
+                                message=_('%(kind)s Pod failed to start: %(error)s '
+                                          '(detected after %(time)ds, max wait: %(timeout)ds)') % {
+                                    'kind': kind,
+                                    'error': error_message,
+                                    'time': elapsed_time,
+                                    'timeout': pod_ready_timeout
+                                }
+                            )
+            except exceptions.PluginError:
+                raise
+            except Exception as e:
+                LOG.warning('[Wait %d/%d] Failed to check %s status: %s',
+                            attempt, max_attempts, kind, str(e))
+        else:
+            resource = self._get_workload(k8s_client, resource_name, namespace)
+            ready_replicas, _, _, _ = self._rollout_progress(resource, replicas)
+            if ready_replicas < replicas:
+                error_msg = self._get_pod_failure_details(k8s_client, resource_name, namespace)
+                LOG.error('Timeout waiting for Pods to be ready: %d/%d ready after %d seconds',
+                          ready_replicas, replicas, pod_ready_timeout)
+                LOG.error('Pod failure details: %s', error_msg)
+                pod_logs = self._get_pod_logs_summary(k8s_client, resource_name, namespace)
+                if pod_logs:
+                    LOG.error('Pod logs for failed pods:\n%s', pod_logs)
+                    full_details = '%s\n\nPod Logs:\n%s' % (error_msg, pod_logs)
+                else:
+                    full_details = error_msg
+                raise exceptions.PluginError(
+                    message=_('%(kind)s created but Pods failed to become ready within %(timeout)ds. '
+                              'Ready: %(ready)d/%(expected)d. Details: %(details)s') % {
+                        'kind': kind,
+                        'timeout': pod_ready_timeout,
+                        'ready': ready_replicas,
+                        'expected': replicas,
+                        'details': full_details
+                    }
+                )
+
+    def _list_workload_pod_infos(self, k8s_client, resource_name, namespace, cluster_info):
+        label_selector = '%s=%s' % (const.Tag.POD_AUTO_TAG, resource_name)
+        pods = k8s_client.list_pod(namespace, label_selector=label_selector)
+        pod_list = []
+        cluster_id = (cluster_info or {}).get('id', '')
+        if pods and pods.items:
+            for pod in pods.items:
+                pod_uid = pod.metadata.uid if pod.metadata.uid else ''
+                asset_id = '%s_%s' % (cluster_id, pod_uid) if cluster_id and pod_uid else (pod_uid or '')
+                host_ip = ''
+                if pod.status and getattr(pod.status, 'host_ip', None):
+                    host_ip = pod.status.host_ip
+                pod_list.append({
+                    'name': pod.metadata.name,
+                    'id': asset_id,
+                    'host_ip': host_ip
+                })
+        return pod_list, pods, label_selector
+
+    def _ordinal_pod_placeholders(self, resource_name, replicas):
+        return [{'name': '%s-%d' % (resource_name, i), 'id': '', 'host_ip': ''}
+                for i in range(int(replicas or 1))]
+
+    def _collect_sync_and_mark_pods(self, k8s_client, cluster_info, data, resource_name, resource_id):
+        """Collect running pods, wait for UID/host_ip, sync CMDB, mark watcher cache."""
+        kind = self.workload_kind
+        replicas = int(data.get('replicas', 1))
+        namespace = data['namespace']
+        try:
+            pod_list, _, label_selector = self._list_workload_pod_infos(
+                k8s_client, resource_name, namespace, cluster_info)
+            if pod_list:
+                LOG.info('Found %d pods for %s %s in namespace %s (some may not have UID yet)',
+                         len(pod_list), kind, resource_name, namespace)
+            else:
+                LOG.info('No running pods found yet for %s %s in namespace %s',
+                         kind, resource_name, namespace)
+                if self.use_ordinal_pod_placeholders:
+                    pod_list = self._ordinal_pod_placeholders(resource_name, replicas)
+        except Exception as e:
+            LOG.warning('Failed to query pods for %s %s in namespace %s: %s',
+                        kind, resource_name, namespace, str(e))
+            label_selector = '%s=%s' % (const.Tag.POD_AUTO_TAG, resource_name)
+            pod_list = self._ordinal_pod_placeholders(resource_name, replicas) \
+                if self.use_ordinal_pod_placeholders else []
+
+        if resource_id and pod_list:
+            has_package = bool(data.get('packageUrl'))
+            max_wait_time = 240 if has_package else 30
+            if has_package:
+                LOG.info('Deployment has packageUrl, extending wait time to %d seconds', max_wait_time)
+            wait_interval = 2
+            waited_time = 0
+            pods_incomplete = [p for p in pod_list if not p.get('id') or not p.get('host_ip')]
+            if pods_incomplete:
+                LOG.info('Waiting for pods: %d incomplete (missing UID or host_ip)',
+                         len(pods_incomplete))
+                while waited_time < max_wait_time and pods_incomplete:
+                    time.sleep(wait_interval)
+                    waited_time += wait_interval
+                    try:
+                        listed, pods, _ = self._list_workload_pod_infos(
+                            k8s_client, resource_name, namespace, cluster_info)
+                        if pods and pods.items:
+                            for pod in pods.items:
+                                phase = pod.status.phase if pod.status else 'Unknown'
+                                pod_name = pod.metadata.name
+                                if phase == 'Failed':
+                                    error_msg = self._build_pod_failure_detail(pod)
+                                    if self._is_recoverable_failed_pod(pod):
+                                        LOG.warning('Recoverable Failed Pod detected during CMDB sync wait, keep waiting: %s',
+                                                    error_msg)
+                                        continue
+                                    raise exceptions.PluginError(
+                                        message=_('Pod creation failed: %(error)s') % {'error': error_msg})
+                                if pod.status and pod.status.container_statuses:
+                                    for container_status in pod.status.container_statuses:
+                                        restart_count = container_status.restart_count or 0
+                                        if restart_count > 3:
+                                            raise exceptions.PluginError(
+                                                message=_('Pod container crashed repeatedly: %(pod)s/%(container)s - %(error)s') % {
+                                                    'pod': pod_name,
+                                                    'container': container_status.name,
+                                                    'error': 'Container has restarted %d times (threshold: 3)' % restart_count
+                                                })
+                                        if container_status.state and container_status.state.waiting:
+                                            reason = container_status.state.waiting.reason
+                                            if reason in ['ImagePullBackOff', 'ErrImagePull',
+                                                          'CreateContainerConfigError',
+                                                          'InvalidImageName', 'CrashLoopBackOff']:
+                                                error_msg = container_status.state.waiting.message or reason
+                                                if reason == 'CrashLoopBackOff':
+                                                    error_msg = '%s (restarted %d times)' % (error_msg, restart_count)
+                                                raise exceptions.PluginError(
+                                                    message=_('Pod container failed: %(pod)s/%(container)s - %(error)s') % {
+                                                        'pod': pod_name,
+                                                        'container': container_status.name,
+                                                        'error': error_msg
+                                                    })
+                            by_name = {p['name']: p for p in pod_list}
+                            for item in listed:
+                                by_name[item['name']] = item
+                            pod_list = list(by_name.values())
+                            pods_incomplete = [p for p in pod_list if not p.get('id') or not p.get('host_ip')]
+                            if not pods_incomplete:
+                                LOG.info('All pods created and scheduled after waiting %d seconds', waited_time)
+                                break
+                            LOG.info('Still waiting after %d seconds: %d incomplete pods',
+                                     waited_time, len(pods_incomplete))
+                    except exceptions.PluginError:
+                        raise
+                    except Exception as e:
+                        LOG.warning('Failed to query pod status during wait: %s', str(e))
+
+            try:
+                LOG.info('Performing final pod status check...')
+                listed, pods, _ = self._list_workload_pod_infos(
+                    k8s_client, resource_name, namespace, cluster_info)
+                if listed:
+                    by_name = {p['name']: p for p in pod_list}
+                    for item in listed:
+                        by_name[item['name']] = item
+                    pod_list = list(by_name.values())
+                if pods and pods.items:
+                    pod_dict = {}
+                    for pod in pods.items:
+                        if not pod.metadata.uid:
+                            continue
+                        is_ready = False
+                        if pod.status and pod.status.conditions:
+                            for condition in pod.status.conditions:
+                                if condition.type == 'Ready' and condition.status == 'True':
+                                    is_ready = True
+                                    break
+                        pod_dict[pod.metadata.name] = {
+                            'uid': pod.metadata.uid,
+                            'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else '',
+                            'phase': pod.status.phase if pod.status else 'Unknown',
+                            'ready': is_ready
+                        }
+                    pods_not_ready = []
+                    error_details = []
+                    for pod_info in pod_list:
+                        pod_name = pod_info['name']
+                        if pod_name not in pod_dict:
+                            pods_not_ready.append(pod_name)
+                            error_details.append('%s: Pod not found' % pod_name)
+                        elif not pod_dict[pod_name]['ready']:
+                            pods_not_ready.append(pod_name)
+                            error_details.append('%s: phase=%s, ready=False' % (
+                                pod_name, pod_dict[pod_name]['phase']))
+                    if pods_not_ready:
+                        LOG.error('%d/%d pods are not ready after %d seconds',
+                                  len(pods_not_ready), len(pod_list), max_wait_time)
+                        error_msg = '; '.join(error_details[:5])
+                        pod_logs = self._get_pod_logs_summary(k8s_client, resource_name, namespace)
+                        full_details = '%s\n\nPod Logs:\n%s' % (error_msg, pod_logs) if pod_logs else error_msg
+                        raise exceptions.PluginError(
+                            message=_('%(kind)s created but %(count)d/%(total)d pods failed to become ready within %(timeout)ds. Details: %(details)s') % {
+                                'kind': kind,
+                                'count': len(pods_not_ready),
+                                'total': len(pod_list),
+                                'timeout': max_wait_time,
+                                'details': full_details
+                            }
+                        )
+                    LOG.info('All %d pods are ready', len(pod_list))
+            except exceptions.PluginError:
+                raise
+            except Exception as e:
+                LOG.error('Final pod status check failed: %s', str(e))
+                raise exceptions.PluginError(
+                    message=_('Failed to verify pod status: %(error)s') % {'error': str(e)})
+
+            self._sync_pods_to_cmdb(k8s_client, namespace, pod_list, resource_id)
+
+        pods_str = ';'.join([pod['name'] for pod in pod_list]) if pod_list else ''
+        try:
+            from wecubek8s.server import watcher
+            watcher.mark_expected_pods(
+                cluster_id=cluster_info['id'],
+                namespace=namespace,
+                pod_names=[pod['name'] for pod in pod_list],
+                source=self.apply_source
+            )
+        except Exception as e:
+            LOG.warning('Failed to mark expected pods in watcher (watcher may still notify for these pods): %s',
+                        str(e))
+        return pod_list, pods_str
+
+    def sync_pods_to_cmdb(self, data):
+        """Independent CMDB sync API for compensation."""
+        cluster_info = db_resource.Cluster().list({'name': data['cluster']})
+        if not cluster_info:
+            raise exceptions.ValidationError(
+                attribute='cluster',
+                message=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
+        cluster_info = cluster_info[0]
+        if not data.get('namespace') or data['namespace'].strip() == '':
+            data['namespace'] = 'default'
+        api_server = cluster_info['api_server']
+        if not api_server.startswith('https://') and not api_server.startswith('http://'):
+            api_server = 'https://' + api_server
+        k8s_client = k8s.Client(k8s.AuthToken(api_server, cluster_info['token']))
+        resource_name = self._resource_name_from_data(data)
+        correlation_id = data['correlation_id']
+        pod_list, _, _ = self._list_workload_pod_infos(
+            k8s_client, resource_name, data['namespace'], cluster_info)
+        kind = self.workload_kind
+        if not pod_list:
+            LOG.warning('No pods found for %s %s in namespace %s',
+                        kind, resource_name, data['namespace'])
+            return {
+                'result': 'success',
+                'message': 'No pods found for %s %s' % (kind, resource_name),
+                'synced_count': 0
+            }
+        if correlation_id:
+            self._sync_pods_to_cmdb(k8s_client, data['namespace'], pod_list, correlation_id)
+            synced_count = len([p for p in pod_list if p.get('id')])
+            LOG.info('Successfully synced %d pods to CMDB for instanceId: %s',
+                     synced_count, correlation_id)
+            return {
+                'result': 'success',
+                'message': 'Synced %d pods to CMDB' % synced_count,
+                'synced_count': synced_count,
+                'correlation_id': correlation_id
+            }
+        return {
+            'result': 'success',
+            'message': 'No correlation_id or pods to sync',
+            'synced_count': 0
+        }
+
+
+class Deployment(WorkloadPodOps):
+    workload_kind = 'Deployment'
+    apply_source = 'deployment_apply'
+    use_ordinal_pod_placeholders = False
+
+    def _get_workload(self, k8s_client, resource_name, namespace):
+        return k8s_client.get_deployment(resource_name, namespace)
+
+    def _rollout_progress(self, resource, replicas):
+        status = resource.status if resource else None
+        ready = (status.ready_replicas or 0) if status else 0
+        updated = (status.updated_replicas or 0) if status else 0
+        available = (getattr(status, 'available_replicas', None) or 0) if status else 0
+        generation = 0
+        if resource and getattr(resource, 'metadata', None):
+            generation = getattr(resource.metadata, 'generation', 0) or 0
+        observed = (getattr(status, 'observed_generation', None) or 0) if status else 0
+        complete = (
+            ready >= replicas
+            and updated >= replicas
+            and available >= replicas
+            and observed >= generation
+        )
+        extra = 'available=%d/%d, observed_gen=%s/%s' % (
+            available, replicas, observed, generation)
+        return ready, updated, complete, extra
+
     def to_resource(self, k8s_client, data, cluster_info):
         resource_id = data['correlation_id']
         resource_name = api_utils.escape_name(data['name'])
@@ -597,6 +2127,8 @@ class Deployment:
         }]
         
         LOG.error('[DEBUG] images_data before convert_container: %s', images_data)
+
+        self._inject_app_timezone(pod_spec_envs)
         
         # 获取部署脚本（如果提供）
         deploy_script = data.get('image_deploy_script')
@@ -706,13 +2238,16 @@ class Deployment:
                     if secret['name'] not in existing_secret_names:
                         registry_secrets.append(secret)
                         existing_secret_names.add(secret['name'])
+
+        resource_annotations, pod_annotations = self._build_wecube_annotations(data)
         
         template = {
             'apiVersion': 'apps/v1',
             'kind': 'Deployment',
             'metadata': {
                 'labels': resource_tags,
-                'name': resource_name
+                'name': resource_name,
+                'annotations': resource_annotations
             },
             'spec': {
                 'replicas': int(replicas),
@@ -721,7 +2256,8 @@ class Deployment:
                 },
                 'template': {
                     'metadata': {
-                        'labels': pod_spec_tags
+                        'labels': pod_spec_tags,
+                        'annotations': pod_annotations
                     },
                     'spec': {
                         'affinity': pod_spec_affinity,
@@ -747,82 +2283,9 @@ class Deployment:
             template['spec']['template']['spec']['imagePullSecrets'] = registry_secrets
         return template
 
-    def _ensure_service_for_deployment(self, k8s_client, data):
-        """当入参包含端口信息时，为 Deployment 创建或更新对应的 Service"""
-        # 仅当显式提供端口时才创建 Service：支持两种方式
-        has_single_port = data.get('port') is not None
-        has_service_ports = bool(data.get('servicePorts'))
-        if not (has_single_port or has_service_ports):
-            return
-
-        namespace = data['namespace']
-        # Service 名称必须符合 DNS-1035 规范
-        service_name = api_utils.escape_service_name(data.get('serviceName', data['name']))
-
-        # 从入参中取 selectors：仅使用传入的 pod_tags（不自动追加内部标签）
-        selectors = api_utils.convert_tag(data.get('pod_tags', []))
-
-        # 端口：优先使用 servicePorts，其次使用单个 port
-        service_ports = []
-        if has_service_ports:
-            service_ports = api_utils.convert_service_port(data['servicePorts'])
-        else:
-            # 单端口快速路径
-            target_port = data.get('targetPort', data['port'])
-            protocol = data.get('protocol', 'TCP')
-            port_name = data.get('portName')
-            node_port = data.get('nodePort')
-            port_item = {
-                'port': int(data['port']),
-                'targetPort': int(target_port) if isinstance(target_port, (int, float)) or str(target_port).isdigit() else target_port,
-                'protocol': protocol
-            }
-            if port_name:
-                port_item['name'] = port_name
-            if node_port:
-                port_item['nodePort'] = int(node_port)
-            service_ports = [port_item]
-
-        # 其它字段：能从入参取到的用入参，否则给默认值
-        service_type = data.get('serviceType', 'ClusterIP')
-        session_affinity = data.get('sessionAffinity')
-        cluster_ip = data.get('clusterIP')  # 如果用户提供则尊重；否则不设置让集群分配
-        headless = ('clusterIP' in data and data['clusterIP'] is None)
-
-        # 标签
-        service_resource_id = data.get('service_correlation_id', data['correlation_id'] + '-service')
-        service_tags = api_utils.convert_tag(data.get('service_tags', data.get('tags', [])))
-        service_tags[const.Tag.SERVICE_ID_TAG] = service_resource_id
-
-        # 生成 Service 模板
-        service_body = {
-            'apiVersion': 'v1',
-            'kind': 'Service',
-            'metadata': {
-                'labels': service_tags,
-                'name': service_name
-            },
-            'spec': {
-                'type': service_type,
-                'selector': selectors,
-                'ports': service_ports
-            }
-        }
-        if headless:
-            service_body['spec']['clusterIP'] = 'None'  # Headless Service (必须是字符串 "None")
-        elif cluster_ip:
-            service_body['spec']['clusterIP'] = cluster_ip
-
-        # 创建或更新 Service
-        exists_service = k8s_client.get_service(service_name, namespace)
-        if exists_service is None:
-            k8s_client.create_service(namespace, service_body)
-            LOG.info('Created Service %s/%s for Deployment %s', namespace, service_name, data['name'])
-        else:
-            # 使用 replace 而不是 patch，需要保留 resourceVersion
-            service_body['metadata']['resourceVersion'] = exists_service.metadata.resource_version
-            k8s_client.update_service(service_name, namespace, service_body)
-            LOG.info('Updated Service %s/%s for Deployment %s', namespace, service_name, data['name'])
+    def _ensure_service_for_deployment(self, k8s_client, data, resource_name, cluster_info):
+        """为 Deployment 按端口创建 ClusterIP Service（一个端口一个 Service）"""
+        return self._ensure_port_services(k8s_client, data, resource_name, cluster_info)
 
     def apply(self, data):
         resource_id = data['correlation_id']
@@ -861,28 +2324,43 @@ class Deployment:
             # 注意: replace 需要保留 resourceVersion
             resource_template['metadata']['resourceVersion'] = exists_resource.metadata.resource_version
             exists_resource = k8s_client.replace_deployment(resource_name, data['namespace'], resource_template)
-        # 若入参提供端口信息，则同时创建/更新对应 Service，并返回其分配信息
-        self._ensure_service_for_deployment(k8s_client, data)
-        has_single_port = data.get('port') is not None
-        has_service_ports = bool(data.get('servicePorts'))
-        cluster_ip = None
-        port_str = ""
-        if has_single_port or has_service_ports:
-            service_name = api_utils.escape_name(data.get('serviceName', data['name']))
-            svc = k8s_client.get_service(service_name, data['namespace'])
-            if svc:
-                cluster_ip = svc.spec.cluster_ip if getattr(svc.spec, 'cluster_ip', None) else None
-                if getattr(svc.spec, 'ports', None) and len(svc.spec.ports) > 0:
-                    # 取第一个 service 端口作为暴露端口返回
-                    port_str = str(svc.spec.ports[0].port)
-        # TODO: k8s为异步接口，是否需要等待真正执行完毕
-        return {
+            LOG.info('Deployment %s/%s updated, checking for stuck pods that block RollingUpdate.',
+                     data['namespace'], resource_name)
+            try:
+                self._delete_stuck_pods_blocking_rollout(
+                    k8s_client, resource_name, data['namespace'],
+                    data.get('replicas', 1),
+                    desired_images=self._template_main_images(resource_template),
+                    desired_package_urls=self._template_init_package_urls(resource_template),
+                )
+            except Exception as e:
+                LOG.warning('[RollingUpdate] Error during stuck-pod check: %s (non-fatal, continuing)',
+                            str(e))
+
+        self._wait_for_workload_ready(
+            k8s_client, resource_name, data['namespace'], data, resource_template)
+
+        service_list = self._ensure_service_for_deployment(
+            k8s_client, data, resource_name, cluster_info)
+        cluster_ip, port_str, services_str = self._service_apply_outputs(service_list)
+        self._sync_services_to_cmdb(service_list, data, resource_id)
+
+        pod_list, pods_str = self._collect_sync_and_mark_pods(
+            k8s_client, cluster_info, data, resource_name, resource_id)
+        result = {
             'id': exists_resource.metadata.uid,
             'name': exists_resource.metadata.name,
             'correlation_id': resource_id,
             'clusterIP': cluster_ip,
-            'port': port_str
+            'port': port_str,
+            'services': services_str,
+            'pods': pods_str,
+            'podName': pods_str
         }
+        LOG.info('Deployment apply result: id=%s, name=%s, correlation_id=%s, clusterIP=%s, port=%s, services=%s, pods=%s',
+                 result['id'], result['name'], result['correlation_id'],
+                 result['clusterIP'], result['port'], result['services'], result['pods'])
+        return result
 
     def remove(self, data):
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
@@ -929,15 +2407,8 @@ class Deployment:
         else:
             LOG.warning('Deployment %s not found in namespace: %s', resource_name, namespace)
         
-        # 删除关联的 Service（如果存在）
-        service_name = api_utils.escape_name(data.get('serviceName', data['name']))
-        exists_service = k8s_client.get_service(service_name, namespace)
-        if exists_service is not None:
-            LOG.info('Deleting Service: %s in namespace: %s', service_name, namespace)
-            k8s_client.delete_service(service_name, namespace)
-            result['deleted_resources'].append(f"Service/{service_name}")
-        else:
-            LOG.debug('Service %s not found in namespace: %s', service_name, namespace)
+        for svc_name in self._delete_port_services(k8s_client, data, resource_name):
+            result['deleted_resources'].append('Service/%s' % svc_name)
         
         # Pod 会被 Kubernetes 自动删除（通过 OwnerReference）
         LOG.info('Pods managed by Deployment %s will be automatically deleted by Kubernetes', resource_name)
@@ -953,7 +2424,33 @@ class Deployment:
         return result
 
 
-class StatefulSet:
+class StatefulSet(WorkloadPodOps):
+    workload_kind = 'StatefulSet'
+    apply_source = 'statefulset_apply'
+    use_ordinal_pod_placeholders = True
+
+    def _get_workload(self, k8s_client, resource_name, namespace):
+        return k8s_client.get_statefulset(resource_name, namespace)
+
+    def _rollout_progress(self, resource, replicas):
+        status = resource.status if resource else None
+        ready = (status.ready_replicas or 0) if status else 0
+        updated = (status.updated_replicas or 0) if status else 0
+        current_revision = (status.current_revision or '') if status else ''
+        update_revision = (status.update_revision or '') if status else ''
+        complete = (
+            updated >= replicas
+            and (not current_revision or not update_revision
+                 or current_revision == update_revision)
+        )
+        extra = 'current_revision=%s, update_revision=%s' % (
+            current_revision, update_revision)
+        return ready, updated, complete, extra
+
+    def _resource_name_from_data(self, data):
+        normalized_name = api_utils.normalize_statefulset_name(data['name'])
+        return api_utils.escape_service_name(normalized_name, max_length=50)
+
     def to_resource(self, k8s_client, data, cluster_info):
         resource_id = data['correlation_id']
         # StatefulSet 的 metadata.name 必须符合 DNS-1123 label 规范（不允许点号）
@@ -1440,782 +2937,14 @@ class StatefulSet:
             LOG.info('Updated Headless Service %s/%s for StatefulSet %s/%s',
                      namespace, service_name, namespace, data['name'])
     
-    def _ensure_loadbalancer_service(self, k8s_client, data, service_ports, pod_spec_tags):
+    def _ensure_loadbalancer_service(self, k8s_client, data, resource_name, cluster_info, keep_names=None):
         """
-        为 StatefulSet 创建额外的负载均衡 Service（有 ClusterIP）
-        这个 Service 用于提供 ClusterIP 给下游流程使用
+        为 StatefulSet 按端口创建 ClusterIP Service（一个端口一个 Service）。
+        Headless Service 仍由 _ensure_headless_service 单独维护，不在此创建、也不回写 CMDB。
         """
-        # 负载均衡 Service 名称：原名称 + '-lb' 后缀
-        # 【修复】无论用户是否指定 serviceName，都要规范化（移除端口号后缀）
-        # 优先使用用户提供的 serviceName，其次使用 data['name']
-        raw_name = data.get('serviceName', data['name'])
-        # 规范化名称：移除可能的端口号后缀（如 :8080 或 -8080）
-        base_service_name = api_utils.normalize_statefulset_name(raw_name)
-        lb_service_name = base_service_name + '-lb'
-        lb_service_name = api_utils.escape_service_name(lb_service_name)
-        namespace = data['namespace']
-        
-        # 构建负载均衡 Service 模板（普通 ClusterIP Service）
-        lb_service_resource_id = data['correlation_id'] + '-lb-service'
-        lb_service_tags = api_utils.convert_tag(data.get('service_tags', data.get('tags', [])))
-        lb_service_tags[const.Tag.SERVICE_ID_TAG] = lb_service_resource_id
-        lb_service_tags['service-type'] = 'loadbalancer'  # 标记为负载均衡 Service
-        
-        lb_service_template = {
-            'apiVersion': 'v1',
-            'kind': 'Service',
-            'metadata': {
-                'labels': lb_service_tags,
-                'name': lb_service_name
-            },
-            'spec': {
-                'type': 'ClusterIP',
-                # 不设置 clusterIP 字段，让 Kubernetes 自动分配
-                'selector': pod_spec_tags,
-                'ports': service_ports
-            }
-        }
-        
-        # 创建或更新负载均衡 Service
-        exists_lb_service = k8s_client.get_service(lb_service_name, namespace)
-        if exists_lb_service is None:
-            k8s_client.create_service(namespace, lb_service_template)
-            LOG.info('Created LoadBalancer Service %s/%s for StatefulSet %s/%s',
-                     namespace, lb_service_name, namespace, data['name'])
-        else:
-            # 使用 replace 而不是 patch，需要保留 resourceVersion
-            lb_service_template['metadata']['resourceVersion'] = exists_lb_service.metadata.resource_version
-            k8s_client.update_service(lb_service_name, namespace, lb_service_template)
-            LOG.info('Updated LoadBalancer Service %s/%s for StatefulSet %s/%s',
-                     namespace, lb_service_name, namespace, data['name'])
-        
-        return lb_service_name
+        return self._ensure_port_services(
+            k8s_client, data, resource_name, cluster_info, keep_names=keep_names)
 
-    def _query_host_resource_guid(self, cmdb_client, pod_host_ip):
-        """根据 IP 地址查询 CMDB 中对应的 host_resource 的 GUID
-        
-        Args:
-            cmdb_client: CMDB 客户端
-            pod_host_ip: Pod 所在 Node 的 IP 地址
-        
-        Returns:
-            str: host_resource 的 GUID，如果查询失败或未找到则返回 None
-        """
-        if not pod_host_ip:
-            return None
-        
-        try:
-            query_data = {
-                "criteria": {
-                    "attrName": "ip_address",
-                    "op": "eq",
-                    "condition": pod_host_ip
-                }
-            }
-            
-            LOG.debug('Querying CMDB for host_resource with ip_address: %s', pod_host_ip)
-            response = cmdb_client.query('wecmdb', const.CmdbCI.HOST_RESOURCE, query_data)
-            
-            if response and response.get('data'):
-                if len(response['data']) > 0:
-                    host_resource_guid = response['data'][0].get('guid')
-                    if host_resource_guid:
-                        LOG.info('Found host_resource GUID: %s for IP: %s', host_resource_guid, pod_host_ip)
-                        return host_resource_guid
-                    else:
-                        LOG.warning('host_resource record found but no guid field for IP: %s', pod_host_ip)
-                else:
-                    LOG.warning('No host_resource found in CMDB for IP: %s', pod_host_ip)
-            else:
-                LOG.warning('CMDB query for host_resource returned no data for IP: %s', pod_host_ip)
-        except Exception as e:
-            LOG.error('Failed to query host_resource from CMDB for IP %s: %s', pod_host_ip, str(e))
-        
-        return None
-    
-    def _validate_pod_health(self, k8s_client, statefulset_name, namespace, expected_replicas):
-        """验证 Pod 的健康状态
-        
-        Args:
-            k8s_client: Kubernetes 客户端
-            statefulset_name: StatefulSet 名称
-            namespace: 命名空间
-            expected_replicas: 预期的副本数
-        
-        Returns:
-            bool: 如果所有 Pod 都健康则返回 True，否则返回 False
-        """
-        try:
-            # 获取 StatefulSet 的所有 Pod
-            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
-            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
-            
-            if not pod_list or not pod_list.items:
-                LOG.warning('No pods found for StatefulSet %s', statefulset_name)
-                return False
-            
-            ready_count = 0
-            for pod in pod_list.items:
-                pod_name = pod.metadata.name
-                phase = pod.status.phase if pod.status else 'Unknown'
-                
-                # 检查 Pod 的 Ready condition
-                is_ready = False
-                if pod.status and pod.status.conditions:
-                    for condition in pod.status.conditions:
-                        if condition.type == 'Ready' and condition.status == 'True':
-                            is_ready = True
-                            break
-                
-                if phase == 'Running' and is_ready:
-                    ready_count += 1
-                    LOG.info('Pod %s is Running and Ready', pod_name)
-                else:
-                    LOG.warning('Pod %s - Phase: %s, Ready: %s', pod_name, phase, is_ready)
-                    
-                    # 记录容器状态
-                    if pod.status and pod.status.container_statuses:
-                        for container_status in pod.status.container_statuses:
-                            if container_status.state.waiting:
-                                LOG.warning('  Container %s waiting: %s - %s',
-                                          container_status.name,
-                                          container_status.state.waiting.reason,
-                                          container_status.state.waiting.message or '')
-                            elif container_status.state.terminated:
-                                LOG.error('  Container %s terminated: %s (exit code %d)',
-                                        container_status.name,
-                                        container_status.state.terminated.reason or 'Unknown',
-                                        container_status.state.terminated.exit_code or 0)
-            
-            return ready_count >= expected_replicas
-        
-        except Exception as e:
-            LOG.error('Failed to validate pod health: %s', str(e))
-            return False
-
-    _RECOVERABLE_FAILED_POD_REASONS = {
-        'Evicted',
-        'NodeLost',
-        'Shutdown',
-        'Preempting',
-    }
-
-    def _get_pod_ready_timeout(self, data):
-        raw_timeout = data.get('pod_ready_timeout')
-        if raw_timeout is None or str(raw_timeout).strip() == '':
-            raw_timeout = getattr(CONF, 'pod_ready_timeout', '') or 480
-
-        try:
-            timeout = int(raw_timeout)
-        except (TypeError, ValueError):
-            LOG.warning('Invalid pod_ready_timeout value %s, using default 480 seconds', raw_timeout)
-            return 480
-
-        if timeout <= 0:
-            LOG.warning('pod_ready_timeout must be positive, got %s, using default 480 seconds', raw_timeout)
-            return 480
-
-        return timeout
-
-    def _is_recoverable_failed_pod(self, pod):
-        """判断 Failed Pod 是否属于可等待恢复的调度/节点类失败。"""
-        status = getattr(pod, 'status', None)
-        phase = getattr(status, 'phase', None) if status else None
-        reason = getattr(status, 'reason', None) if status else None
-        return phase == 'Failed' and reason in self._RECOVERABLE_FAILED_POD_REASONS
-
-    def _build_pod_failure_detail(self, pod):
-        """构造简短的 Pod 失败详情，避免界面只看到 Failed state。"""
-        pod_name = getattr(getattr(pod, 'metadata', None), 'name', 'Unknown')
-        status = getattr(pod, 'status', None)
-        phase = getattr(status, 'phase', 'Unknown') if status else 'Unknown'
-        reason = getattr(status, 'reason', None) if status else None
-        message = getattr(status, 'message', None) if status else None
-
-        details = [f"Pod {pod_name}: phase={phase}"]
-        if reason:
-            details.append(f"reason={reason}")
-        if message:
-            details.append(f"message={message[:200]}")
-
-        for attr_name, status_type in (
-                ('init_container_statuses', 'init container'),
-                ('container_statuses', 'container')):
-            for container_status in (getattr(status, attr_name, None) or []):
-                container_name = getattr(container_status, 'name', 'Unknown')
-                restart_count = getattr(container_status, 'restart_count', 0) or 0
-                state = getattr(container_status, 'state', None)
-                if not state:
-                    continue
-                waiting = getattr(state, 'waiting', None)
-                terminated = getattr(state, 'terminated', None)
-                if waiting:
-                    wait_reason = getattr(waiting, 'reason', None) or 'Unknown'
-                    wait_message = getattr(waiting, 'message', None) or ''
-                    detail = (f"{container_name}: waiting - {wait_reason} "
-                              f"(restarts {restart_count})")
-                    if wait_message:
-                        detail += f" - {wait_message[:200]}"
-                    details.append(detail)
-                elif terminated:
-                    term_reason = getattr(terminated, 'reason', None) or 'Unknown'
-                    exit_code = getattr(terminated, 'exit_code', 0) or 0
-                    term_message = getattr(terminated, 'message', None) or ''
-                    detail = (f"{container_name}: terminated - {term_reason} "
-                              f"(exit {exit_code})")
-                    if restart_count:
-                        detail += f", restarts {restart_count}"
-                    if term_message:
-                        detail += f" - {term_message[:200]}"
-                    if status_type == 'init container':
-                        detail = 'init ' + detail
-                    details.append(detail)
-
-        return '; '.join(details)
-
-    @staticmethod
-    def _is_pod_terminating(pod):
-        metadata = getattr(pod, 'metadata', None)
-        return bool(getattr(metadata, 'deletion_timestamp', None))
-
-    @staticmethod
-    def _is_pod_ready(pod):
-        """True when the Pod Ready condition is True (fallback: all containers ready)."""
-        status = getattr(pod, 'status', None)
-        if not status:
-            return False
-        for condition in getattr(status, 'conditions', None) or []:
-            if isinstance(condition, dict):
-                cond_type = condition.get('type')
-                cond_status = condition.get('status')
-            else:
-                cond_type = getattr(condition, 'type', None)
-                cond_status = getattr(condition, 'status', None)
-            if cond_type == 'Ready':
-                return cond_status in (True, 'True')
-        container_statuses = getattr(status, 'container_statuses', None) or []
-        if not container_statuses:
-            return False
-        for container_status in container_statuses:
-            if isinstance(container_status, dict):
-                ready = container_status.get('ready')
-            else:
-                ready = getattr(container_status, 'ready', False)
-            if not ready:
-                return False
-        return True
-
-    @staticmethod
-    def _iter_container_statuses(pod):
-        status = getattr(pod, 'status', None)
-        if not status:
-            return
-        for container_status in getattr(status, 'init_container_statuses', None) or []:
-            yield container_status
-        for container_status in getattr(status, 'container_statuses', None) or []:
-            yield container_status
-
-    @classmethod
-    def _find_stuck_waiting(cls, pod):
-        """Return (container_name, reason, restart_count) if the Pod is stuck."""
-        for container_status in cls._iter_container_statuses(pod):
-            state = getattr(container_status, 'state', None)
-            waiting = getattr(state, 'waiting', None) if state else None
-            reason = getattr(waiting, 'reason', None) if waiting else None
-            if reason in STUCK_WAITING_REASONS:
-                return (
-                    getattr(container_status, 'name', '') or '',
-                    reason,
-                    getattr(container_status, 'restart_count', 0) or 0,
-                )
-        return None
-
-    @staticmethod
-    def _env_name_value(item):
-        if isinstance(item, dict):
-            return item.get('name'), item.get('value')
-        return getattr(item, 'name', None), getattr(item, 'value', None)
-
-    @classmethod
-    def _package_urls_from_containers(cls, containers):
-        urls = set()
-        for container in containers or []:
-            if isinstance(container, dict):
-                env_list = container.get('env') or []
-            else:
-                env_list = getattr(container, 'env', None) or []
-            for item in env_list:
-                name, value = cls._env_name_value(item)
-                if name == 'PACKAGE_URL' and value:
-                    urls.add(value)
-        return urls
-
-    @classmethod
-    def _pod_init_package_urls(cls, pod):
-        spec = getattr(pod, 'spec', None)
-        if not spec:
-            return set()
-        if isinstance(spec, dict):
-            inits = spec.get('initContainers') or spec.get('init_containers') or []
-        else:
-            inits = (getattr(spec, 'init_containers', None)
-                     or getattr(spec, 'initContainers', None)
-                     or [])
-        return cls._package_urls_from_containers(inits)
-
-    @classmethod
-    def _template_init_package_urls(cls, resource_template):
-        try:
-            inits = (((resource_template or {}).get('spec') or {})
-                     .get('template', {}).get('spec', {}).get('initContainers')) or []
-        except AttributeError:
-            return set()
-        return cls._package_urls_from_containers(inits)
-
-    @classmethod
-    def _stale_not_ready_template(cls, pod, desired_images=None, desired_package_urls=None):
-        """Reason string if a NotReady Pod is still on the previous apply template.
-
-        OrderedReady RollingUpdate will not replace an unhealthy Pod, even when
-        the StatefulSet spec already points at a new image / conf package.
-        """
-        if cls._is_pod_ready(pod):
-            return None
-        if desired_images:
-            pod_images = cls._pod_main_images(pod)
-            desired = set(desired_images)
-            if pod_images and pod_images != desired:
-                return 'image %s != %s' % (
-                    ','.join(sorted(pod_images)),
-                    ','.join(sorted(desired)),
-                )
-        if desired_package_urls:
-            pod_urls = cls._pod_init_package_urls(pod)
-            desired_urls = set(desired_package_urls)
-            if pod_urls and pod_urls != desired_urls:
-                return 'PACKAGE_URL mismatch'
-        return None
-
-    @staticmethod
-    def _container_image(container):
-        if isinstance(container, dict):
-            return container.get('image') or ''
-        return getattr(container, 'image', None) or ''
-
-    @classmethod
-    def _pod_main_images(cls, pod):
-        spec = getattr(pod, 'spec', None)
-        containers = getattr(spec, 'containers', None) if spec else None
-        return {cls._container_image(container) for container in (containers or [])
-                if cls._container_image(container)}
-
-    @classmethod
-    def _template_main_images(cls, resource_template):
-        try:
-            containers = (((resource_template or {}).get('spec') or {})
-                          .get('template', {}).get('spec', {}).get('containers')) or []
-        except AttributeError:
-            return set()
-        return {cls._container_image(container) for container in containers
-                if cls._container_image(container)}
-
-    def _delete_stuck_pods_blocking_rollout(self, k8s_client, resource_name, namespace,
-                                            replicas, desired_images=None,
-                                            desired_package_urls=None):
-        """Delete never-Ready / stale-template Pods so OrderedReady can roll.
-
-        ImagePullBackOff / CrashLoopBackOff (and similar waiting reasons) never
-        become Ready. A Running-but-not-Ready Pod on the *previous* image or
-        conf PACKAGE_URL also deadlocks OrderedReady: the controller waits for
-        Ready before applying the new template. Delete once; it recreates from
-        the latest spec. Ready Pods and NotReady Pods already on the new
-        template are left alone.
-        """
-        deleted = []
-        for index in range(int(replicas or 1)):
-            pod_name = '%s-%d' % (resource_name, index)
-            try:
-                pod = k8s_client.get_pod(pod_name, namespace)
-                if not pod or self._is_pod_terminating(pod):
-                    continue
-                stuck = self._find_stuck_waiting(pod)
-                stale = self._stale_not_ready_template(
-                    pod, desired_images=desired_images,
-                    desired_package_urls=desired_package_urls)
-                if stuck:
-                    container_name, reason, restart_count = stuck
-                    LOG.warning(
-                        '[RollingUpdate] Pod %s/%s container "%s" is in %s '
-                        '(restarts=%d), deleting to unblock OrderedReady RollingUpdate.',
-                        namespace, pod_name, container_name, reason, restart_count,
-                    )
-                elif stale:
-                    LOG.warning(
-                        '[RollingUpdate] Pod %s/%s is not Ready and still on '
-                        'old template (%s), deleting to unblock OrderedReady RollingUpdate.',
-                        namespace, pod_name, stale,
-                    )
-                else:
-                    continue
-                k8s_client.delete_pod(pod_name, namespace)
-                deleted.append(pod_name)
-            except Exception as exc:
-                LOG.warning('[RollingUpdate] Failed to check/delete Pod %s: %s',
-                            pod_name, str(exc))
-        if deleted:
-            LOG.info('[RollingUpdate] Deleted %d stuck pod(s): %s. '
-                     'StatefulSet will recreate them with the new template.',
-                     len(deleted), deleted)
-        else:
-            LOG.info('[RollingUpdate] No stuck never-Ready pods found, '
-                     'RollingUpdate proceeds normally.')
-        return deleted
-    
-    def _check_pod_failures(self, k8s_client, statefulset_name, namespace, desired_images=None):
-        """检查 Pod 是否有创建失败的情况
-        
-        Args:
-            k8s_client: Kubernetes 客户端
-            statefulset_name: StatefulSet 名称
-            namespace: 命名空间
-            desired_images: 本次 apply 的主容器镜像集合。若 Pod 仍使用旧镜像，
-                视为滚动更新尚未完成，不把旧错误当成本次部署的致命失败。
-        
-        Returns:
-            tuple: (has_fatal_error: bool, error_message: str or None)
-        """
-        try:
-            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
-            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
-            
-            if not pod_list or not pod_list.items:
-                LOG.warning('No pods found for StatefulSet %s, may still be creating', statefulset_name)
-                return False, None
-            
-            # 定义致命错误状态（需要立即退出的）
-            FATAL_REASONS = {
-                'ImagePullBackOff': 'Image cannot be pulled',
-                'ErrImagePull': 'Failed to pull image',
-                'CreateContainerConfigError': 'Container configuration error',
-                'InvalidImageName': 'Invalid image name',
-            }
-            
-            # CrashLoopBackOff 需要检查重启次数（避免误判暂时性失败）
-            CRASH_THRESHOLD = 3  # 重启3次以上才判定为致命错误
-            
-            for pod in pod_list.items:
-                pod_name = pod.metadata.name
-                if self._is_pod_terminating(pod):
-                    LOG.info('Skipping terminating Pod %s during failure check', pod_name)
-                    continue
-                if desired_images:
-                    pod_images = self._pod_main_images(pod)
-                    if pod_images and pod_images != set(desired_images):
-                        LOG.warning(
-                            'Skipping stale Pod %s during failure check '
-                            '(pod images %s != desired %s)',
-                            pod_name, pod_images, desired_images)
-                        continue
-                phase = pod.status.phase if pod.status else 'Unknown'
-                
-                # 检查 Pod Phase 失败状态
-                if phase == 'Failed':
-                    error_msg = self._build_pod_failure_detail(pod)
-                    if self._is_recoverable_failed_pod(pod):
-                        LOG.warning('Recoverable Failed Pod detected, keep waiting: %s', error_msg)
-                        continue
-                    LOG.error('❌ %s - exiting immediately', error_msg)
-                    return True, error_msg
-                
-                # 检查容器状态
-                if pod.status and pod.status.container_statuses:
-                    for container_status in pod.status.container_statuses:
-                        container_name = container_status.name
-                        
-                        # 检查 Waiting 状态
-                        if container_status.state and container_status.state.waiting:
-                            reason = container_status.state.waiting.reason
-                            message = container_status.state.waiting.message or ''
-                            
-                            # 检查是否是致命错误（镜像拉取失败、配置错误等）
-                            if reason in FATAL_REASONS:
-                                error_msg = (f"Pod {pod_name}, Container {container_name}: "
-                                           f"{reason} - {message}")
-                                LOG.error('❌ %s - exiting immediately', error_msg)
-                                return True, error_msg
-                            
-                            # 检查 CrashLoopBackOff（需要验证重启次数）
-                            if reason == 'CrashLoopBackOff':
-                                restart_count = container_status.restart_count or 0
-                                LOG.error('❌ Pod %s, Container %s: %s (restarts: %d) - %s',
-                                        pod_name, container_name, reason, restart_count, message)
-                                
-                                # 重启次数达到阈值，判定为致命错误
-                                if restart_count >= CRASH_THRESHOLD:
-                                    error_msg = (f"Pod {pod_name}, Container {container_name}: "
-                                               f"CrashLoopBackOff with {restart_count} restarts - {message}")
-                                    LOG.error('🔥 Fatal: %s - exiting immediately', error_msg)
-                                    return True, error_msg
-        
-        except Exception as e:
-            LOG.warning('Failed to check pod failures: %s', str(e))
-            return False, None
-        
-        return False, None  # 没有致命错误
-    
-    def _get_pod_failure_details(self, k8s_client, statefulset_name, namespace):
-        """获取 Pod 失败的详细信息
-        
-        Args:
-            k8s_client: Kubernetes 客户端
-            statefulset_name: StatefulSet 名称
-            namespace: 命名空间
-        
-        Returns:
-            str: Pod 失败的详细描述
-        """
-        try:
-            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
-            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
-            
-            if not pod_list or not pod_list.items:
-                return "No pods found"
-            
-            errors = []
-            for pod in pod_list.items:
-                pod_name = pod.metadata.name
-                phase = pod.status.phase if pod.status else 'Unknown'
-                
-                if phase != 'Running':
-                    errors.append(self._build_pod_failure_detail(pod))
-                
-                if pod.status and pod.status.container_statuses:
-                    for container_status in pod.status.container_statuses:
-                        if container_status.state:
-                            if container_status.state.waiting:
-                                reason = container_status.state.waiting.reason or 'Unknown'
-                                message = container_status.state.waiting.message or ''
-                                errors.append(f"{pod_name}/{container_status.name}: {reason} - {message[:100]}")
-                            elif container_status.state.terminated:
-                                reason = container_status.state.terminated.reason or 'Unknown'
-                                exit_code = container_status.state.terminated.exit_code or 0
-                                errors.append(f"{pod_name}/{container_status.name}: terminated - {reason} (exit {exit_code})")
-            
-            return '; '.join(errors) if errors else "Unknown error"
-        
-        except Exception as e:
-            return f"Failed to get details: {str(e)}"
-
-    def _get_pod_logs_summary(self, k8s_client, statefulset_name, namespace, tail_lines=50):
-        """
-        获取 StatefulSet 下各 Pod 的最近日志（包含当前和上一次容器实例），
-        等价于对每个 Pod 执行：
-            kubectl logs -n <namespace> <pod> --tail=<tail_lines>
-            kubectl logs -n <namespace> <pod> --previous --tail=<tail_lines>
-
-        只在出现故障时调用，结果拼入错误信息供快速定位。
-        日志拉取失败不影响主流程，直接跳过对应 Pod。
-        """
-        try:
-            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
-            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
-            if not pod_list or not pod_list.items:
-                return ''
-
-            log_parts = []
-            for pod in pod_list.items:
-                pod_name = pod.metadata.name
-                phase = pod.status.phase if pod.status else 'Unknown'
-
-                # Succeeded 的 Pod 不拉日志（正常退出，无需诊断）
-                # Running 但 not-ready（健康检查持续失败）也需要拉当前日志
-                if phase == 'Succeeded':
-                    continue
-
-                # 判断是否有重启记录，决定是否同时拉 previous 日志
-                has_restarts = False
-                if pod.status and pod.status.container_statuses:
-                    has_restarts = any(
-                        (cs.restart_count or 0) > 0
-                        for cs in pod.status.container_statuses
-                    )
-
-                # 当前容器日志（始终拉取）
-                current_log = k8s_client.get_pod_log(
-                    pod_name, namespace, previous=False, tail_lines=tail_lines
-                )
-                # 上一次容器实例日志（仅在有重启记录时有意义）
-                previous_log = None
-                if has_restarts:
-                    previous_log = k8s_client.get_pod_log(
-                        pod_name, namespace, previous=True, tail_lines=tail_lines
-                    )
-
-                pod_log_lines = [f'--- Pod: {pod_name} (phase={phase}) ---']
-                if current_log:
-                    pod_log_lines.append(f'[Current logs (last {tail_lines} lines)]:\n{current_log.strip()}')
-                if previous_log:
-                    pod_log_lines.append(f'[Previous logs (last {tail_lines} lines)]:\n{previous_log.strip()}')
-                if not current_log and not previous_log:
-                    pod_log_lines.append('[No logs available]')
-
-                log_parts.append('\n'.join(pod_log_lines))
-
-            return '\n\n'.join(log_parts)
-        except Exception as e:
-            LOG.warning('[StatefulSet] Failed to collect pod logs: %s', str(e))
-            return ''
-
-    def _sync_pods_to_cmdb(self, k8s_client, namespace, pod_list, instance_id):
-        """同步 Pod 信息到 CMDB"""
-        if not instance_id:
-            LOG.warning('No instanceId provided, skipping CMDB sync')
-            return
-        
-        try:
-            from wecubek8s.common import wecmdb
-            from wecubek8s.common import wecube
-            
-            # 获取 CMDB 客户端（需要从配置中获取 CMDB 地址）
-            cmdb_server = CONF.wecube.base_url
-            if not cmdb_server:
-                LOG.warning('CMDB base_url not configured, skipping CMDB sync')
-                return
-            
-            # 使用子系统身份登录获取 token，不依赖浏览器请求携带的用户 token
-            wecube_client = wecube.WeCubeClient(cmdb_server, None)
-            subsystem_token = wecube_client.login_subsystem(set_self=False)
-            LOG.info('Using subsystem token for CMDB operations (token prefix: %s...)',
-                     subsystem_token[:20] if subsystem_token else 'None')
-            cmdb_client = wecmdb.EntityClient(cmdb_server, subsystem_token)
-            
-            # 1. 查询 CMDB 中该 instanceId 下的所有 Pod
-            query_data = {
-                "criteria": {
-                    "attrName": const.CmdbAttr.APP_INSTANCE,
-                    "op": "eq",
-                    "condition": instance_id
-                }
-            }
-            
-            LOG.info('Querying CMDB for pods with %s: %s', const.CmdbAttr.APP_INSTANCE, instance_id)
-            cmdb_response = cmdb_client.query('wecmdb', const.CmdbCI.POD, query_data)
-            
-            # 记录 CMDB 响应（用于调试）
-            if cmdb_response:
-                LOG.info('CMDB response status: %s', cmdb_response.get('status', 'unknown'))
-                if cmdb_response.get('data'):
-                    LOG.info('CMDB query returned %d pod records', len(cmdb_response['data']))
-                else:
-                    LOG.warning('CMDB query returned empty data for instanceId: %s', instance_id)
-            else:
-                LOG.warning('CMDB query returned None for instanceId: %s', instance_id)
-            
-            # 解析 CMDB 返回的 Pod 列表
-            cmdb_pods = {}
-            if cmdb_response and cmdb_response.get('data'):
-                for idx, pod_data in enumerate(cmdb_response['data']):
-                    # 记录第一个 pod 的所有字段（用于调试字段名问题）
-                    if idx == 0:
-                        LOG.info('CMDB pod record fields: %s', ', '.join(pod_data.keys()) if pod_data else 'empty')
-                    
-                    pod_code = pod_data.get('code')  # CMDB 字段名：code（Pod 名称）
-                    if pod_code:
-                        cmdb_pods[pod_code] = {
-                            'guid': pod_data.get('guid'),  # CMDB 字段名：guid（记录标识符）
-                            'asset_id': pod_data.get('asset_id')  # CMDB 字段名：asset_id（K8s Pod UID）
-                        }
-                        LOG.info('Found CMDB pod [%d]: code=%s, guid=%s, asset_id=%s', 
-                                idx + 1, pod_code, pod_data.get('guid'), pod_data.get('asset_id'))
-                    else:
-                        LOG.warning('CMDB pod record [%d] has no "code" field: %s', idx + 1, list(pod_data.keys()))
-                LOG.info('Total CMDB pod names found: [%s]', ', '.join(cmdb_pods.keys()) if cmdb_pods else 'None')
-            
-            # 2. 对比 K8s 实际的 Pod 列表，找出需要创建和更新的 Pod
-            LOG.info('K8s running pods: %s', ', '.join([p['name'] for p in pod_list]) if pod_list else 'None')
-            
-            creates = []  # 需要创建的 Pod
-            updates = []  # 需要更新的 Pod
-            
-            for pod_info in pod_list:
-                pod_name = pod_info['name']
-                pod_id = pod_info['id']
-                pod_host_ip = pod_info.get('host_ip', '')  # Pod 所在 Node 的 IP
-                
-                # 如果 Pod ID 为空，说明 Pod 还没有创建，跳过
-                if not pod_id:
-                    LOG.info('Pod %s has no ID yet (not created), skipping CMDB sync', pod_name)
-                    continue
-                
-                if pod_name in cmdb_pods:
-                    # Pod 已存在于 CMDB，检查是否需要更新
-                    cmdb_pod = cmdb_pods[pod_name]
-                    if cmdb_pod['asset_id'] != pod_id:
-                        # Pod ID 发生变化（可能是 Pod 被重建），需要更新
-                        update_data = {
-                            'guid': cmdb_pod['guid'],  # CMDB 字段名：guid（记录标识符）
-                            'asset_id': pod_id  # CMDB 字段名：asset_id（新的 K8s Pod UID）
-                        }
-                        # 如果有 host_ip，查询对应的 host_resource GUID
-                        if pod_host_ip:
-                            host_resource_guid = self._query_host_resource_guid(cmdb_client, pod_host_ip)
-                            if host_resource_guid:
-                                update_data[const.CmdbAttr.HOST_RESOURCE] = host_resource_guid
-                                LOG.info('Pod %s will update with %s GUID: %s (IP: %s)',
-                                        pod_name, const.CmdbAttr.HOST_RESOURCE, host_resource_guid, pod_host_ip)
-                            else:
-                                LOG.warning('Pod %s has host_ip %s but no matching host_resource found in CMDB', 
-                                           pod_name, pod_host_ip)
-                        updates.append(update_data)
-                        LOG.info('Pod %s ID changed: %s -> %s, will update (host_ip: %s)', 
-                                pod_name, cmdb_pod['asset_id'], pod_id, pod_host_ip or 'N/A')
-                    else:
-                        LOG.debug('Pod %s ID unchanged: %s', pod_name, pod_id)
-                else:
-                    # Pod 不存在于 CMDB，需要创建
-                    create_data = {
-                        'code': pod_name,  # CMDB 字段名：code（Pod 名称）
-                        'asset_id': pod_id,  # CMDB 字段名：asset_id（K8s Pod UID）
-                        const.CmdbAttr.APP_INSTANCE: instance_id
-                    }
-                    # 如果有 host_ip，查询对应的 host_resource GUID
-                    if pod_host_ip:
-                        host_resource_guid = self._query_host_resource_guid(cmdb_client, pod_host_ip)
-                        if host_resource_guid:
-                            create_data[const.CmdbAttr.HOST_RESOURCE] = host_resource_guid
-                            LOG.info('Pod %s will create with %s GUID: %s (IP: %s)',
-                                    pod_name, const.CmdbAttr.HOST_RESOURCE, host_resource_guid, pod_host_ip)
-                        else:
-                            LOG.warning('Pod %s has host_ip %s but no matching host_resource found in CMDB', 
-                                       pod_name, pod_host_ip)
-                    creates.append(create_data)
-                    LOG.info('Pod %s (ID: %s, host_ip: %s) not found in CMDB, will create', 
-                            pod_name, pod_id, pod_host_ip or 'N/A')
-            
-            # 3. 批量创建和更新 CMDB
-            if creates:
-                LOG.info('Creating %d new pods in CMDB', len(creates))
-                try:
-                    cmdb_client.create('wecmdb', const.CmdbCI.POD, creates)
-                    LOG.info('Successfully created %d pods in CMDB', len(creates))
-                except Exception as e:
-                    LOG.error('Failed to create pods in CMDB: %s', str(e))
-            
-            if updates:
-                LOG.info('Updating %d existing pods in CMDB', len(updates))
-                try:
-                    cmdb_client.update('wecmdb', const.CmdbCI.POD, updates)
-                    LOG.info('Successfully updated %d pods in CMDB', len(updates))
-                except Exception as e:
-                    LOG.error('Failed to update pods in CMDB: %s', str(e))
-            
-            if not creates and not updates:
-                LOG.info('All pods in sync with CMDB, no changes needed')
-                
-        except Exception as e:
-            LOG.error('Failed to sync pods to CMDB: %s', str(e))
-            # 不抛出异常，避免影响主流程
-    
     def apply(self, data):
         resource_id = data['correlation_id']
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
@@ -2388,576 +3117,24 @@ class StatefulSet:
                 LOG.warning('[RollingUpdate] Error during stuck-pod check: %s (non-fatal, continuing)',
                             str(e))
         
-        # ==================== 等待 Pod 就绪（解决异步创建问题）====================
-        replicas = int(data.get('replicas', 1))
-        wait_for_pods = data.get('wait_for_ready', 'true').lower() == 'true'  # 可配置是否等待
+        self._wait_for_workload_ready(
+            k8s_client, resource_name, data['namespace'], data, resource_template)
         
-        if wait_for_pods:
-            LOG.info('Waiting for StatefulSet Pods to be ready (replicas: %d)...', replicas)
-            pod_ready_timeout = self._get_pod_ready_timeout(data)  # 默认来自系统参数
-            check_interval = 5  # 每 5 秒检查一次
-            max_attempts = pod_ready_timeout // check_interval
-            
-            for attempt in range(1, max_attempts + 1):
-                time.sleep(check_interval)
-                
-                try:
-                    # 重新读取 StatefulSet 状态
-                    sts = k8s_client.get_statefulset(resource_name, data['namespace'])
-                    
-                    if sts and sts.status:
-                        ready_replicas = sts.status.ready_replicas or 0
-                        current_replicas = sts.status.replicas or 0
-                        updated_replicas = sts.status.updated_replicas or 0
-                        current_revision = sts.status.current_revision or ''
-                        update_revision = sts.status.update_revision or ''
-                        rollout_complete = (
-                            updated_replicas >= replicas
-                            and (not current_revision or not update_revision
-                                 or current_revision == update_revision)
-                        )
-
-                        LOG.info('[Wait %d/%d] StatefulSet status: ready=%d/%d, updated=%d/%d, '
-                                 'current_revision=%s, update_revision=%s',
-                                 attempt, max_attempts,
-                                 ready_replicas, replicas,
-                                 updated_replicas, replicas,
-                                 current_revision, update_revision)
-                        
-                        # 必须同时满足：所有 Pod 已就绪 + 所有 Pod 已更新到最新版本
-                        # 避免 K8s 滚动更新中途（某个 Pod 刚 Ready，下一个还未开始）时提前退出
-                        if ready_replicas >= replicas and rollout_complete:
-                            LOG.info('✅ All Pods are ready and updated! (%d/%d)', ready_replicas, replicas)
-                            
-                            # 额外验证：检查实际的 Pod 状态
-                            pod_validation_passed = self._validate_pod_health(
-                                k8s_client, resource_name, data['namespace'], replicas
-                            )
-                            
-                            if pod_validation_passed:
-                                LOG.info('✅ Pod health validation passed!')
-                                break
-                            else:
-                                LOG.warning('⚠️  Pod health validation failed, continuing to wait...')
-                        else:
-                            LOG.info('Still waiting: %d/%d replicas ready', ready_replicas, replicas)
-                            
-                            # 检查是否有 Pod 创建失败（30秒后开始检查）
-                            if attempt > 6:
-                                has_fatal_error, error_message = self._check_pod_failures(
-                                    k8s_client, resource_name, data['namespace'],
-                                    desired_images=self._template_main_images(resource_template),
-                                )
-                                
-                                # 检测到致命错误，立即退出
-                                if has_fatal_error:
-                                    elapsed_time = attempt * check_interval
-                                    LOG.error('❌ Fatal Pod error detected after %d seconds: %s', 
-                                            elapsed_time, error_message)
-                                    raise exceptions.PluginError(
-                                        message=_('StatefulSet Pod failed to start: %(error)s '
-                                                '(detected after %(time)ds, max wait: %(timeout)ds)') % {
-                                            'error': error_message,
-                                            'time': elapsed_time,
-                                            'timeout': pod_ready_timeout
-                                        }
-                                    )
-                
-                except exceptions.PluginError:
-                    # 重新抛出 PluginError（不要被下面的 except 捕获）
-                    raise
-                except Exception as e:
-                    LOG.warning('[Wait %d/%d] Failed to check StatefulSet status: %s', 
-                               attempt, max_attempts, str(e))
-            
-            else:
-                # 超时后检查最终状态
-                sts = k8s_client.get_statefulset(resource_name, data['namespace'])
-                ready_replicas = sts.status.ready_replicas or 0 if sts and sts.status else 0
-                
-                if ready_replicas < replicas:
-                    error_msg = self._get_pod_failure_details(k8s_client, resource_name, data['namespace'])
-                    LOG.error('❌ Timeout waiting for Pods to be ready: %d/%d ready after %d seconds', 
-                             ready_replicas, replicas, pod_ready_timeout)
-                    LOG.error('Pod failure details: %s', error_msg)
-
-                    # 拉取 Pod 日志辅助定位（等价于 kubectl logs [-p] --tail=50）
-                    pod_logs = self._get_pod_logs_summary(k8s_client, resource_name, data['namespace'])
-                    if pod_logs:
-                        LOG.error('Pod logs for failed pods:\n%s', pod_logs)
-                        full_details = f'{error_msg}\n\nPod Logs:\n{pod_logs}'
-                    else:
-                        full_details = error_msg
-
-                    raise exceptions.PluginError(
-                        message=_('StatefulSet created but Pods failed to become ready within %(timeout)ds. '
-                                  'Ready: %(ready)d/%(expected)d. Details: %(details)s') % {
-                            'timeout': pod_ready_timeout,
-                            'ready': ready_replicas,
-                            'expected': replicas,
-                            'details': full_details
-                        }
-                    )
-        else:
-            LOG.info('Skipping Pod readiness wait (wait_for_ready=false)')
-        # ==================== 结束：等待 Pod 就绪 ====================
-        
-        # 补充返回对应 Service 的 clusterIP 与 port
-        # 策略：优先返回负载均衡 Service 的 ClusterIP（如果存在），否则返回 Headless Service 信息
-        cluster_ip = None
-        port_str = ""
-        
-        # 【修复】无论 LoadBalancer Service 是否存在，都要确保它被创建/更新
-        # 这样端口变更时才能正确更新 Service，避免只在首次创建时设置端口
-        
-        # 1. 准备 Pod 标签和端口信息
-        pod_spec_tags = api_utils.convert_tag(data.get('pod_tags', []))
-        # 使用 resource_name（转换后的小写名称）作为标签值，与创建 StatefulSet 时保持一致
-        pod_spec_tags[const.Tag.POD_AUTO_TAG] = resource_name
-        pod_spec_tags[const.Tag.POD_AFFINITY_TAG] = resource_name
-        
-        # 2. 获取 Service 端口
-        service_ports = []
-        if data.get('servicePorts'):
-            service_ports = api_utils.convert_service_port(data['servicePorts'])
-        elif data.get('image_port'):
-            container_ports = api_utils.convert_pod_ports(data.get('image_port', ''))
-            for idx, port_info in enumerate(container_ports):
-                port = port_info.get('containerPort')
-                if port:
-                    protocol = port_info.get('protocol', 'TCP').lower()
-                    # 生成端口名称：协议-端口号（如 tcp-8080）
-                    # Kubernetes 要求端口名称最长 15 个字符，必须是小写字母、数字和 '-'
-                    port_name = f'{protocol}-{port}'
-                    # 如果名称太长，使用索引作为后缀（如 port-0, port-1）
-                    if len(port_name) > 15:
-                        port_name = f'port-{idx}'
-                    
-                    service_ports.append({
-                        'name': port_name,
-                        'port': port,
-                        'targetPort': port,
-                        'protocol': port_info.get('protocol', 'TCP')
-                    })
-        
-        if not service_ports:
-            service_ports = [{
-                'name': 'default',
-                'port': 80,
-                'targetPort': 80,
-                'protocol': 'TCP'
-            }]
-        
-        # 3. 确保负载均衡 Service 存在并更新（与 Headless Service 保持一致的逻辑）
-        lb_service_name = self._ensure_loadbalancer_service(k8s_client, data, service_ports, pod_spec_tags)
-        
-        # 4. 获取更新后的 Service 信息
-        lb_svc = k8s_client.get_service(lb_service_name, data['namespace'])
-        if lb_svc:
-            cluster_ip = lb_svc.spec.cluster_ip if lb_svc.spec.cluster_ip else None
-            if cluster_ip == 'None':
-                cluster_ip = None
-            if getattr(lb_svc.spec, 'ports', None) and len(lb_svc.spec.ports) > 0:
-                port_str = str(lb_svc.spec.ports[0].port)
-            LOG.info('Using LoadBalancer Service %s ClusterIP: %s, Port: %s', lb_service_name, cluster_ip, port_str)
-        
-        # 3. 如果仍然没有 ClusterIP，记录警告
+        # 按端口创建 ClusterIP Service（Headless 已在前面创建，不回写 CMDB）
+        try:
+            headless_name = self._port_service_base_name(data)
+        except Exception:
+            headless_name = resource_name
+        service_list = self._ensure_loadbalancer_service(
+            k8s_client, data, resource_name, cluster_info, keep_names=[headless_name])
+        cluster_ip, port_str, services_str = self._service_apply_outputs(service_list)
+        self._sync_services_to_cmdb(service_list, data, resource_id)
         if not cluster_ip:
             LOG.warning('No ClusterIP available for StatefulSet %s/%s', data['namespace'], data['name'])
         
-        # 获取实际的 Pod 列表（包含 name 和 id）
-        replicas = int(data.get('replicas', 1))
-        pod_list = []
-        
-        # 查询实际运行的 Pod，获取真实的 Pod ID
-        # 使用 label selector 查询该 StatefulSet 的 Pod
-        # 注意：标签值使用 resource_name（转换后的小写名称），与创建时保持一致
-        label_selector = f"{const.Tag.POD_AUTO_TAG}={resource_name}"
-        try:
-            pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
-            if pods and pods.items:
-                for pod in pods.items:
-                    # 使用 cluster_id + pod_uid 作为全局唯一标识，与 watcher 保持一致
-                    pod_uid = pod.metadata.uid if pod.metadata.uid else ''
-                    asset_id = f"{cluster_info['id']}_{pod_uid}" if pod_uid else ''
-                    pod_list.append({
-                        'name': pod.metadata.name,
-                        'id': asset_id,  # 使用带 cluster_id 前缀的 asset_id，与 watcher 保持一致
-                        'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else ''  # Pod 所在 Node 的 IP
-                    })
-                LOG.info('Found %d pods for StatefulSet %s in namespace %s (some may not have UID yet)', 
-                        len(pod_list), resource_name, data['namespace'])
-            else:
-                # 如果还没有 Pod 运行，使用预期的 Pod 名称（ID 暂时为空）
-                # 这是正常现象：StatefulSet 刚创建时，Pod 会异步创建
-                LOG.info('No running pods found yet for StatefulSet %s in namespace %s (pods may still be creating), using expected pod names', 
-                        resource_name, data['namespace'])
-                for i in range(replicas):
-                    pod_list.append({
-                        'name': f"{resource_name}-{i}",
-                        'id': '',
-                        'host_ip': ''
-                    })
-        except Exception as e:
-            LOG.warning('Failed to query pods for StatefulSet %s in namespace %s: %s. Using expected pod names.', 
-                       resource_name, data['namespace'], str(e))
-            # 使用预期的 Pod 名称
-            for i in range(replicas):
-                pod_list.append({
-                    'name': f"{resource_name}-{i}",
-                    'id': '',
-                    'host_ip': ''
-                })
-        
-        # 使用 correlation_id（即 instanceId）同步 Pod 信息到 CMDB
-        if resource_id and pod_list:
-            # 如果 Pod 还没有 ID，等待一段时间让 Pod 创建完成
-            # 注意：如果有 packageUrl，Pod 需要先运行 init container 下载部署包，会比较慢
-            has_package = bool(data.get('packageUrl'))
-            if has_package:
-                max_wait_time = 240  # 有部署包时等待 240 秒（4分钟，init container 下载需要时间）
-                LOG.info('Deployment has packageUrl, extending wait time to %d seconds', max_wait_time)
-            else:
-                max_wait_time = 30   # 无部署包时等待 30 秒
-            
-            wait_interval = 2   # 每 2 秒检查一次
-            waited_time = 0
-            
-            # 检查是否有 Pod 没有 ID 或 host_ip
-            pods_incomplete = [p for p in pod_list if not p.get('id') or not p.get('host_ip')]
-            if pods_incomplete:
-                pods_without_id = [p for p in pods_incomplete if not p.get('id')]
-                pods_without_host = [p for p in pods_incomplete if (p.get('id') and not p.get('host_ip'))]
-                LOG.info('Waiting for pods: %d without UID, %d without host_ip', 
-                        len(pods_without_id), len(pods_without_host))
-                if pods_without_id:
-                    LOG.info('Pods without UID: %s', ', '.join([p['name'] for p in pods_without_id]))
-                if pods_without_host:
-                    LOG.info('Pods without host_ip (not scheduled yet): %s', ', '.join([p['name'] for p in pods_without_host]))
-                
-                while waited_time < max_wait_time and pods_incomplete:
-                    time.sleep(wait_interval)
-                    waited_time += wait_interval
-                    
-                    # 重新查询 Pod 状态
-                    try:
-                        pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
-                        if pods and pods.items:
-                            # 检查 Pod 是否有失败情况
-                            for pod in pods.items:
-                                phase = pod.status.phase if pod.status else 'Unknown'
-                                pod_name = pod.metadata.name
-                                
-                                # 检查致命错误状态
-                                if phase == 'Failed':
-                                    error_msg = self._build_pod_failure_detail(pod)
-                                    if self._is_recoverable_failed_pod(pod):
-                                        LOG.warning('Recoverable Failed Pod detected during CMDB sync wait, keep waiting: %s',
-                                                    error_msg)
-                                        continue
-                                    LOG.error('❌ %s', error_msg)
-                                    raise exceptions.PluginError(message=_('Pod creation failed: %(error)s') % {'error': error_msg})
-                                
-                                # 检查容器状态
-                                if pod.status and pod.status.container_statuses:
-                                    for container_status in pod.status.container_statuses:
-                                        # 检查容器重启次数（超过3次认为异常）
-                                        restart_count = container_status.restart_count or 0
-                                        if restart_count > 3:
-                                            error_msg = f'Container has restarted {restart_count} times (threshold: 3)'
-                                            LOG.error('❌ Pod %s, Container %s: %s', pod_name, container_status.name, error_msg)
-                                            
-                                            # 获取更详细的状态信息
-                                            detail_msg = error_msg
-                                            if container_status.state:
-                                                if container_status.state.waiting:
-                                                    reason = container_status.state.waiting.reason or 'Unknown'
-                                                    detail_msg += f', current state: waiting ({reason})'
-                                                elif container_status.state.terminated:
-                                                    exit_code = container_status.state.terminated.exit_code or 0
-                                                    reason = container_status.state.terminated.reason or 'Unknown'
-                                                    detail_msg += f', current state: terminated (exit {exit_code}, {reason})'
-                                            
-                                            raise exceptions.PluginError(
-                                                message=_('Pod container crashed repeatedly: %(pod)s/%(container)s - %(error)s') % {
-                                                    'pod': pod_name,
-                                                    'container': container_status.name,
-                                                    'error': detail_msg
-                                                }
-                                            )
-                                        
-                                        if container_status.state and container_status.state.waiting:
-                                            reason = container_status.state.waiting.reason
-                                            # 检查严重错误（镜像拉取失败、配置错误、崩溃循环等）
-                                            if reason in ['ImagePullBackOff', 'ErrImagePull', 'CreateContainerConfigError', 
-                                                         'InvalidImageName', 'CrashLoopBackOff']:
-                                                error_msg = container_status.state.waiting.message or reason
-                                                # 如果是 CrashLoopBackOff，添加重启次数信息
-                                                if reason == 'CrashLoopBackOff':
-                                                    error_msg = f'{error_msg} (restarted {restart_count} times)'
-                                                LOG.error('❌ Pod %s, Container %s: %s', pod_name, container_status.name, error_msg)
-                                                raise exceptions.PluginError(
-                                                    message=_('Pod container failed: %(pod)s/%(container)s - %(error)s') % {
-                                                        'pod': pod_name,
-                                                        'container': container_status.name,
-                                                        'error': error_msg
-                                                    }
-                                                )
-                                        elif container_status.state and container_status.state.terminated:
-                                            # 容器已终止且退出码非0表示异常
-                                            exit_code = container_status.state.terminated.exit_code or 0
-                                            if exit_code != 0:
-                                                reason = container_status.state.terminated.reason or 'Unknown'
-                                                LOG.error('❌ Pod %s, Container %s terminated with exit code %d: %s',
-                                                        pod_name, container_status.name, exit_code, reason)
-                                                raise exceptions.PluginError(
-                                                    message=_('Pod container terminated abnormally: %(pod)s/%(container)s - exit code %(code)d') % {
-                                                        'pod': pod_name,
-                                                        'container': container_status.name,
-                                                        'code': exit_code
-                                                    }
-                                                )
-                            
-                            # 更新 pod_list 中的 ID 和 host_ip（只记录有 UID 的 Pod）
-                            pod_dict = {pod.metadata.name: {
-                                            'uid': pod.metadata.uid,
-                                            'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else '',
-                                            'phase': pod.status.phase if pod.status else 'Unknown',
-                                            'ready': False
-                                        }
-                                       for pod in pods.items if pod.metadata.uid}
-                            
-                            # 检查 Pod 的 Ready 状态
-                            for pod in pods.items:
-                                if pod.metadata.name in pod_dict and pod.status and pod.status.conditions:
-                                    for condition in pod.status.conditions:
-                                        if condition.type == 'Ready' and condition.status == 'True':
-                                            pod_dict[pod.metadata.name]['ready'] = True
-                                            break
-                            
-                            # 同时记录 Pod 的状态信息（用于调试）
-                            for pod in pods.items:
-                                phase = pod.status.phase if pod.status else 'Unknown'
-                                uid_status = f'UID: {pod.metadata.uid[:8]}...' if pod.metadata.uid else 'UID: None'
-                                host_ip_status = f'host_ip: {pod.status.host_ip}' if pod.status and pod.status.host_ip else 'host_ip: None'
-                                ready_status = 'Ready' if pod.metadata.name in pod_dict and pod_dict[pod.metadata.name]['ready'] else 'NotReady'
-                                
-                                # 检查容器重启次数和状态
-                                container_info = ''
-                                if pod.status and pod.status.container_statuses:
-                                    total_restarts = sum(cs.restart_count or 0 for cs in pod.status.container_statuses)
-                                    if total_restarts > 0:
-                                        container_info = f' [Restarts: {total_restarts}]'
-                                    # 检查是否有异常状态
-                                    for cs in pod.status.container_statuses:
-                                        if cs.state and cs.state.waiting:
-                                            reason = cs.state.waiting.reason or 'Unknown'
-                                            if reason in ['CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull']:
-                                                container_info += f' [{cs.name}: {reason}]'
-                                
-                                # 检查 init container 状态
-                                init_status = ''
-                                if pod.status and pod.status.init_container_statuses:
-                                    for init_container in pod.status.init_container_statuses:
-                                        if init_container.state:
-                                            if init_container.state.running:
-                                                init_status = f' [Init: {init_container.name} running]'
-                                            elif init_container.state.waiting:
-                                                reason = init_container.state.waiting.reason or 'Unknown'
-                                                init_status = f' [Init: {init_container.name} waiting - {reason}]'
-                                            elif init_container.state.terminated:
-                                                init_status = f' [Init: {init_container.name} completed]'
-                                
-                                if pod.metadata.name in [p['name'] for p in pods_incomplete]:
-                                    LOG.debug('Pod %s status: %s, %s, %s, %s%s%s', pod.metadata.name, phase, uid_status, host_ip_status, ready_status, container_info, init_status)
-                            
-                            for pod_info in pod_list:
-                                if pod_info['name'] in pod_dict:
-                                    pod_info['id'] = pod_dict[pod_info['name']]['uid']
-                                    pod_info['host_ip'] = pod_dict[pod_info['name']]['host_ip']
-                            
-                            # 重新检查还有哪些 Pod 不完整（没有 ID 或 host_ip）
-                            pods_incomplete = [p for p in pod_list if not p.get('id') or not p.get('host_ip')]
-                            
-                            # 检查所有 Pod 是否都已就绪
-                            all_pods_ready = all(pod_dict.get(p['name'], {}).get('ready', False) for p in pod_list if p.get('id'))
-                            
-                            if not pods_incomplete and all_pods_ready:
-                                LOG.info('✅ All pods created, scheduled and ready after waiting %d seconds', waited_time)
-                                break
-                            else:
-                                pods_without_id = [p for p in pods_incomplete if not p.get('id')]
-                                pods_without_host = [p for p in pods_incomplete if (p.get('id') and not p.get('host_ip'))]
-                                pods_not_ready = [p['name'] for p in pod_list if p.get('id') and not pod_dict.get(p['name'], {}).get('ready', False)]
-                                LOG.info('Still waiting after %d seconds: %d without UID, %d without host_ip, %d not ready', 
-                                        waited_time, len(pods_without_id), len(pods_without_host), len(pods_not_ready))
-                    except exceptions.PluginError:
-                        # 重新抛出业务异常
-                        raise
-                    except Exception as e:
-                        LOG.warning('Failed to query pod status during wait: %s', str(e))
-                
-                # 等待循环结束后，检查是否所有 Pod 都已完成
-                if pods_incomplete:
-                    pods_without_id = [p for p in pods_incomplete if not p.get('id')]
-                    pods_without_host = [p for p in pods_incomplete if (p.get('id') and not p.get('host_ip'))]
-                    LOG.warning('Timeout after %d seconds: %d pod(s) without UID, %d pod(s) without host_ip, will do final check', 
-                               max_wait_time, len(pods_without_id), len(pods_without_host))
-            
-            # 在等待循环结束后，做最后一次强制查询，验证所有 Pod 的状态
-            try:
-                LOG.info('Performing final pod status check...')
-                pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
-                if pods and pods.items:
-                    # 构建 Pod 状态字典，包含完整的状态信息
-                    pod_dict = {}
-                    for pod in pods.items:
-                        if pod.metadata.uid:
-                            is_ready = False
-                            if pod.status and pod.status.conditions:
-                                for condition in pod.status.conditions:
-                                    if condition.type == 'Ready' and condition.status == 'True':
-                                        is_ready = True
-                                        break
-                            
-                            pod_dict[pod.metadata.name] = {
-                                'uid': pod.metadata.uid,
-                                'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else '',
-                                'phase': pod.status.phase if pod.status else 'Unknown',
-                                'ready': is_ready
-                            }
-                    
-                    # 更新 pod_list 中的信息
-                    updated_count = 0
-                    for pod_info in pod_list:
-                        if pod_info['name'] in pod_dict:
-                            # 更新缺失的信息
-                            if not pod_info.get('id'):
-                                pod_info['id'] = pod_dict[pod_info['name']]['uid']
-                                updated_count += 1
-                            if not pod_info.get('host_ip') and pod_dict[pod_info['name']]['host_ip']:
-                                pod_info['host_ip'] = pod_dict[pod_info['name']]['host_ip']
-                                updated_count += 1
-                    if updated_count > 0:
-                        LOG.info('Final check updated %d pod field(s)', updated_count)
-                    
-                    # 检查所有 Pod 是否都已就绪
-                    pods_not_ready = []
-                    error_details = []
-                    
-                    for pod_info in pod_list:
-                        pod_name = pod_info['name']
-                        if pod_name not in pod_dict:
-                            pods_not_ready.append(pod_name)
-                            error_details.append(f'{pod_name}: Pod not found')
-                        elif not pod_dict[pod_name]['ready']:
-                            pods_not_ready.append(pod_name)
-                            phase = pod_dict[pod_name]['phase']
-                            error_details.append(f'{pod_name}: phase={phase}, ready=False')
-                    
-                    # 如果有 Pod 未就绪，获取详细错误信息并抛出异常
-                    if pods_not_ready:
-                        LOG.error('❌ %d/%d pods are not ready after %d seconds', 
-                                 len(pods_not_ready), len(pod_list), max_wait_time)
-                        
-                        # 获取更详细的失败信息
-                        for pod in pods.items:
-                            if pod.metadata.name in pods_not_ready:
-                                pod_name = pod.metadata.name
-                                phase = pod.status.phase if pod.status else 'Unknown'
-                                LOG.error('Pod %s - Phase: %s', pod_name, phase)
-                                
-                                # 记录容器状态
-                                if pod.status and pod.status.container_statuses:
-                                    for container_status in pod.status.container_statuses:
-                                        restart_count = container_status.restart_count or 0
-                                        
-                                        if container_status.state:
-                                            if container_status.state.waiting:
-                                                reason = container_status.state.waiting.reason or 'Unknown'
-                                                message = container_status.state.waiting.message or ''
-                                                LOG.error('  Container %s waiting: %s (restarts: %d) - %s',
-                                                        container_status.name, reason, restart_count, message)
-                                                
-                                                # 在错误详情中包含重启次数（如果有的话）
-                                                if restart_count > 0:
-                                                    error_details.append(f'{pod_name}/{container_status.name}: {reason} (restarted {restart_count} times)')
-                                                else:
-                                                    error_details.append(f'{pod_name}/{container_status.name}: {reason}')
-                                            elif container_status.state.terminated:
-                                                reason = container_status.state.terminated.reason or 'Unknown'
-                                                exit_code = container_status.state.terminated.exit_code or 0
-                                                LOG.error('  Container %s terminated: %s (exit code %d, restarts: %d)',
-                                                        container_status.name, reason, exit_code, restart_count)
-                                                error_details.append(f'{pod_name}/{container_status.name}: terminated (exit {exit_code}, restarted {restart_count} times)')
-                                            elif container_status.state.running:
-                                                # 容器在运行但 Pod 不 ready（健康检查持续失败）
-                                                if restart_count > 0:
-                                                    LOG.error('  Container %s running but not ready (restarts: %d)',
-                                                            container_status.name, restart_count)
-                                                    error_details.append(f'{pod_name}/{container_status.name}: running but not ready (restarted {restart_count} times)')
-                                                else:
-                                                    # 无重启但 not-ready，最典型原因是健康检查配置不当或应用启动慢
-                                                    LOG.error('  Container %s running but not ready (no restarts, likely health check failure)',
-                                                            container_status.name)
-                                                    error_details.append(f'{pod_name}/{container_status.name}: running but not ready (no restarts, likely health check failure - check readiness probe config)')
-                                        else:
-                                            # 没有状态信息，但可能有重启次数
-                                            if restart_count > 0:
-                                                LOG.error('  Container %s - restarts: %d', container_status.name, restart_count)
-                                                error_details.append(f'{pod_name}/{container_status.name}: restarted {restart_count} times')
-                        
-                        error_msg = '; '.join(error_details[:5])  # 只显示前5个错误，避免信息过长
+        pod_list, pods_str = self._collect_sync_and_mark_pods(
+            k8s_client, cluster_info, data, resource_name, resource_id)
 
-                        # 拉取 Pod 日志辅助定位（等价于 kubectl logs [-p] --tail=50）
-                        pod_logs = self._get_pod_logs_summary(k8s_client, resource_name, data['namespace'])
-                        if pod_logs:
-                            LOG.error('Pod logs for failed pods:\n%s', pod_logs)
-                            full_details = f'{error_msg}\n\nPod Logs:\n{pod_logs}'
-                        else:
-                            full_details = error_msg
-
-                        raise exceptions.PluginError(
-                            message=_('StatefulSet created but %(count)d/%(total)d pods failed to become ready within %(timeout)ds. Details: %(details)s') % {
-                                'count': len(pods_not_ready),
-                                'total': len(pod_list),
-                                'timeout': max_wait_time,
-                                'details': full_details
-                            }
-                        )
-                    
-                    LOG.info('✅ All %d pods are ready', len(pod_list))
-                    
-            except exceptions.PluginError:
-                # 重新抛出业务异常
-                raise
-            except Exception as e:
-                LOG.error('Final pod status check failed: %s', str(e))
-                raise exceptions.PluginError(
-                    message=_('Failed to verify pod status: %(error)s') % {'error': str(e)}
-                )
-            
-            # 同步 Pod 信息到 CMDB（只同步有 ID 的 Pod）
-            self._sync_pods_to_cmdb(k8s_client, data['namespace'], pod_list, resource_id)
-        
-        # 将 Pod 列表转换为字符串格式（用分号拼接），方便页面显示
-        pods_str = ';'.join([pod['name'] for pod in pod_list]) if pod_list else ''
-        
-        # 标记预期创建的 Pod（告知 watcher 这些 Pod 是主动创建的，不需要通知 WeCube）
-        # 这样可以避免 watcher 在收到 POD.ADDED 事件时重复触发编排
-        # 只有 Pod 漂移/崩溃重启等意外情况，watcher 才会通知 WeCube
-        try:
-            from wecubek8s.server import watcher
-            pod_names = [pod['name'] for pod in pod_list]
-            watcher.mark_expected_pods(
-                cluster_id=cluster_info['id'],
-                namespace=data['namespace'],
-                pod_names=pod_names,
-                source='statefulset_apply'
-            )
-        except Exception as e:
-            LOG.warning('Failed to mark expected pods in watcher (watcher may still notify for these pods): %s', str(e))
-        
         # 构建返回结果
         result = {
             'id': exists_resource.metadata.uid,
@@ -2965,103 +3142,19 @@ class StatefulSet:
             'correlation_id': resource_id,
             'clusterIP': cluster_ip,
             'port': port_str,
-            'pods': pods_str  # 返回 Pod 名称字符串，用分号拼接
+            'services': services_str,
+            'pods': pods_str,  # 返回 Pod 名称字符串，用分号拼接
+            'podName': pods_str
         }
         
         # 记录返回信息到日志（方便使用 docker logs 查看）
-        LOG.info('StatefulSet apply result: id=%s, name=%s, correlation_id=%s, clusterIP=%s, port=%s, pods=%s',
+        LOG.info('StatefulSet apply result: id=%s, name=%s, correlation_id=%s, clusterIP=%s, port=%s, services=%s, pods=%s',
                 result['id'], result['name'], result['correlation_id'], 
-                result['clusterIP'], result['port'], result['pods'])
+                result['clusterIP'], result['port'], result['services'], result['pods'])
         
         # TODO: k8s为异步接口，是否需要等待真正执行完毕
         return result
 
-    def sync_pods_to_cmdb(self, data):
-        """
-        独立的 CMDB 同步接口，用于补偿同步
-        
-        参数:
-            data: {
-                'cluster': 集群名称,
-                'namespace': 命名空间,
-                'name': StatefulSet 名称,
-                'correlation_id': instanceId（用于关联 CMDB）
-            }
-        """
-        cluster_info = db_resource.Cluster().list({'name': data['cluster']})
-        if not cluster_info:
-            raise exceptions.ValidationError(attribute='cluster',
-                                             message=_('name of cluster(%(name)s) not found' % {'name': data['cluster']}))
-        cluster_info = cluster_info[0]
-        
-        # 确保 namespace 有值
-        if not data.get('namespace') or data['namespace'].strip() == '':
-            data['namespace'] = 'default'
-        
-        # 确保 api_server 有正确的协议前缀
-        api_server = cluster_info['api_server']
-        if not api_server.startswith('https://') and not api_server.startswith('http://'):
-            api_server = 'https://' + api_server
-        
-        k8s_auth = k8s.AuthToken(api_server, cluster_info['token'])
-        k8s_client = k8s.Client(k8s_auth)
-        # StatefulSet 的名称使用 escape_service_name（与创建时保持一致）
-        # 【关键】限制为 50 字符，避免 Kubernetes 添加后缀后超过 63 字符限制
-        # 【修复】自动移除 name 中可能包含的端口号后缀，避免因端口变化导致查询失败
-        normalized_name = api_utils.normalize_statefulset_name(data['name'])
-        resource_name = api_utils.escape_service_name(normalized_name, max_length=50)
-        correlation_id = data['correlation_id']
-        
-        # 查询 Pod 列表，使用 resource_name 作为标签值（与创建时保持一致）
-        label_selector = f"{const.Tag.POD_AUTO_TAG}={resource_name}"
-        
-        pod_list = []
-        try:
-            pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
-            if pods and pods.items:
-                for pod in pods.items:
-                    pod_list.append({
-                        'name': pod.metadata.name,
-                        'id': pod.metadata.uid,
-                        'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else ''  # Pod 所在 Node 的 IP
-                    })
-                LOG.info('Found %d pods for StatefulSet %s in namespace %s', 
-                        len(pod_list), resource_name, data['namespace'])
-            else:
-                LOG.warning('No pods found for StatefulSet %s in namespace %s', 
-                           resource_name, data['namespace'])
-                return {
-                    'result': 'success',
-                    'message': f'No pods found for StatefulSet {resource_name}',
-                    'synced_count': 0
-                }
-        except Exception as e:
-            LOG.error('Failed to query pods for StatefulSet %s: %s', resource_name, str(e))
-            raise exceptions.PluginError(message=f'Failed to query pods: {str(e)}')
-        
-        # 同步到 CMDB
-        if correlation_id and pod_list:
-            try:
-                self._sync_pods_to_cmdb(k8s_client, data['namespace'], pod_list, correlation_id)
-                synced_count = len([p for p in pod_list if p.get('id')])
-                LOG.info('Successfully synced %d pods to CMDB for instanceId: %s', 
-                        synced_count, correlation_id)
-                return {
-                    'result': 'success',
-                    'message': f'Synced {synced_count} pods to CMDB',
-                    'synced_count': synced_count,
-                    'correlation_id': correlation_id
-                }
-            except Exception as e:
-                LOG.error('Failed to sync pods to CMDB: %s', str(e))
-                raise exceptions.PluginError(message=f'Failed to sync pods to CMDB: {str(e)}')
-        else:
-            return {
-                'result': 'success',
-                'message': 'No correlation_id or pods to sync',
-                'synced_count': 0
-            }
-    
     def remove(self, data):
         cluster_info = db_resource.Cluster().list({'name': data['cluster']})
         if not cluster_info:
@@ -3140,16 +3233,8 @@ class StatefulSet:
         else:
             LOG.debug('Headless Service %s not found in namespace: %s', service_name, namespace)
         
-        # 删除关联的负载均衡 Service（带 -lb 后缀，如果存在）
-        # 【修复】使用与 Headless Service 相同的 base_service_name
-        lb_service_name = api_utils.escape_service_name(base_service_name + '-lb')
-        exists_lb_service = k8s_client.get_service(lb_service_name, namespace)
-        if exists_lb_service is not None:
-            LOG.info('Deleting Load Balancer Service: %s in namespace: %s', lb_service_name, namespace)
-            k8s_client.delete_service(lb_service_name, namespace)
-            result['deleted_resources'].append(f"Service/{lb_service_name}")
-        else:
-            LOG.debug('Load Balancer Service %s not found in namespace: %s', lb_service_name, namespace)
+        for svc_name in self._delete_port_services(k8s_client, data, resource_name):
+            result['deleted_resources'].append('Service/%s' % svc_name)
         
         # Pod 会被 Kubernetes 自动删除（通过 OwnerReference）
         LOG.info('Pods managed by StatefulSet %s will be automatically deleted by Kubernetes', resource_name)

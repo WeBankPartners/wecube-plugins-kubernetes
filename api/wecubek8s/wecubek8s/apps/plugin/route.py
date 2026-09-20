@@ -11,6 +11,7 @@ def add_routes(api):
 
     api.add_route('/kubernetes/v1/deployments/apply', controller.Deployment(action='apply'))
     api.add_route('/kubernetes/v1/deployments/destroy', controller.Deployment(action='destroy'))
+    api.add_route('/kubernetes/v1/deployments/sync_pods_to_cmdb', controller.Deployment(action='sync_pods_to_cmdb'))
     
     api.add_route('/kubernetes/v1/statefulsets/apply', controller.StatefulSet(action='apply'))
     api.add_route('/kubernetes/v1/statefulsets/destroy', controller.StatefulSet(action='destroy'))
