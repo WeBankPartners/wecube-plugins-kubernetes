@@ -20,7 +20,28 @@ LOG = logging.getLogger(__name__)
 
 # ==================== 健康检查探针辅助函数 ====================
 
-def _generate_liveness_probe(container, process_name=None, process_keyword=None, probe_type='auto'):
+def _resolve_pod_ready_timeout(data):
+    raw_timeout = data.get('pod_ready_timeout')
+    if raw_timeout is None or str(raw_timeout).strip() == '':
+        raw_timeout = getattr(CONF, 'pod_ready_timeout', '') or 480
+    try:
+        timeout = int(raw_timeout)
+    except (TypeError, ValueError):
+        return 480
+    return timeout if timeout > 0 else 480
+
+
+def _adjust_liveness_probe_timeout(probe, pod_ready_timeout):
+    adjusted = probe.copy()
+    initial_delay = adjusted.get('initialDelaySeconds', 0)
+    period = adjusted.get('periodSeconds', 1)
+    current_failures = adjusted.get('failureThreshold', 1)
+    required_failures = max(1, (pod_ready_timeout - initial_delay + period - 1) // period)
+    adjusted['failureThreshold'] = max(current_failures, required_failures)
+    return adjusted
+
+
+def _generate_liveness_probe(container, process_name=None, process_keyword=None, probe_type='auto', pod_ready_timeout=None):
     """
     智能生成 Liveness Probe 配置
     
@@ -57,14 +78,18 @@ def _generate_liveness_probe(container, process_name=None, process_keyword=None,
     
     # 根据探针类型生成配置（仅支持 TCP 和进程检测）
     if probe_type == 'tcp':
-        return _generate_tcp_probe(ports)
+        probe = _generate_tcp_probe(ports)
     elif probe_type == 'pidof':
-        return _generate_pidof_probe(process_name, process_keyword)
+        probe = _generate_pidof_probe(process_name, process_keyword)
     elif probe_type == 'exec':
-        return _generate_ps_probe(process_name, process_keyword)
+        probe = _generate_ps_probe(process_name, process_keyword)
     else:
         LOG.warning('Unknown probe type: %s, fallback to pidof', probe_type)
-        return _generate_pidof_probe(process_name, process_keyword)
+        probe = _generate_pidof_probe(process_name, process_keyword)
+
+    if probe is not None and pod_ready_timeout is not None:
+        probe = _adjust_liveness_probe_timeout(probe, pod_ready_timeout)
+    return probe
 
 
 def _auto_detect_probe_type(container_name, ports, process_name, image=None):
@@ -598,7 +623,8 @@ class Deployment:
                 container=container,
                 process_name=process_name,
                 process_keyword=process_keyword,
-                probe_type=probe_type
+                probe_type=probe_type,
+                pod_ready_timeout=_resolve_pod_ready_timeout(data)
             )
             if liveness_probe:
                 container['livenessProbe'] = liveness_probe
@@ -1147,7 +1173,8 @@ class StatefulSet:
                 container=container,
                 process_name=process_name,
                 process_keyword=process_keyword,
-                probe_type=probe_type
+                probe_type=probe_type,
+                pod_ready_timeout=_resolve_pod_ready_timeout(data)
             )
             if liveness_probe:
                 container['livenessProbe'] = liveness_probe
@@ -1585,21 +1612,7 @@ class StatefulSet:
     }
 
     def _get_pod_ready_timeout(self, data):
-        raw_timeout = data.get('pod_ready_timeout')
-        if raw_timeout is None or str(raw_timeout).strip() == '':
-            raw_timeout = getattr(CONF, 'pod_ready_timeout', '') or 480
-
-        try:
-            timeout = int(raw_timeout)
-        except (TypeError, ValueError):
-            LOG.warning('Invalid pod_ready_timeout value %s, using default 480 seconds', raw_timeout)
-            return 480
-
-        if timeout <= 0:
-            LOG.warning('pod_ready_timeout must be positive, got %s, using default 480 seconds', raw_timeout)
-            return 480
-
-        return timeout
+        return _resolve_pod_ready_timeout(data)
 
     def _is_recoverable_failed_pod(self, pod):
         """判断 Failed Pod 是否属于可等待恢复的调度/节点类失败。"""

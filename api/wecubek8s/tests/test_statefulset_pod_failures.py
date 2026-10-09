@@ -150,3 +150,29 @@ def test_pod_ready_timeout_request_overrides_system_parameter():
     })
 
     assert timeout == 120
+
+
+def test_liveness_probe_failure_threshold_covers_pod_ready_timeout():
+    probe = {
+        'initialDelaySeconds': 60,
+        'periodSeconds': 10,
+        'failureThreshold': 6,
+    }
+
+    adjusted = plugin_api._adjust_liveness_probe_timeout(probe, 600)
+
+    assert adjusted['failureThreshold'] == 54
+    assert adjusted['initialDelaySeconds'] == 60
+    assert adjusted['periodSeconds'] == 10
+
+
+def test_liveness_probe_timeout_does_not_shorten_existing_window():
+    probe = {
+        'initialDelaySeconds': 60,
+        'periodSeconds': 10,
+        'failureThreshold': 60,
+    }
+
+    adjusted = plugin_api._adjust_liveness_probe_timeout(probe, 480)
+
+    assert adjusted['failureThreshold'] == 60
