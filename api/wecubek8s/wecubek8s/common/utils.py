@@ -17,6 +17,7 @@ import tempfile
 import time
 import hashlib
 from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
 
 import requests
 from talos.core import config
@@ -311,23 +312,32 @@ def platform_encrypt(text, guid, seed):
 
 
 def platform_decrypt(text, guid, seed):
-    result = text
     encrypted_prefix = '{cipher_a}'
-    if text.startswith(encrypted_prefix):
-        try:
-            encrypted_text = text[len(encrypted_prefix):]
-            encrypted_text = bytes.fromhex(encrypted_text)
-            key = md5(guid + seed)[:16].encode('utf-8')
-            cipher = AES.new(key, AES.MODE_CBC, key)
-            origin_text = cipher.decrypt(encrypted_text)
-            origin_text = origin_text[0:-origin_text[-1]]
-            result = origin_text.decode('utf-8')
-        except (ValueError, UnicodeDecodeError) as e:
-            import logging
-            LOG = logging.getLogger(__name__)
-            LOG.error('Failed to decrypt text for guid=%s: %s. Text prefix: %s', 
-                     guid, str(e), text[:50] if len(text) > 50 else text)
-            # 如果解密失败，返回原文本（可能是未加密的明文）
-            # 或者抛出异常，根据业务需求决定
-            raise ValueError(f'Failed to decrypt token: {str(e)}. Please check if the token is correctly encrypted or the seed is correct.')
-    return result
+    if not text.startswith(encrypted_prefix):
+        return text
+    try:
+        encrypted_text = bytes.fromhex(text[len(encrypted_prefix):])
+        key = md5(guid + seed)[:16].encode('utf-8')
+        cipher = AES.new(key, AES.MODE_CBC, key)
+        return unpad(cipher.decrypt(encrypted_text), AES.block_size).decode('utf-8')
+    except ValueError:
+        raise ValueError('Invalid platform-encrypted credential') from None
+
+
+def get_image_pull_password(cluster_info):
+    password = cluster_info.get('image_pull_password') or ''
+    if not password.startswith('{cipher_a}'):
+        return password
+
+    correlation_id = cluster_info.get('correlation_id')
+    seed = getattr(CONF, 'platform_encrypt_seed', None)
+    if not correlation_id or not seed:
+        raise exceptions.ValidationError(
+            attribute='image_pull_password',
+            msg=_('Decrypting the registry password requires correlation_id and the platform encryption seed'))
+    try:
+        return platform_decrypt(password, correlation_id, seed)
+    except ValueError:
+        raise exceptions.ValidationError(
+            attribute='image_pull_password',
+            msg=_('Cannot decrypt the registry password; check correlation_id and the platform encryption seed')) from None

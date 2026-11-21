@@ -5,6 +5,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 
 def _install_import_stubs():
     talos = types.ModuleType('talos')
@@ -13,10 +15,15 @@ def _install_import_stubs():
     talos_config.CONF = types.SimpleNamespace()
     talos_i18n = types.ModuleType('talos.core.i18n')
     talos_i18n._ = lambda value: value
+    talos_core.exceptions = types.ModuleType('talos.core.exceptions')
+    talos_core.utils = types.SimpleNamespace(ensure_bytes=lambda value: value.encode('utf-8'))
+    talos_utils = types.ModuleType('talos.utils')
+    talos_utils.scoped_globals = types.ModuleType('talos.utils.scoped_globals')
     sys.modules.setdefault('talos', talos)
     sys.modules.setdefault('talos.core', talos_core)
     sys.modules.setdefault('talos.core.config', talos_config)
     sys.modules.setdefault('talos.core.i18n', talos_i18n)
+    sys.modules.setdefault('talos.utils', talos_utils)
 
     wecubek8s = types.ModuleType('wecubek8s')
     common = types.ModuleType('wecubek8s.common')
@@ -35,11 +42,16 @@ def _install_import_stubs():
     common.exceptions.PluginError = PluginError
     common.const = types.SimpleNamespace(
         Tag=types.SimpleNamespace(
+            DEPLOYMENT_ID_TAG='wecube-deployment-id',
             POD_AUTO_TAG='wecube-pod-auto-tag',
             POD_AFFINITY_TAG='wecube-pod-affinity-tag',
             SERVICE_ID_TAG='wecube-service-correlation-id',
             SERVICE_ROLE_TAG='wecube-service-role',
             WORKLOAD_NAME_TAG='wecube-workload-name',
+        ),
+        Registry=types.SimpleNamespace(
+            DEFAULT_PRIVATE_REGISTRY='',
+            INIT_CONTAINER_IMAGE='package-init-container:1.0.0',
         ),
         CmdbCI=types.SimpleNamespace(
             SERVICE='k8s_service',
@@ -70,6 +82,12 @@ def _install_import_stubs():
     sys.modules.setdefault('wecubek8s.apps', apps)
     sys.modules.setdefault('wecubek8s.apps.plugin', plugin)
 
+    common_utils_path = Path(__file__).resolve().parents[1] / 'wecubek8s/common/utils.py'
+    spec = importlib.util.spec_from_file_location('wecubek8s.common.utils', common_utils_path)
+    common.utils = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = common.utils
+    spec.loader.exec_module(common.utils)
+
     utils_path = Path(__file__).resolve().parents[1] / 'wecubek8s/apps/plugin/utils.py'
     spec = importlib.util.spec_from_file_location('wecubek8s.apps.plugin.utils', utils_path)
     plugin_utils = importlib.util.module_from_spec(spec)
@@ -91,6 +109,71 @@ def _load_plugin_api():
 
 
 plugin_api = _load_plugin_api()
+
+
+@pytest.fixture
+def registry_deployment(monkeypatch):
+    monkeypatch.setattr(plugin_api.CONF, 'platform_encrypt_seed', 'test-seed', raising=False)
+    monkeypatch.setattr(plugin_api.k8s_utils, 'get_token', lambda: None)
+    deployment = {
+        'correlation_id': 'deployment-ci',
+        'name': 'sample-app',
+        'namespace': 'test',
+        'affinity': '',
+        'replicas': 1,
+        'image_name': 'sample-app:1.0',
+        'packageUrl': 'https://packages.example.test/config.tar.gz',
+    }
+    cluster = {
+        'id': 'plugin-cluster-id',
+        'correlation_id': 'cmdb-cluster-ci',
+        'private_registry': 'registry.example.test:8443',
+        'image_pull_username': 'test-user',
+    }
+    secret_writer = types.SimpleNamespace(calls=[])
+    secret_writer.ensure_registry_secret = lambda *args: secret_writer.calls.append(args)
+    return deployment, cluster, secret_writer
+
+
+@pytest.mark.parametrize('encrypted', [True, False])
+def test_deployment_uses_registry_password_for_app_and_init_images(registry_deployment, encrypted):
+    deployment, cluster, secret_writer = registry_deployment
+    password = 'test-password-密'
+    stored_password = (plugin_api.k8s_utils.platform_encrypt(
+        password, cluster['correlation_id'], plugin_api.CONF.platform_encrypt_seed
+    ) if encrypted else password)
+    cluster['image_pull_password'] = stored_password
+
+    template = plugin_api.Deployment().to_resource(secret_writer, deployment, cluster)
+
+    pod_spec = template['spec']['template']['spec']
+    assert pod_spec['initContainers'][0]['image'] == 'registry.example.test:8443/package-init-container:1.0.0'
+    assert len(pod_spec['imagePullSecrets']) == 1
+    secret_name = pod_spec['imagePullSecrets'][0]['name']
+    assert secret_writer.calls == [(secret_name, 'test', 'registry.example.test:8443', 'test-user', password)] * 2
+    assert cluster['image_pull_password'] == stored_password
+
+
+@pytest.mark.parametrize('case', ['malformed', 'empty-ciphertext', 'incorrect-ci', 'missing-ci'])
+def test_deployment_rejects_unusable_registry_ciphertext(registry_deployment, case):
+    deployment, cluster, secret_writer = registry_deployment
+    encrypted = plugin_api.k8s_utils.platform_encrypt(
+        'test-password', cluster['correlation_id'], plugin_api.CONF.platform_encrypt_seed)
+    if case == 'malformed':
+        encrypted = '{cipher_a}not-hex'
+    elif case == 'empty-ciphertext':
+        encrypted = '{cipher_a}'
+    elif case == 'incorrect-ci':
+        cluster['correlation_id'] = 'other-cluster-ci'
+    else:
+        del cluster['correlation_id']
+    cluster['image_pull_password'] = encrypted
+
+    with pytest.raises(plugin_api.exceptions.ValidationError, match='registry password') as error:
+        plugin_api.Deployment().to_resource(secret_writer, deployment, cluster)
+
+    assert not secret_writer.calls
+    assert encrypted not in str(error.value)
 
 
 class FakeK8sClient:

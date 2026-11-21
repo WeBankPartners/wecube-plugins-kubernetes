@@ -24,11 +24,7 @@ class Cluster(controller.Plugin):
     allow_methods = ('POST', )
     name = 'k8s.plugin.cluster'
     
-    # 需要检查预解密的字段列表
-    # 注意：这里只列出可能以加密格式 {cipher_a}xxx 传入的字段
-    # 如果客户端传入的是明文，代码会自动跳过（通过 startswith 判断）
-    # 如果你确定 image_pull_password 总是明文，可以移除它
-    ENCRYPTED_FIELDS = ['token']  # image_pull_password 通常是明文，不需要预解密
+    ENCRYPTED_FIELDS = ['token']
 
     def set_item_default(self, item):
         defaults = {}
@@ -73,6 +69,7 @@ class Cluster(controller.Plugin):
     def validate_item_apply(self, item_index, item):
         clean_item = crud.ColumnValidator.get_clean_data(rules.cluster_rules, item, 'check')
         self.set_item_default(clean_item)
+        k8s_utils.get_image_pull_password(clean_item)
         # 在验证后、保存前解密客户端传入的加密字段
         clean_item = self.decrypt_incoming_fields(clean_item)
         return clean_item

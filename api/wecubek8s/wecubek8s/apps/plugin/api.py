@@ -11,6 +11,7 @@ from talos.core.i18n import _
 from wecubek8s.common import k8s
 from wecubek8s.common import exceptions
 from wecubek8s.common import const
+from wecubek8s.common import utils as k8s_utils
 from wecubek8s.db import resource as db_resource
 from wecubek8s.apps.plugin import utils as api_utils
 
@@ -2170,7 +2171,7 @@ class Deployment(WorkloadPodOps):
         
         # 从数据库的 cluster_info 中读取镜像拉取认证信息
         image_pull_username = cluster_info.get('image_pull_username', '')
-        image_pull_password = cluster_info.get('image_pull_password', '')
+        image_pull_password = k8s_utils.get_image_pull_password(cluster_info)
         
         registry_secrets = []
         if image_pull_username and image_pull_password:
@@ -2684,7 +2685,7 @@ class StatefulSet(WorkloadPodOps):
         
         # 从数据库的 cluster_info 中读取镜像拉取认证信息
         image_pull_username = cluster_info.get('image_pull_username', '')
-        image_pull_password = cluster_info.get('image_pull_password', '')
+        image_pull_password = k8s_utils.get_image_pull_password(cluster_info)
         
         registry_secrets = []
         if image_pull_username and image_pull_password:
@@ -3365,7 +3366,7 @@ class DaemonSet:
         
         # 处理镜像拉取凭据
         image_pull_username = cluster_info.get('image_pull_username', '')
-        image_pull_password = cluster_info.get('image_pull_password', '')
+        image_pull_password = k8s_utils.get_image_pull_password(cluster_info)
         LOG.info('[DaemonSet-API] Image pull credentials: username=%s, password=%s', 
                  image_pull_username or '(none)', '***' if image_pull_password else '(none)')
         
@@ -4596,7 +4597,7 @@ class PackageDeploy:
 
         # 从集群配置中读取镜像拉取认证信息，创建 imagePullSecrets
         image_pull_username = cluster_info.get('image_pull_username', '') or ''
-        image_pull_password = cluster_info.get('image_pull_password', '') or ''
+        image_pull_password = k8s_utils.get_image_pull_password(cluster_info)
         LOG.info('[PackageDeploy][to_resource] image_pull_username=%s, has_password=%s',
                  image_pull_username, bool(image_pull_password))
 

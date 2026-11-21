@@ -26,6 +26,8 @@ Watcher：提供持续的事件监听，触发wecube编排
 
 应用部署：支持无状态的应用部署管理，支持私有化镜像，以及LB配置
 
+集群的 `image_pull_password` 支持明文和 WeCMDB 的 `{cipher_a}` 格式。插件会使用集群 CI 的 `correlation_id` 和平台加密种子校验密文，保留原密文，并在生成镜像拉取 Secret 时解密。
+
 容器化部署时，WeCube 先完成差异化变量替换并生成应用配置包，再调用本插件的 StatefulSet apply：
 
 ```mermaid
