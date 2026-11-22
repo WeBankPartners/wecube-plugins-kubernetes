@@ -597,6 +597,7 @@ def test_deployment_rollout_progress_requires_available_and_observed_generation(
     resource = types.SimpleNamespace(
         metadata=types.SimpleNamespace(generation=3),
         status=types.SimpleNamespace(
+            replicas=2,
             ready_replicas=2,
             updated_replicas=2,
             available_replicas=2,
@@ -610,6 +611,138 @@ def test_deployment_rollout_progress_requires_available_and_observed_generation(
     assert updated == 2
     assert complete is True
     assert 'available=2/2' in extra
+    assert 'current=2/2' in extra
+
+
+def test_deployment_rollout_stays_incomplete_while_old_pod_is_still_present():
+    """旧 Pod 仍 Ready、新 Pod 已创建但总数还是 2 时，不能当成滚动完成。"""
+    resource = types.SimpleNamespace(
+        metadata=types.SimpleNamespace(generation=4),
+        status=types.SimpleNamespace(
+            replicas=2,
+            ready_replicas=1,
+            updated_replicas=1,
+            available_replicas=1,
+            observed_generation=4,
+        ),
+    )
+
+    ready, updated, complete, extra = plugin_api.Deployment()._rollout_progress(resource, 1)
+
+    assert ready == 1
+    assert updated == 1
+    assert complete is False
+    assert 'current=2/1' in extra
+
+
+def _deployment_template(image, package_url=None):
+    spec = {'containers': [{'name': 'app', 'image': image}]}
+    if package_url:
+        spec['initContainers'] = [{
+            'name': 'package-downloader',
+            'env': [{'name': 'PACKAGE_URL', 'value': package_url}],
+        }]
+    return {'spec': {'template': {'spec': spec}}}
+
+
+def test_collect_ignores_previous_pod_when_new_pod_is_ready():
+    old_pod = _pod(
+        'app-oldhash-aaa',
+        'Running',
+        ready=True,
+        uid='uid-old',
+        host_ip='10.0.0.1',
+        image='registry.example/app:old',
+        init_package_url='http://packages/old.tgz',
+    )
+    new_pod = _pod(
+        'app-newhash-bbb',
+        'Running',
+        ready=True,
+        uid='uid-new',
+        host_ip='10.0.0.2',
+        image='registry.example/app:new',
+        init_package_url='http://packages/new.tgz',
+    )
+
+    pod_list, pods_str = plugin_api.Deployment()._collect_sync_and_mark_pods(
+        FakeK8sClient([old_pod, new_pod]),
+        {'id': 'cluster-1'},
+        {'namespace': 'default', 'replicas': 1, 'packageUrl': 'http://packages/new.tgz'},
+        'app',
+        'workload-1',
+        resource_template=_deployment_template(
+            'registry.example/app:new', 'http://packages/new.tgz'),
+    )
+
+    assert [pod['name'] for pod in pod_list] == ['app-newhash-bbb']
+    assert pods_str == 'app-newhash-bbb'
+
+
+def test_collect_ignores_terminating_pod_with_the_new_template():
+    terminating = _pod(
+        'app-newhash-old',
+        'Running',
+        ready=False,
+        uid='uid-term',
+        host_ip='10.0.0.1',
+        image='registry.example/app:new',
+        deletion_timestamp='2026-11-22T00:00:00Z',
+    )
+    current = _pod(
+        'app-newhash-new',
+        'Running',
+        ready=True,
+        uid='uid-current',
+        host_ip='10.0.0.2',
+        image='registry.example/app:new',
+    )
+
+    pod_list, unused_pods_str = plugin_api.Deployment()._collect_sync_and_mark_pods(
+        FakeK8sClient([terminating, current]),
+        {'id': 'cluster-1'},
+        {'namespace': 'default', 'replicas': 1},
+        'app',
+        'workload-1',
+        resource_template=_deployment_template('registry.example/app:new'),
+    )
+
+    assert [pod['name'] for pod in pod_list] == ['app-newhash-new']
+
+
+def test_collect_reports_only_the_new_pod_when_it_is_not_ready():
+    old_pod = _pod(
+        'app-oldhash-aaa',
+        'Running',
+        ready=True,
+        uid='uid-old',
+        host_ip='10.0.0.1',
+        image='registry.example/app:old',
+    )
+    new_pod = _pod(
+        'app-newhash-bbb',
+        'Pending',
+        ready=False,
+        uid='uid-new',
+        host_ip='10.0.0.2',
+        image='registry.example/app:new',
+    )
+
+    try:
+        plugin_api.Deployment()._collect_sync_and_mark_pods(
+            FakeK8sClient([old_pod, new_pod]),
+            {'id': 'cluster-1'},
+            {'namespace': 'default', 'replicas': 1},
+            'app',
+            'workload-1',
+            resource_template=_deployment_template('registry.example/app:new'),
+        )
+        assert False, 'expected PluginError'
+    except plugin_api.exceptions.PluginError as exc:
+        message = str(exc)
+        assert '1/1 pods failed to become ready' in message
+        assert 'app-newhash-bbb' in message
+        assert 'app-oldhash-aaa' not in message
 
 
 def test_deployment_stuck_hash_named_pod_is_deleted_via_list():

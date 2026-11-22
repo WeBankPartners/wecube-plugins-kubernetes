@@ -777,6 +777,18 @@ class WorkloadPodOps:
         """
         if cls._is_pod_ready(pod):
             return None
+        return cls._previous_template_reason(
+            pod, desired_images=desired_images,
+            desired_package_urls=desired_package_urls)
+
+    @classmethod
+    def _previous_template_reason(cls, pod, desired_images=None, desired_package_urls=None):
+        """Why this Pod is still on the previous apply, or None if it matches.
+
+        A Ready Pod on the old image is left running by Deployment RollingUpdate
+        until the new Pod is Available. It must not be treated as a failure of
+        the new apply, and it also must not satisfy the new apply's readiness.
+        """
         if desired_images:
             pod_images = cls._pod_main_images(pod)
             desired = set(desired_images)
@@ -791,6 +803,36 @@ class WorkloadPodOps:
             if pod_urls and pod_urls != desired_urls:
                 return 'PACKAGE_URL mismatch'
         return None
+
+    def _is_previous_or_terminating_pod(self, pod, desired_images=None,
+                                        desired_package_urls=None):
+        if not pod or self._is_pod_terminating(pod):
+            return True
+        return self._previous_template_reason(
+            pod, desired_images=desired_images,
+            desired_package_urls=desired_package_urls) is not None
+
+    def _retain_current_pod_infos(self, pod_infos, pods, desired_images,
+                                  desired_package_urls):
+        """Drop terminating and previous-template Pods from a readiness/CMDB list."""
+        items = getattr(pods, 'items', None) if pods else None
+        if not items:
+            return pod_infos
+        by_name = {}
+        for pod in items:
+            name = getattr(getattr(pod, 'metadata', None), 'name', None)
+            if name:
+                by_name[name] = pod
+        kept = []
+        for info in pod_infos:
+            pod = by_name.get(info.get('name'))
+            if pod is not None and self._is_previous_or_terminating_pod(
+                    pod, desired_images, desired_package_urls):
+                LOG.info('Ignoring Pod %s during readiness check '
+                         '(terminating or previous template)', info.get('name'))
+                continue
+            kept.append(info)
+        return kept
 
     @staticmethod
     def _container_image(container):
@@ -1702,12 +1744,16 @@ class WorkloadPodOps:
                             attempt, max_attempts, kind, str(e))
         else:
             resource = self._get_workload(k8s_client, resource_name, namespace)
-            ready_replicas, unused_updated, unused_complete, unused_extra = self._rollout_progress(
+            ready_replicas, updated_replicas, rollout_complete, extra = self._rollout_progress(
                 resource, replicas)
-            if ready_replicas < replicas:
+            # ready>=replicas 不足以结束等待：滚动更新里旧 Pod 仍会计入 ready，
+            # 新 Pod 未 Available、旧副本还没退出时必须继续算超时失败。
+            if ready_replicas < replicas or not rollout_complete:
                 error_msg = self._get_pod_failure_details(k8s_client, resource_name, namespace)
-                LOG.error('Timeout waiting for Pods to be ready: %d/%d ready after %d seconds',
-                          ready_replicas, replicas, pod_ready_timeout)
+                LOG.error('Timeout waiting for Pods to be ready: ready=%d/%d updated=%d/%d '
+                          'after %d seconds%s',
+                          ready_replicas, replicas, updated_replicas, replicas,
+                          pod_ready_timeout, (', ' + extra) if extra else '')
                 LOG.error('Pod failure details: %s', error_msg)
                 pod_logs = self._get_pod_logs_summary(k8s_client, resource_name, namespace)
                 if pod_logs:
@@ -1717,11 +1763,14 @@ class WorkloadPodOps:
                     full_details = error_msg
                 raise exceptions.PluginError(
                     message=_('%(kind)s created but Pods failed to become ready within %(timeout)ds. '
-                              'Ready: %(ready)d/%(expected)d. Details: %(details)s') % {
+                              'Ready: %(ready)d/%(expected)d, updated: %(updated)d/%(expected)d%(extra)s. '
+                              'Details: %(details)s') % {
                         'kind': kind,
                         'timeout': pod_ready_timeout,
                         'ready': ready_replicas,
+                        'updated': updated_replicas,
                         'expected': replicas,
+                        'extra': (', ' + extra) if extra else '',
                         'details': full_details
                     }
                 )
@@ -1752,14 +1801,19 @@ class WorkloadPodOps:
         return [{'name': '%s-%d' % (resource_name, i), 'id': '', 'host_ip': '', 'ip_address': ''}
                 for i in range(int(replicas or 1))]
 
-    def _collect_sync_and_mark_pods(self, k8s_client, cluster_info, data, resource_name, resource_id):
+    def _collect_sync_and_mark_pods(self, k8s_client, cluster_info, data, resource_name, resource_id,
+                                    resource_template=None):
         """Collect running pods, wait for UID/host_ip, sync CMDB, mark watcher cache."""
         kind = self.workload_kind
         replicas = int(data.get('replicas', 1))
         namespace = data['namespace']
+        desired_images = self._template_main_images(resource_template)
+        desired_package_urls = self._template_init_package_urls(resource_template)
         try:
-            pod_list, unused_pods, label_selector = self._list_workload_pod_infos(
+            pod_list, live_pods, label_selector = self._list_workload_pod_infos(
                 k8s_client, resource_name, namespace, cluster_info)
+            pod_list = self._retain_current_pod_infos(
+                pod_list, live_pods, desired_images, desired_package_urls)
             if pod_list:
                 LOG.info('Found %d pods for %s %s in namespace %s (some may not have UID yet)',
                          len(pod_list), kind, resource_name, namespace)
@@ -1794,6 +1848,9 @@ class WorkloadPodOps:
                             k8s_client, resource_name, namespace, cluster_info)
                         if pods and pods.items:
                             for pod in pods.items:
+                                if self._is_previous_or_terminating_pod(
+                                        pod, desired_images, desired_package_urls):
+                                    continue
                                 phase = pod.status.phase if pod.status else 'Unknown'
                                 pod_name = pod.metadata.name
                                 if phase == 'Failed':
@@ -1831,7 +1888,9 @@ class WorkloadPodOps:
                             by_name = {p['name']: p for p in pod_list}
                             for item in listed:
                                 by_name[item['name']] = item
-                            pod_list = list(by_name.values())
+                            pod_list = self._retain_current_pod_infos(
+                                list(by_name.values()), pods,
+                                desired_images, desired_package_urls)
                             pods_incomplete = [p for p in pod_list if not p.get('id') or not p.get('host_ip')]
                             if not pods_incomplete:
                                 LOG.info('All pods created and scheduled after waiting %d seconds', waited_time)
@@ -1852,6 +1911,16 @@ class WorkloadPodOps:
                     for item in listed:
                         by_name[item['name']] = item
                     pod_list = list(by_name.values())
+                pod_list = self._retain_current_pod_infos(
+                    pod_list, pods, desired_images, desired_package_urls)
+                if not pod_list and int(replicas or 0) > 0:
+                    raise exceptions.PluginError(
+                        message=_('%(kind)s created but no Pod on the new template became ready '
+                                  'within %(timeout)ds.') % {
+                            'kind': kind,
+                            'timeout': max_wait_time,
+                        }
+                    )
                 if pods and pods.items:
                     pod_dict = {}
                     for pod in pods.items:
@@ -1977,6 +2046,11 @@ class Deployment(WorkloadPodOps):
         ready = (status.ready_replicas or 0) if status else 0
         updated = (status.updated_replicas or 0) if status else 0
         available = (getattr(status, 'available_replicas', None) or 0) if status else 0
+        # status.replicas 是当前未退出的 Pod 总数。副本为 1 的 RollingUpdate
+        # 会先 surge 出新 Pod（current=2），旧 Pod 仍 Ready 时 ready/available
+        # 已经 >= 1，不能据此认为滚动完成。kubectl rollout status 同样要求
+        # current == spec.replicas。
+        current = (getattr(status, 'replicas', None) or 0) if status else 0
         generation = 0
         if resource and getattr(resource, 'metadata', None):
             generation = getattr(resource.metadata, 'generation', 0) or 0
@@ -1985,10 +2059,11 @@ class Deployment(WorkloadPodOps):
             ready >= replicas
             and updated >= replicas
             and available >= replicas
+            and current == replicas
             and observed >= generation
         )
-        extra = 'available=%d/%d, observed_gen=%s/%s' % (
-            available, replicas, observed, generation)
+        extra = 'available=%d/%d, current=%d/%d, observed_gen=%s/%s' % (
+            available, replicas, current, replicas, observed, generation)
         return ready, updated, complete, extra
 
     def to_resource(self, k8s_client, data, cluster_info):
@@ -2341,7 +2416,8 @@ class Deployment(WorkloadPodOps):
         self._sync_services_to_cmdb(service_list, data, resource_id)
 
         pod_list, pods_str = self._collect_sync_and_mark_pods(
-            k8s_client, cluster_info, data, resource_name, resource_id)
+            k8s_client, cluster_info, data, resource_name, resource_id,
+            resource_template=resource_template)
         result = {
             'id': exists_resource.metadata.uid,
             'name': exists_resource.metadata.name,
@@ -3128,7 +3204,8 @@ class StatefulSet(WorkloadPodOps):
             LOG.warning('No ClusterIP available for StatefulSet %s/%s', data['namespace'], data['name'])
         
         pod_list, pods_str = self._collect_sync_and_mark_pods(
-            k8s_client, cluster_info, data, resource_name, resource_id)
+            k8s_client, cluster_info, data, resource_name, resource_id,
+            resource_template=resource_template)
 
         # 构建返回结果
         result = {
