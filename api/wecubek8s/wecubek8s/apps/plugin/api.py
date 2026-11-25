@@ -18,6 +18,22 @@ CONF = config.CONF
 LOG = logging.getLogger(__name__)
 
 
+def _pod_termination_grace_period_seconds():
+    max_seconds = 1_000_000
+    value = str(getattr(CONF, 'pod_termination_grace_period_seconds', '')).strip()
+    if not value:
+        return 120
+    if value.isascii() and value.isdecimal():
+        digits = value.lstrip('0') or '0'
+        if len(digits) <= len(str(max_seconds)):
+            seconds = int(digits)
+            if seconds <= max_seconds:
+                return seconds
+    LOG.warning('KUBERNETES_POD_TERMINATION_GRACE_PERIOD_SECONDS must be an integer from 0 to %d, '
+                'using the default of 120 seconds', max_seconds)
+    return 120
+
+
 # ==================== 健康检查探针辅助函数 ====================
 
 def _resolve_pod_ready_timeout(data):
@@ -737,6 +753,7 @@ class Deployment:
                         'affinity': pod_spec_affinity,
                         'containers': containers,
                         'volumes': pod_spec_src_vols,
+                        'terminationGracePeriodSeconds': _pod_termination_grace_period_seconds(),
                         # 设置 Pod 级别的 securityContext，使挂载的 volumes 使用 appuser 的 GID
                         # 这样 appuser (UID:10001, GID:10001) 可以写入挂载的目录（如 /logs）
                         'securityContext': {
@@ -1336,6 +1353,7 @@ class StatefulSet:
                         'affinity': pod_spec_affinity,
                         'containers': containers,
                         'volumes': pod_spec_src_vols,
+                        'terminationGracePeriodSeconds': _pod_termination_grace_period_seconds(),
                         # 设置 Pod 级别的 securityContext，使挂载的 volumes 使用 appuser 的 GID
                         # 这样 appuser (UID:10001, GID:10001) 可以写入挂载的目录（如 /logs）
                         'securityContext': {
@@ -3116,6 +3134,7 @@ class DaemonSet:
             'spec': {
                 'containers': containers,
                 'volumes': pod_spec_src_vols,
+                'terminationGracePeriodSeconds': _pod_termination_grace_period_seconds(),
                 'restartPolicy': 'Always'
             }
         }

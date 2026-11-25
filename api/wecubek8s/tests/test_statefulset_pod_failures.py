@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _install_import_stubs():
@@ -43,14 +44,16 @@ def _install_import_stubs():
 
 
 def _load_plugin_api():
-    _install_import_stubs()
     api_path = (
         Path(__file__).resolve().parents[1]
         / 'wecubek8s/apps/plugin/api.py'
     )
     spec = importlib.util.spec_from_file_location('plugin_api_under_test', api_path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    with patch.dict(sys.modules):
+        _install_import_stubs()
+        spec.loader.exec_module(module)
+    module.CONF = types.SimpleNamespace()
     return module
 
 
