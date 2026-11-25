@@ -1,8 +1,8 @@
-FROM ccr.ccs.tencentyun.com/webankpartners/python:3.8.20-slim-bullseye
+FROM python:3.9.25-slim-bookworm
 LABEL maintainer = "Webank CTB Team"
 # 使用腾讯云镜像源
-RUN sed -i 's/deb.debian.org/mirrors.tencentyun.com/g' /etc/apt/sources.list && \
-    sed -i 's/security.debian.org/mirrors.tencentyun.com/g' /etc/apt/sources.list
+RUN sed -i 's/deb.debian.org/mirrors.tencentyun.com/g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's/security.debian.org/mirrors.tencentyun.com/g' /etc/apt/sources.list.d/debian.sources
 COPY api/wecubek8s/requirements.txt /tmp/requirements.txt
 COPY api/wecubek8s/dist/* /tmp/
 # Install && Clean up
