@@ -1,4 +1,4 @@
-FROM python:3.9.25-slim-bookworm
+FROM public-mirror.nysupport.wiki:8443/wecube/python:3.9.25-slim-bookworm
 LABEL maintainer = "Webank CTB Team"
 # 使用腾讯云镜像源
 RUN sed -i 's/deb.debian.org/mirrors.tencentyun.com/g' /etc/apt/sources.list.d/debian.sources && \
