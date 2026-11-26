@@ -297,7 +297,7 @@ def platform_encrypt(text, guid, seed):
     result = text
     encrypted_prefix = '{cipher_a}'
     if not text.startswith(encrypted_prefix):
-        key = md5(guid + seed)[:16]
+        key = md5(guid + seed)[:16].encode('utf-8')
         cipher = AES.new(key, AES.MODE_CBC, key)
         text = utils.ensure_bytes(text)
         # pkcs7 padding
@@ -317,7 +317,7 @@ def platform_decrypt(text, guid, seed):
         try:
             encrypted_text = text[len(encrypted_prefix):]
             encrypted_text = bytes.fromhex(encrypted_text)
-            key = md5(guid + seed)[:16]
+            key = md5(guid + seed)[:16].encode('utf-8')
             cipher = AES.new(key, AES.MODE_CBC, key)
             origin_text = cipher.decrypt(encrypted_text)
             origin_text = origin_text[0:-origin_text[-1]]
