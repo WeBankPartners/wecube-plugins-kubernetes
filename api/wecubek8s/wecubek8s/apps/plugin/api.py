@@ -6,6 +6,7 @@ import logging
 import time
 import hashlib
 
+from urllib3.exceptions import HTTPError
 from talos.core import config
 from talos.core.i18n import _
 from wecubek8s.common import k8s
@@ -47,17 +48,7 @@ def _resolve_pod_ready_timeout(data):
     return timeout if timeout > 0 else 480
 
 
-def _adjust_liveness_probe_timeout(probe, pod_ready_timeout):
-    adjusted = probe.copy()
-    initial_delay = adjusted.get('initialDelaySeconds', 0)
-    period = adjusted.get('periodSeconds', 1)
-    current_failures = adjusted.get('failureThreshold', 1)
-    required_failures = max(1, (pod_ready_timeout - initial_delay + period - 1) // period)
-    adjusted['failureThreshold'] = max(current_failures, required_failures)
-    return adjusted
-
-
-def _generate_liveness_probe(container, process_name=None, process_keyword=None, probe_type='auto', pod_ready_timeout=None):
+def _generate_liveness_probe(container, process_name=None, process_keyword=None, probe_type='auto'):
     """
     智能生成 Liveness Probe 配置
     
@@ -103,9 +94,23 @@ def _generate_liveness_probe(container, process_name=None, process_keyword=None,
         LOG.warning('Unknown probe type: %s, fallback to pidof', probe_type)
         probe = _generate_pidof_probe(process_name, process_keyword)
 
-    if probe is not None and pod_ready_timeout is not None:
-        probe = _adjust_liveness_probe_timeout(probe, pod_ready_timeout)
     return probe
+
+
+def _add_container_probes(containers, data):
+    probe_type = data.get('probe_type', 'auto')
+    for container in containers:
+        liveness = _generate_liveness_probe(
+            container, data.get('process_name'), data.get('process_keyword'), probe_type,
+        )
+        if liveness is None:
+            LOG.warning('No health probe generated for container "%s" (requested: %s)',
+                        container.get('name'), probe_type)
+            continue
+
+        container['startupProbe'] = dict(liveness, failureThreshold=48)
+        container['livenessProbe'] = liveness
+        container['readinessProbe'] = dict(liveness, failureThreshold=3)
 
 
 def _auto_detect_probe_type(container_name, ports, process_name, image=None):
@@ -378,7 +383,6 @@ def _generate_tcp_probe(ports):
         'tcpSocket': {
             'port': port
         },
-        'initialDelaySeconds': 60,      # 增加到60秒，给足启动时间
         'periodSeconds': 10,             # 每10秒检查一次
         'timeoutSeconds': 5,             # 5秒超时
         'successThreshold': 1,           # 成功1次即认为健康
@@ -413,7 +417,6 @@ def _generate_pidof_probe(process_name, process_keyword):
                 command
             ]
         },
-        'initialDelaySeconds': 60,      # 增加到60秒，给足启动时间
         'periodSeconds': 10,             # 每10秒检查一次
         'timeoutSeconds': 5,             # 5秒超时
         'successThreshold': 1,           # 成功1次即认为健康
@@ -438,7 +441,6 @@ def _generate_ps_probe(process_name, process_keyword):
                 f"ps -eo 'pid,comm,pcpu,rsz,args' | awk '($2 == \"{process_name}\" || $0 ~ /{process_keyword}/) && NR > 1 {{exit 0}} END {{if (NR <= 1) exit 1; exit 1}}'"
             ]
         },
-        'initialDelaySeconds': 60,      # 增加到60秒，给足启动时间
         'periodSeconds': 10,             # 每10秒检查一次
         'timeoutSeconds': 5,             # 5秒超时
         'successThreshold': 1,           # 成功1次即认为健康
@@ -628,46 +630,8 @@ class Deployment:
         
         containers = api_utils.convert_container(images_data, pod_spec_envs, pod_spec_mnt_vols, pod_spec_limit, deploy_script)
         
-        # 智能添加存活探针和就绪探针（基于容器端口和进程信息自动选择最佳探针类型）
-        process_name = data.get('process_name')
-        process_keyword = data.get('process_keyword')
-        probe_type = data.get('probe_type', 'auto')  # 支持手动指定探针类型
-        
-        for container in containers:
-            # 使用智能探针生成器
-            liveness_probe = _generate_liveness_probe(
-                container=container,
-                process_name=process_name,
-                process_keyword=process_keyword,
-                probe_type=probe_type,
-                pod_ready_timeout=_resolve_pod_ready_timeout(data)
-            )
-            if liveness_probe:
-                container['livenessProbe'] = liveness_probe
-                
-                # 同时添加 readiness probe（配置更激进，更快发现问题）
-                readiness_probe = liveness_probe.copy()
-                readiness_probe['initialDelaySeconds'] = 10   # 10秒就开始检查（vs liveness的60秒）
-                readiness_probe['failureThreshold'] = 3       # 失败3次就标记为NotReady（vs liveness的6次）
-                readiness_probe['periodSeconds'] = 10         # 保持10秒检查一次
-                container['readinessProbe'] = readiness_probe
-                
-                # 检测实际使用的探针类型
-                actual_probe_type = 'unknown'
-                if 'httpGet' in liveness_probe:
-                    actual_probe_type = 'http'
-                elif 'tcpSocket' in liveness_probe:
-                    actual_probe_type = 'tcp'
-                elif 'exec' in liveness_probe:
-                    actual_probe_type = 'exec/pidof'
-                LOG.info('Added liveness and readiness probes for container "%s" (requested: %s, actual: %s)', 
-                        container.get('name'), probe_type, actual_probe_type)
-                LOG.info('  - Liveness probe config: %s', liveness_probe)
-                LOG.info('  - Readiness probe config: %s', readiness_probe)
-            else:
-                LOG.warning('No liveness/readiness probe generated for container "%s" (requested type: %s)', 
-                           container.get('name'), probe_type)
-        
+        _add_container_probes(containers, data)
+
         # 从数据库的 cluster_info 中读取镜像拉取认证信息
         image_pull_username = cluster_info.get('image_pull_username', '')
         image_pull_password = cluster_info.get('image_pull_password', '')
@@ -1179,46 +1143,8 @@ class StatefulSet:
                     LOG.info('[StatefulSet] Added shared PVC mount to container "%s": %s -> %s',
                              container.get('name'), mount['name'], mount['mountPath'])
         
-        # 智能添加存活探针和就绪探针（基于容器端口和进程信息自动选择最佳探针类型）
-        process_name = data.get('process_name')
-        process_keyword = data.get('process_keyword')
-        probe_type = data.get('probe_type', 'auto')  # 支持手动指定探针类型
-        
-        for container in containers:
-            # 使用智能探针生成器
-            liveness_probe = _generate_liveness_probe(
-                container=container,
-                process_name=process_name,
-                process_keyword=process_keyword,
-                probe_type=probe_type,
-                pod_ready_timeout=_resolve_pod_ready_timeout(data)
-            )
-            if liveness_probe:
-                container['livenessProbe'] = liveness_probe
-                
-                # 同时添加 readiness probe（配置更激进，更快发现问题）
-                readiness_probe = liveness_probe.copy()
-                readiness_probe['initialDelaySeconds'] = 10   # 10秒就开始检查（vs liveness的60秒）
-                readiness_probe['failureThreshold'] = 3       # 失败3次就标记为NotReady（vs liveness的6次）
-                readiness_probe['periodSeconds'] = 10         # 保持10秒检查一次
-                container['readinessProbe'] = readiness_probe
-                
-                # 检测实际使用的探针类型
-                actual_probe_type = 'unknown'
-                if 'httpGet' in liveness_probe:
-                    actual_probe_type = 'http'
-                elif 'tcpSocket' in liveness_probe:
-                    actual_probe_type = 'tcp'
-                elif 'exec' in liveness_probe:
-                    actual_probe_type = 'exec/pidof'
-                LOG.info('Added liveness and readiness probes for container "%s" (requested: %s, actual: %s)', 
-                        container.get('name'), probe_type, actual_probe_type)
-                LOG.info('  - Liveness probe config: %s', liveness_probe)
-                LOG.info('  - Readiness probe config: %s', readiness_probe)
-            else:
-                LOG.warning('No liveness/readiness probe generated for container "%s" (requested type: %s)', 
-                           container.get('name'), probe_type)
-        
+        _add_container_probes(containers, data)
+
         # 从数据库的 cluster_info 中读取镜像拉取认证信息
         image_pull_username = cluster_info.get('image_pull_username', '')
         image_pull_password = cluster_info.get('image_pull_password', '')
@@ -1562,66 +1488,6 @@ class StatefulSet:
         
         return None
     
-    def _validate_pod_health(self, k8s_client, statefulset_name, namespace, expected_replicas):
-        """验证 Pod 的健康状态
-        
-        Args:
-            k8s_client: Kubernetes 客户端
-            statefulset_name: StatefulSet 名称
-            namespace: 命名空间
-            expected_replicas: 预期的副本数
-        
-        Returns:
-            bool: 如果所有 Pod 都健康则返回 True，否则返回 False
-        """
-        try:
-            # 获取 StatefulSet 的所有 Pod
-            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
-            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
-            
-            if not pod_list or not pod_list.items:
-                LOG.warning('No pods found for StatefulSet %s', statefulset_name)
-                return False
-            
-            ready_count = 0
-            for pod in pod_list.items:
-                pod_name = pod.metadata.name
-                phase = pod.status.phase if pod.status else 'Unknown'
-                
-                # 检查 Pod 的 Ready condition
-                is_ready = False
-                if pod.status and pod.status.conditions:
-                    for condition in pod.status.conditions:
-                        if condition.type == 'Ready' and condition.status == 'True':
-                            is_ready = True
-                            break
-                
-                if phase == 'Running' and is_ready:
-                    ready_count += 1
-                    LOG.info('Pod %s is Running and Ready', pod_name)
-                else:
-                    LOG.warning('Pod %s - Phase: %s, Ready: %s', pod_name, phase, is_ready)
-                    
-                    # 记录容器状态
-                    if pod.status and pod.status.container_statuses:
-                        for container_status in pod.status.container_statuses:
-                            if container_status.state.waiting:
-                                LOG.warning('  Container %s waiting: %s - %s',
-                                          container_status.name,
-                                          container_status.state.waiting.reason,
-                                          container_status.state.waiting.message or '')
-                            elif container_status.state.terminated:
-                                LOG.error('  Container %s terminated: %s (exit code %d)',
-                                        container_status.name,
-                                        container_status.state.terminated.reason or 'Unknown',
-                                        container_status.state.terminated.exit_code or 0)
-            
-            return ready_count >= expected_replicas
-        
-        except Exception as e:
-            LOG.error('Failed to validate pod health: %s', str(e))
-            return False
-
     _RECOVERABLE_FAILED_POD_REASONS = {
         'Evicted',
         'NodeLost',
@@ -1688,7 +1554,7 @@ class StatefulSet:
 
         return '; '.join(details)
     
-    def _check_pod_failures(self, k8s_client, statefulset_name, namespace):
+    def _check_pod_failures(self, k8s_client, statefulset_name, namespace, pods=None):
         """检查 Pod 是否有创建失败的情况
         
         Args:
@@ -1700,10 +1566,12 @@ class StatefulSet:
             tuple: (has_fatal_error: bool, error_message: str or None)
         """
         try:
-            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
-            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
+            if pods is None:
+                label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
+                pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
+                pods = pod_list.items if pod_list else []
             
-            if not pod_list or not pod_list.items:
+            if not pods:
                 LOG.warning('No pods found for StatefulSet %s, may still be creating', statefulset_name)
                 return False, None
             
@@ -1718,7 +1586,10 @@ class StatefulSet:
             # CrashLoopBackOff 需要检查重启次数（避免误判暂时性失败）
             CRASH_THRESHOLD = 3  # 重启3次以上才判定为致命错误
             
-            for pod in pod_list.items:
+            for pod in pods:
+                # The kubelet can report a deleted Pod as Failed before its replacement appears.
+                if pod.metadata.deletion_timestamp:
+                    continue
                 pod_name = pod.metadata.name
                 phase = pod.status.phase if pod.status else 'Unknown'
                 
@@ -1732,14 +1603,17 @@ class StatefulSet:
                     return True, error_msg
                 
                 # 检查容器状态
-                if pod.status and pod.status.container_statuses:
-                    for container_status in pod.status.container_statuses:
+                if pod.status:
+                    init_statuses = pod.status.init_container_statuses or []
+                    for index, container_status in enumerate(init_statuses + (pod.status.container_statuses or [])):
                         container_name = container_status.name
                         
                         # 检查 Waiting 状态
                         if container_status.state and container_status.state.waiting:
                             reason = container_status.state.waiting.reason
                             message = container_status.state.waiting.message or ''
+                            if index < len(init_statuses) and reason in ('ErrImagePull', 'ImagePullBackOff'):
+                                continue
                             
                             # 检查是否是致命错误（镜像拉取失败、配置错误等）
                             if reason in FATAL_REASONS:
@@ -1766,51 +1640,181 @@ class StatefulSet:
             return False, None
         
         return False, None  # 没有致命错误
-    
-    def _get_pod_failure_details(self, k8s_client, statefulset_name, namespace):
-        """获取 Pod 失败的详细信息
-        
-        Args:
-            k8s_client: Kubernetes 客户端
-            statefulset_name: StatefulSet 名称
-            namespace: 命名空间
-        
-        Returns:
-            str: Pod 失败的详细描述
-        """
-        try:
-            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
-            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
-            
-            if not pod_list or not pod_list.items:
-                return "No pods found"
-            
-            errors = []
-            for pod in pod_list.items:
-                pod_name = pod.metadata.name
-                phase = pod.status.phase if pod.status else 'Unknown'
-                
-                if phase != 'Running':
-                    errors.append(self._build_pod_failure_detail(pod))
-                
-                if pod.status and pod.status.container_statuses:
-                    for container_status in pod.status.container_statuses:
-                        if container_status.state:
-                            if container_status.state.waiting:
-                                reason = container_status.state.waiting.reason or 'Unknown'
-                                message = container_status.state.waiting.message or ''
-                                errors.append(f"{pod_name}/{container_status.name}: {reason} - {message[:100]}")
-                            elif container_status.state.terminated:
-                                reason = container_status.state.terminated.reason or 'Unknown'
-                                exit_code = container_status.state.terminated.exit_code or 0
-                                errors.append(f"{pod_name}/{container_status.name}: terminated - {reason} (exit {exit_code})")
-            
-            return '; '.join(errors) if errors else "Unknown error"
-        
-        except Exception as e:
-            return f"Failed to get details: {str(e)}"
 
-    def _get_pod_logs_summary(self, k8s_client, statefulset_name, namespace, tail_lines=50):
+    def _list_owned_pods(self, k8s_client, namespace, metadata, request_timeout):
+        selector = f'{const.Tag.POD_AUTO_TAG}={metadata.name}'
+        pods = k8s_client.list_pod(namespace, label_selector=selector, _request_timeout=request_timeout)
+        return [pod for pod in (pods.items or []) if any(
+            owner.controller and owner.uid == metadata.uid
+            for owner in (pod.metadata.owner_references or [])
+        )]
+
+    @staticmethod
+    def _shutdown_seconds(intervals, start, end):
+        covered_until = start
+        total = 0
+        for lower, upper in sorted(intervals):
+            lower = max(lower, covered_until)
+            upper = min(upper, end)
+            if upper > lower:
+                total += upper - lower
+                covered_until = upper
+        return total
+
+    def _wait_for_rollout(self, k8s_client, namespace, metadata, replicas, ready_timeout, rolling_update,
+                          started_at=None):
+        name = metadata.name
+        if started_at is None:
+            started_at = time.monotonic()
+        wall_offset = time.time() - time.monotonic()
+        sampled_at = started_at
+        previous_shutdowns = {}
+        excluded = 0
+        ready = 0
+        pods = []
+        blockers = []
+        pending = []
+        last_read_error = None
+
+        while True:
+            remaining = ready_timeout - (time.monotonic() - started_at - excluded)
+            request_timeout = min(5, max(1, int(remaining)))
+            try:
+                sts = k8s_client.get_statefulset(name, namespace, _request_timeout=request_timeout)
+                pods = self._list_owned_pods(k8s_client, namespace, metadata, request_timeout)
+            except (exceptions.K8sCallError, HTTPError) as error:
+                last_read_error = str(error)
+                LOG.warning('Failed to read StatefulSet %s rollout status: %s', name, error)
+            else:
+                last_read_error = None
+                if (sts is None or sts.metadata.uid != metadata.uid
+                        or sts.metadata.generation > metadata.generation):
+                    raise exceptions.PluginError(message=f'StatefulSet {name} rollout was superseded or removed')
+
+                status = sts.status
+                revision = status.update_revision if status and (
+                    status.observed_generation or 0) >= metadata.generation else None
+                current_shutdowns = {}
+                targets = []
+                blockers = []
+                for pod in pods:
+                    pod_metadata = pod.metadata
+                    pod_revision = (pod_metadata.labels or {}).get('controller-revision-hash')
+                    if pod_metadata.deletion_timestamp:
+                        if rolling_update and revision and pod_revision != revision:
+                            grace = pod_metadata.deletion_grace_period_seconds
+                            if grace is None:
+                                grace = pod.spec.termination_grace_period_seconds
+                            grace = 30 if grace is None else grace
+                            deadline = pod_metadata.deletion_timestamp.timestamp()
+                            shutdown_start = deadline - grace
+                            previous = previous_shutdowns.get(pod_metadata.uid)
+                            if previous:
+                                shutdown_start = min(shutdown_start, previous[1])
+                            current_shutdowns[pod_metadata.uid] = (pod_metadata.name, shutdown_start, deadline)
+                            blockers.append(pod_metadata.name)
+                    elif revision and pod_revision == revision:
+                        targets.append(pod)
+
+                # Kubernetes deletionTimestamp is the expected end of the grace period.
+                # Charge only the observed union of old-Pod shutdown windows between samples.
+                now = time.monotonic()
+                wall_now = now + wall_offset
+                window_start = sampled_at + wall_offset
+                active_uids = {pod.metadata.uid for pod in pods}
+                replacements = {pod.metadata.name: pod.metadata for pod in pods if not pod.metadata.deletion_timestamp}
+                intervals = []
+                for uid, (pod_name, start, end) in {**previous_shutdowns, **current_shutdowns}.items():
+                    if uid in active_uids and uid not in current_shutdowns:
+                        continue
+                    replacement = replacements.get(pod_name)
+                    if replacement and replacement.uid != uid and replacement.creation_timestamp:
+                        end = min(end, replacement.creation_timestamp.timestamp())
+                    intervals.append((start, end))
+                excluded += self._shutdown_seconds(intervals, window_start, wall_now)
+                previous_shutdowns = current_shutdowns
+                sampled_at = now
+
+                pending = [pod for pod in targets if not (
+                    pod.status and pod.status.phase == 'Running' and any(
+                        condition.type == 'Ready' and condition.status == 'True'
+                        for condition in (pod.status.conditions or [])
+                    )
+                )]
+                ready = len(targets) - len(pending)
+                if (revision and status.current_revision == revision and (status.replicas or 0) == replicas
+                        and (status.updated_replicas or 0) == replicas and len(targets) == ready == replicas
+                        and now - started_at - excluded <= ready_timeout):
+                    return targets
+
+                if now - started_at > 30 and targets:
+                    failed, detail = self._check_pod_failures(k8s_client, name, namespace, pods=targets)
+                    if failed:
+                        raise exceptions.PluginError(message=f'StatefulSet Pod failed to start: {detail}')
+
+            now = time.monotonic()
+            elapsed = now - started_at
+            effective_excluded = excluded
+            if last_read_error:
+                # Use the last known grace deadline until the next successful sample.
+                effective_excluded += self._shutdown_seconds(
+                    ((start, end) for _, start, end in previous_shutdowns.values()),
+                    sampled_at + wall_offset, now + wall_offset,
+                )
+            remaining = ready_timeout - (elapsed - effective_excluded)
+            if remaining <= 0:
+                message = (f'StatefulSet {name} readiness budget of {ready_timeout}s exhausted '
+                           f'({elapsed:.1f}s elapsed, {effective_excluded:.1f}s old Pod shutdown excluded, '
+                           f'{ready}/{replicas} target Pods Ready)')
+                if blockers:
+                    message += f'; still waiting for old Pod deletion: {", ".join(blockers)}'
+                if last_read_error:
+                    message += f'; latest Kubernetes status check failed: {last_read_error}'
+                details = [self._build_pod_failure_detail(pod) for pod in pending[:5]]
+                if details:
+                    message += '; ' + '; '.join(details)
+                    logs = self._get_pod_logs_summary(k8s_client, namespace, pending[:1])
+                    if logs:
+                        message += f'\n\nPod Logs:\n{logs}'
+                raise exceptions.PluginError(message=message)
+            time.sleep(min(5, remaining))
+
+    def _collect_pod_metadata(self, k8s_client, namespace, metadata, pod_names, cluster_id, timeout):
+        if not pod_names:
+            return []
+        deadline = time.monotonic() + timeout
+        pods = None
+        while True:
+            if pods is not None:
+                active = {pod.metadata.name: pod for pod in pods if not pod.metadata.deletion_timestamp}
+                records = []
+                for name in pod_names:
+                    pod = active.get(name)
+                    uid = pod.metadata.uid if pod else None
+                    host_ip = pod.status.host_ip if pod and pod.status else None
+                    records.append({'name': name, 'id': f'{cluster_id}_{uid}' if uid else '',
+                                    'host_ip': host_ip or ''})
+                if all(record['id'] and record['host_ip'] for record in records):
+                    return records
+            else:
+                records = [{'name': name, 'id': '', 'host_ip': ''} for name in pod_names]
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                missing = [record['name'] for record in records if not record['id'] or not record['host_ip']]
+                LOG.warning('CMDB metadata wait exceeded %ds for StatefulSet %s, incomplete Pods: %s',
+                            timeout, metadata.name, ', '.join(missing))
+                return records
+            if pods is not None:
+                time.sleep(min(2, remaining))
+            try:
+                pods = self._list_owned_pods(k8s_client, namespace, metadata, min(5, max(1, int(remaining))))
+            except (exceptions.K8sCallError, HTTPError) as error:
+                LOG.warning('Failed to read Pod metadata for StatefulSet %s: %s', metadata.name, error)
+                if pods is None:
+                    pods = []
+
+    def _get_pod_logs_summary(self, k8s_client, namespace, pods, tail_lines=50):
         """
         获取 StatefulSet 下各 Pod 的最近日志（包含当前和上一次容器实例），
         等价于对每个 Pod 执行：
@@ -1821,13 +1825,8 @@ class StatefulSet:
         日志拉取失败不影响主流程，直接跳过对应 Pod。
         """
         try:
-            label_selector = f'{const.Tag.POD_AUTO_TAG}={statefulset_name}'
-            pod_list = k8s_client.list_pod(namespace, label_selector=label_selector)
-            if not pod_list or not pod_list.items:
-                return ''
-
             log_parts = []
-            for pod in pod_list.items:
+            for pod in pods:
                 pod_name = pod.metadata.name
                 phase = pod.status.phase if pod.status else 'Unknown'
 
@@ -1846,13 +1845,13 @@ class StatefulSet:
 
                 # 当前容器日志（始终拉取）
                 current_log = k8s_client.get_pod_log(
-                    pod_name, namespace, previous=False, tail_lines=tail_lines
+                    pod_name, namespace, previous=False, tail_lines=tail_lines, _request_timeout=2
                 )
                 # 上一次容器实例日志（仅在有重启记录时有意义）
                 previous_log = None
                 if has_restarts:
                     previous_log = k8s_client.get_pod_log(
-                        pod_name, namespace, previous=True, tail_lines=tail_lines
+                        pod_name, namespace, previous=True, tail_lines=tail_lines, _request_timeout=2
                     )
 
                 pod_log_lines = [f'--- Pod: {pod_name} (phase={phase}) ---']
@@ -2056,6 +2055,7 @@ class StatefulSet:
         self._ensure_headless_service(k8s_client, data, resource_template)
         
         exists_resource = k8s_client.get_statefulset(resource_name, data['namespace'])
+        rolling_update = exists_resource is not None
         if exists_resource is None:
             LOG.info('Creating new StatefulSet: %s/%s', data['namespace'], resource_name)
             exists_resource = k8s_client.create_statefulset(data['namespace'], resource_template)
@@ -2174,7 +2174,13 @@ class StatefulSet:
             # 这样可以避免 patch 合并时保留旧字段的问题
             # 注意: replace 需要保留 resourceVersion
             resource_template['metadata']['resourceVersion'] = exists_resource.metadata.resource_version
+            try:
+                old_pods = self._list_owned_pods(k8s_client, data['namespace'], exists_resource.metadata, 5)
+            except (exceptions.K8sCallError, HTTPError) as error:
+                LOG.warning('Failed to read old Pods before updating StatefulSet %s: %s', resource_name, error)
+                old_pods = []
             exists_resource = k8s_client.replace_statefulset(resource_name, data['namespace'], resource_template)
+            rollout_started_at = time.monotonic()
             # StatefulSet 配置了 updateStrategy.type=RollingUpdate，K8s 会自动从最高序号 Pod 开始
             # 逐个滚动更新，确保每个 Pod Ready 后再更新下一个，无需手动删除 Pod。
             LOG.info('StatefulSet %s/%s updated, K8s RollingUpdate will handle pod restarts automatically.',
@@ -2184,149 +2190,31 @@ class StatefulSet:
             # K8s RollingUpdate 要求"旧 Pod Ready 才滚下一个"，而 CrashLoopBackOff 的 Pod 永远不会 Ready，
             # 导致新模板永远无法被应用。检测到这种情况时，主动删除 CrashLoopBackOff 的 Pod，
             # 让 StatefulSet 控制器用新模板重建，打破死锁。
-            try:
-                replicas_count = int(data.get('replicas', 1))
-                crash_pods_deleted = []
-                for i in range(replicas_count):
-                    pod_name = f"{resource_name}-{i}"
-                    try:
-                        pod = k8s_client.get_pod(pod_name, data['namespace'])
-                        if pod and pod.status and pod.status.container_statuses:
-                            for cs in pod.status.container_statuses:
-                                if (cs.state and cs.state.waiting
-                                        and cs.state.waiting.reason == 'CrashLoopBackOff'):
-                                    LOG.warning('[CrashLoopBackOff] Pod %s/%s container "%s" is in '
-                                                'CrashLoopBackOff (restarts=%d), deleting to unblock RollingUpdate.',
-                                                data['namespace'], pod_name, cs.name,
-                                                cs.restart_count or 0)
-                                    k8s_client.delete_pod(pod_name, data['namespace'])
-                                    crash_pods_deleted.append(pod_name)
-                                    break
-                    except Exception as e:
-                        LOG.warning('[CrashLoopBackOff] Failed to check/delete Pod %s: %s', pod_name, str(e))
-                if crash_pods_deleted:
-                    LOG.info('[CrashLoopBackOff] Deleted %d CrashLoopBackOff pod(s): %s. '
-                             'StatefulSet will recreate them with the new template.',
-                             len(crash_pods_deleted), crash_pods_deleted)
-                else:
-                    LOG.info('[CrashLoopBackOff] No CrashLoopBackOff pods found, RollingUpdate proceeds normally.')
-            except Exception as e:
-                LOG.warning('[CrashLoopBackOff] Error during CrashLoopBackOff check: %s (non-fatal, continuing)',
-                            str(e))
-        
-        # ==================== 等待 Pod 就绪（解决异步创建问题）====================
-        replicas = int(data.get('replicas', 1))
-        wait_for_pods = data.get('wait_for_ready', 'true').lower() == 'true'  # 可配置是否等待
-        
-        if wait_for_pods:
-            LOG.info('Waiting for StatefulSet Pods to be ready (replicas: %d)...', replicas)
-            pod_ready_timeout = self._get_pod_ready_timeout(data)  # 默认来自系统参数
-            check_interval = 5  # 每 5 秒检查一次
-            max_attempts = pod_ready_timeout // check_interval
-            
-            for attempt in range(1, max_attempts + 1):
-                time.sleep(check_interval)
-                
+            for pod in old_pods:
+                if pod.metadata.deletion_timestamp or not pod.status:
+                    continue
+                if not any(cs.state and cs.state.waiting and cs.state.waiting.reason == 'CrashLoopBackOff'
+                           for cs in (pod.status.container_statuses or [])):
+                    continue
                 try:
-                    # 重新读取 StatefulSet 状态
-                    sts = k8s_client.get_statefulset(resource_name, data['namespace'])
-                    
-                    if sts and sts.status:
-                        ready_replicas = sts.status.ready_replicas or 0
-                        current_replicas = sts.status.replicas or 0
-                        updated_replicas = sts.status.updated_replicas or 0
-                        current_revision = sts.status.current_revision or ''
-                        update_revision = sts.status.update_revision or ''
-                        rollout_complete = (
-                            updated_replicas >= replicas
-                            and (not current_revision or not update_revision
-                                 or current_revision == update_revision)
-                        )
-
-                        LOG.info('[Wait %d/%d] StatefulSet status: ready=%d/%d, updated=%d/%d, '
-                                 'current_revision=%s, update_revision=%s',
-                                 attempt, max_attempts,
-                                 ready_replicas, replicas,
-                                 updated_replicas, replicas,
-                                 current_revision, update_revision)
-                        
-                        # 必须同时满足：所有 Pod 已就绪 + 所有 Pod 已更新到最新版本
-                        # 避免 K8s 滚动更新中途（某个 Pod 刚 Ready，下一个还未开始）时提前退出
-                        if ready_replicas >= replicas and rollout_complete:
-                            LOG.info('✅ All Pods are ready and updated! (%d/%d)', ready_replicas, replicas)
-                            
-                            # 额外验证：检查实际的 Pod 状态
-                            pod_validation_passed = self._validate_pod_health(
-                                k8s_client, resource_name, data['namespace'], replicas
-                            )
-                            
-                            if pod_validation_passed:
-                                LOG.info('✅ Pod health validation passed!')
-                                break
-                            else:
-                                LOG.warning('⚠️  Pod health validation failed, continuing to wait...')
-                        else:
-                            LOG.info('Still waiting: %d/%d replicas ready', ready_replicas, replicas)
-                            
-                            # 检查是否有 Pod 创建失败（30秒后开始检查）
-                            if attempt > 6:
-                                has_fatal_error, error_message = self._check_pod_failures(
-                                    k8s_client, resource_name, data['namespace']
-                                )
-                                
-                                # 检测到致命错误，立即退出
-                                if has_fatal_error:
-                                    elapsed_time = attempt * check_interval
-                                    LOG.error('❌ Fatal Pod error detected after %d seconds: %s', 
-                                            elapsed_time, error_message)
-                                    raise exceptions.PluginError(
-                                        message=_('StatefulSet Pod failed to start: %(error)s '
-                                                '(detected after %(time)ds, max wait: %(timeout)ds)') % {
-                                            'error': error_message,
-                                            'time': elapsed_time,
-                                            'timeout': pod_ready_timeout
-                                        }
-                                    )
-                
-                except exceptions.PluginError:
-                    # 重新抛出 PluginError（不要被下面的 except 捕获）
-                    raise
-                except Exception as e:
-                    LOG.warning('[Wait %d/%d] Failed to check StatefulSet status: %s', 
-                               attempt, max_attempts, str(e))
-            
-            else:
-                # 超时后检查最终状态
-                sts = k8s_client.get_statefulset(resource_name, data['namespace'])
-                ready_replicas = sts.status.ready_replicas or 0 if sts and sts.status else 0
-                
-                if ready_replicas < replicas:
-                    error_msg = self._get_pod_failure_details(k8s_client, resource_name, data['namespace'])
-                    LOG.error('❌ Timeout waiting for Pods to be ready: %d/%d ready after %d seconds', 
-                             ready_replicas, replicas, pod_ready_timeout)
-                    LOG.error('Pod failure details: %s', error_msg)
-
-                    # 拉取 Pod 日志辅助定位（等价于 kubectl logs [-p] --tail=50）
-                    pod_logs = self._get_pod_logs_summary(k8s_client, resource_name, data['namespace'])
-                    if pod_logs:
-                        LOG.error('Pod logs for failed pods:\n%s', pod_logs)
-                        full_details = f'{error_msg}\n\nPod Logs:\n{pod_logs}'
-                    else:
-                        full_details = error_msg
-
-                    raise exceptions.PluginError(
-                        message=_('StatefulSet created but Pods failed to become ready within %(timeout)ds. '
-                                  'Ready: %(ready)d/%(expected)d. Details: %(details)s') % {
-                            'timeout': pod_ready_timeout,
-                            'ready': ready_replicas,
-                            'expected': replicas,
-                            'details': full_details
-                        }
+                    k8s_client.delete_pod(
+                        pod.metadata.name, data['namespace'], _request_timeout=5,
+                        body=client.V1DeleteOptions(preconditions=client.V1Preconditions(
+                            uid=pod.metadata.uid, resource_version=pod.metadata.resource_version,
+                        )),
                     )
-        else:
-            LOG.info('Skipping Pod readiness wait (wait_for_ready=false)')
-        # ==================== 结束：等待 Pod 就绪 ====================
+                    LOG.info('Deleted old CrashLoopBackOff Pod %s to unblock rolling update', pod.metadata.name)
+                except (exceptions.K8sCallError, HTTPError) as error:
+                    LOG.warning('Failed to delete old CrashLoopBackOff Pod %s: %s', pod.metadata.name, error)
         
+        replicas = int(data.get('replicas', 1))
+        if data.get('wait_for_ready', 'true').lower() == 'true':
+            self._wait_for_rollout(
+                k8s_client, data['namespace'], exists_resource.metadata, replicas,
+                self._get_pod_ready_timeout(data), rolling_update,
+                started_at=rollout_started_at if rolling_update else None,
+            )
+
         # 补充返回对应 Service 的 clusterIP 与 port
         # 策略：优先返回负载均衡 Service 的 ClusterIP（如果存在），否则返回 Headless Service 信息
         cluster_ip = None
@@ -2390,381 +2278,25 @@ class StatefulSet:
         if not cluster_ip:
             LOG.warning('No ClusterIP available for StatefulSet %s/%s', data['namespace'], data['name'])
         
-        # 获取实际的 Pod 列表（包含 name 和 id）
-        replicas = int(data.get('replicas', 1))
-        pod_list = []
-        
-        # 查询实际运行的 Pod，获取真实的 Pod ID
-        # 使用 label selector 查询该 StatefulSet 的 Pod
-        # 注意：标签值使用 resource_name（转换后的小写名称），与创建时保持一致
-        label_selector = f"{const.Tag.POD_AUTO_TAG}={resource_name}"
-        try:
-            pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
-            if pods and pods.items:
-                for pod in pods.items:
-                    # 使用 cluster_id + pod_uid 作为全局唯一标识，与 watcher 保持一致
-                    pod_uid = pod.metadata.uid if pod.metadata.uid else ''
-                    asset_id = f"{cluster_info['id']}_{pod_uid}" if pod_uid else ''
-                    pod_list.append({
-                        'name': pod.metadata.name,
-                        'id': asset_id,  # 使用带 cluster_id 前缀的 asset_id，与 watcher 保持一致
-                        'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else ''  # Pod 所在 Node 的 IP
-                    })
-                LOG.info('Found %d pods for StatefulSet %s in namespace %s (some may not have UID yet)', 
-                        len(pod_list), resource_name, data['namespace'])
-            else:
-                # 如果还没有 Pod 运行，使用预期的 Pod 名称（ID 暂时为空）
-                # 这是正常现象：StatefulSet 刚创建时，Pod 会异步创建
-                LOG.info('No running pods found yet for StatefulSet %s in namespace %s (pods may still be creating), using expected pod names', 
-                        resource_name, data['namespace'])
-                for i in range(replicas):
-                    pod_list.append({
-                        'name': f"{resource_name}-{i}",
-                        'id': '',
-                        'host_ip': ''
-                    })
-        except Exception as e:
-            LOG.warning('Failed to query pods for StatefulSet %s in namespace %s: %s. Using expected pod names.', 
-                       resource_name, data['namespace'], str(e))
-            # 使用预期的 Pod 名称
-            for i in range(replicas):
-                pod_list.append({
-                    'name': f"{resource_name}-{i}",
-                    'id': '',
-                    'host_ip': ''
-                })
-        
-        # 使用 correlation_id（即 instanceId）同步 Pod 信息到 CMDB
-        if resource_id and pod_list:
-            # 如果 Pod 还没有 ID，等待一段时间让 Pod 创建完成
-            # 注意：如果有 packageUrl，Pod 需要先运行 init container 下载部署包，会比较慢
-            has_package = bool(data.get('packageUrl'))
-            if has_package:
-                max_wait_time = 240  # 有部署包时等待 240 秒（4分钟，init container 下载需要时间）
-                LOG.info('Deployment has packageUrl, extending wait time to %d seconds', max_wait_time)
-            else:
-                max_wait_time = 30   # 无部署包时等待 30 秒
-            
-            wait_interval = 2   # 每 2 秒检查一次
-            waited_time = 0
-            
-            # 检查是否有 Pod 没有 ID 或 host_ip
-            pods_incomplete = [p for p in pod_list if not p.get('id') or not p.get('host_ip')]
-            if pods_incomplete:
-                pods_without_id = [p for p in pods_incomplete if not p.get('id')]
-                pods_without_host = [p for p in pods_incomplete if (p.get('id') and not p.get('host_ip'))]
-                LOG.info('Waiting for pods: %d without UID, %d without host_ip', 
-                        len(pods_without_id), len(pods_without_host))
-                if pods_without_id:
-                    LOG.info('Pods without UID: %s', ', '.join([p['name'] for p in pods_without_id]))
-                if pods_without_host:
-                    LOG.info('Pods without host_ip (not scheduled yet): %s', ', '.join([p['name'] for p in pods_without_host]))
-                
-                while waited_time < max_wait_time and pods_incomplete:
-                    time.sleep(wait_interval)
-                    waited_time += wait_interval
-                    
-                    # 重新查询 Pod 状态
-                    try:
-                        pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
-                        if pods and pods.items:
-                            # 检查 Pod 是否有失败情况
-                            for pod in pods.items:
-                                phase = pod.status.phase if pod.status else 'Unknown'
-                                pod_name = pod.metadata.name
-                                
-                                # 检查致命错误状态
-                                if phase == 'Failed':
-                                    error_msg = self._build_pod_failure_detail(pod)
-                                    if self._is_recoverable_failed_pod(pod):
-                                        LOG.warning('Recoverable Failed Pod detected during CMDB sync wait, keep waiting: %s',
-                                                    error_msg)
-                                        continue
-                                    LOG.error('❌ %s', error_msg)
-                                    raise exceptions.PluginError(message=_('Pod creation failed: %(error)s') % {'error': error_msg})
-                                
-                                # 检查容器状态
-                                if pod.status and pod.status.container_statuses:
-                                    for container_status in pod.status.container_statuses:
-                                        # 检查容器重启次数（超过3次认为异常）
-                                        restart_count = container_status.restart_count or 0
-                                        if restart_count > 3:
-                                            error_msg = f'Container has restarted {restart_count} times (threshold: 3)'
-                                            LOG.error('❌ Pod %s, Container %s: %s', pod_name, container_status.name, error_msg)
-                                            
-                                            # 获取更详细的状态信息
-                                            detail_msg = error_msg
-                                            if container_status.state:
-                                                if container_status.state.waiting:
-                                                    reason = container_status.state.waiting.reason or 'Unknown'
-                                                    detail_msg += f', current state: waiting ({reason})'
-                                                elif container_status.state.terminated:
-                                                    exit_code = container_status.state.terminated.exit_code or 0
-                                                    reason = container_status.state.terminated.reason or 'Unknown'
-                                                    detail_msg += f', current state: terminated (exit {exit_code}, {reason})'
-                                            
-                                            raise exceptions.PluginError(
-                                                message=_('Pod container crashed repeatedly: %(pod)s/%(container)s - %(error)s') % {
-                                                    'pod': pod_name,
-                                                    'container': container_status.name,
-                                                    'error': detail_msg
-                                                }
-                                            )
-                                        
-                                        if container_status.state and container_status.state.waiting:
-                                            reason = container_status.state.waiting.reason
-                                            # 检查严重错误（镜像拉取失败、配置错误、崩溃循环等）
-                                            if reason in ['ImagePullBackOff', 'ErrImagePull', 'CreateContainerConfigError', 
-                                                         'InvalidImageName', 'CrashLoopBackOff']:
-                                                error_msg = container_status.state.waiting.message or reason
-                                                # 如果是 CrashLoopBackOff，添加重启次数信息
-                                                if reason == 'CrashLoopBackOff':
-                                                    error_msg = f'{error_msg} (restarted {restart_count} times)'
-                                                LOG.error('❌ Pod %s, Container %s: %s', pod_name, container_status.name, error_msg)
-                                                raise exceptions.PluginError(
-                                                    message=_('Pod container failed: %(pod)s/%(container)s - %(error)s') % {
-                                                        'pod': pod_name,
-                                                        'container': container_status.name,
-                                                        'error': error_msg
-                                                    }
-                                                )
-                                        elif container_status.state and container_status.state.terminated:
-                                            # 容器已终止且退出码非0表示异常
-                                            exit_code = container_status.state.terminated.exit_code or 0
-                                            if exit_code != 0:
-                                                reason = container_status.state.terminated.reason or 'Unknown'
-                                                LOG.error('❌ Pod %s, Container %s terminated with exit code %d: %s',
-                                                        pod_name, container_status.name, exit_code, reason)
-                                                raise exceptions.PluginError(
-                                                    message=_('Pod container terminated abnormally: %(pod)s/%(container)s - exit code %(code)d') % {
-                                                        'pod': pod_name,
-                                                        'container': container_status.name,
-                                                        'code': exit_code
-                                                    }
-                                                )
-                            
-                            # 更新 pod_list 中的 ID 和 host_ip（只记录有 UID 的 Pod）
-                            pod_dict = {pod.metadata.name: {
-                                            'uid': pod.metadata.uid,
-                                            'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else '',
-                                            'phase': pod.status.phase if pod.status else 'Unknown',
-                                            'ready': False
-                                        }
-                                       for pod in pods.items if pod.metadata.uid}
-                            
-                            # 检查 Pod 的 Ready 状态
-                            for pod in pods.items:
-                                if pod.metadata.name in pod_dict and pod.status and pod.status.conditions:
-                                    for condition in pod.status.conditions:
-                                        if condition.type == 'Ready' and condition.status == 'True':
-                                            pod_dict[pod.metadata.name]['ready'] = True
-                                            break
-                            
-                            # 同时记录 Pod 的状态信息（用于调试）
-                            for pod in pods.items:
-                                phase = pod.status.phase if pod.status else 'Unknown'
-                                uid_status = f'UID: {pod.metadata.uid[:8]}...' if pod.metadata.uid else 'UID: None'
-                                host_ip_status = f'host_ip: {pod.status.host_ip}' if pod.status and pod.status.host_ip else 'host_ip: None'
-                                ready_status = 'Ready' if pod.metadata.name in pod_dict and pod_dict[pod.metadata.name]['ready'] else 'NotReady'
-                                
-                                # 检查容器重启次数和状态
-                                container_info = ''
-                                if pod.status and pod.status.container_statuses:
-                                    total_restarts = sum(cs.restart_count or 0 for cs in pod.status.container_statuses)
-                                    if total_restarts > 0:
-                                        container_info = f' [Restarts: {total_restarts}]'
-                                    # 检查是否有异常状态
-                                    for cs in pod.status.container_statuses:
-                                        if cs.state and cs.state.waiting:
-                                            reason = cs.state.waiting.reason or 'Unknown'
-                                            if reason in ['CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull']:
-                                                container_info += f' [{cs.name}: {reason}]'
-                                
-                                # 检查 init container 状态
-                                init_status = ''
-                                if pod.status and pod.status.init_container_statuses:
-                                    for init_container in pod.status.init_container_statuses:
-                                        if init_container.state:
-                                            if init_container.state.running:
-                                                init_status = f' [Init: {init_container.name} running]'
-                                            elif init_container.state.waiting:
-                                                reason = init_container.state.waiting.reason or 'Unknown'
-                                                init_status = f' [Init: {init_container.name} waiting - {reason}]'
-                                            elif init_container.state.terminated:
-                                                init_status = f' [Init: {init_container.name} completed]'
-                                
-                                if pod.metadata.name in [p['name'] for p in pods_incomplete]:
-                                    LOG.debug('Pod %s status: %s, %s, %s, %s%s%s', pod.metadata.name, phase, uid_status, host_ip_status, ready_status, container_info, init_status)
-                            
-                            for pod_info in pod_list:
-                                if pod_info['name'] in pod_dict:
-                                    pod_info['id'] = pod_dict[pod_info['name']]['uid']
-                                    pod_info['host_ip'] = pod_dict[pod_info['name']]['host_ip']
-                            
-                            # 重新检查还有哪些 Pod 不完整（没有 ID 或 host_ip）
-                            pods_incomplete = [p for p in pod_list if not p.get('id') or not p.get('host_ip')]
-                            
-                            # 检查所有 Pod 是否都已就绪
-                            all_pods_ready = all(pod_dict.get(p['name'], {}).get('ready', False) for p in pod_list if p.get('id'))
-                            
-                            if not pods_incomplete and all_pods_ready:
-                                LOG.info('✅ All pods created, scheduled and ready after waiting %d seconds', waited_time)
-                                break
-                            else:
-                                pods_without_id = [p for p in pods_incomplete if not p.get('id')]
-                                pods_without_host = [p for p in pods_incomplete if (p.get('id') and not p.get('host_ip'))]
-                                pods_not_ready = [p['name'] for p in pod_list if p.get('id') and not pod_dict.get(p['name'], {}).get('ready', False)]
-                                LOG.info('Still waiting after %d seconds: %d without UID, %d without host_ip, %d not ready', 
-                                        waited_time, len(pods_without_id), len(pods_without_host), len(pods_not_ready))
-                    except exceptions.PluginError:
-                        # 重新抛出业务异常
-                        raise
-                    except Exception as e:
-                        LOG.warning('Failed to query pod status during wait: %s', str(e))
-                
-                # 等待循环结束后，检查是否所有 Pod 都已完成
-                if pods_incomplete:
-                    pods_without_id = [p for p in pods_incomplete if not p.get('id')]
-                    pods_without_host = [p for p in pods_incomplete if (p.get('id') and not p.get('host_ip'))]
-                    LOG.warning('Timeout after %d seconds: %d pod(s) without UID, %d pod(s) without host_ip, will do final check', 
-                               max_wait_time, len(pods_without_id), len(pods_without_host))
-            
-            # 在等待循环结束后，做最后一次强制查询，验证所有 Pod 的状态
+        ordinals = getattr(exists_resource.spec, 'ordinals', None)
+        first_ordinal = ordinals.start if ordinals and ordinals.start is not None else 0
+        pod_names = [f'{resource_name}-{i}' for i in range(first_ordinal, first_ordinal + replicas)]
+        pod_list = self._collect_pod_metadata(
+            k8s_client, data['namespace'], exists_resource.metadata, pod_names,
+            cluster_info['id'], 240 if data.get('packageUrl') else 30,
+        )
+        sync_records = [pod for pod in pod_list if pod['id'] and pod['host_ip']]
+        if resource_id and sync_records:
             try:
-                LOG.info('Performing final pod status check...')
-                pods = k8s_client.list_pod(data['namespace'], label_selector=label_selector)
-                if pods and pods.items:
-                    # 构建 Pod 状态字典，包含完整的状态信息
-                    pod_dict = {}
-                    for pod in pods.items:
-                        if pod.metadata.uid:
-                            is_ready = False
-                            if pod.status and pod.status.conditions:
-                                for condition in pod.status.conditions:
-                                    if condition.type == 'Ready' and condition.status == 'True':
-                                        is_ready = True
-                                        break
-                            
-                            pod_dict[pod.metadata.name] = {
-                                'uid': pod.metadata.uid,
-                                'host_ip': pod.status.host_ip if pod.status and pod.status.host_ip else '',
-                                'phase': pod.status.phase if pod.status else 'Unknown',
-                                'ready': is_ready
-                            }
-                    
-                    # 更新 pod_list 中的信息
-                    updated_count = 0
-                    for pod_info in pod_list:
-                        if pod_info['name'] in pod_dict:
-                            # 更新缺失的信息
-                            if not pod_info.get('id'):
-                                pod_info['id'] = pod_dict[pod_info['name']]['uid']
-                                updated_count += 1
-                            if not pod_info.get('host_ip') and pod_dict[pod_info['name']]['host_ip']:
-                                pod_info['host_ip'] = pod_dict[pod_info['name']]['host_ip']
-                                updated_count += 1
-                    if updated_count > 0:
-                        LOG.info('Final check updated %d pod field(s)', updated_count)
-                    
-                    # 检查所有 Pod 是否都已就绪
-                    pods_not_ready = []
-                    error_details = []
-                    
-                    for pod_info in pod_list:
-                        pod_name = pod_info['name']
-                        if pod_name not in pod_dict:
-                            pods_not_ready.append(pod_name)
-                            error_details.append(f'{pod_name}: Pod not found')
-                        elif not pod_dict[pod_name]['ready']:
-                            pods_not_ready.append(pod_name)
-                            phase = pod_dict[pod_name]['phase']
-                            error_details.append(f'{pod_name}: phase={phase}, ready=False')
-                    
-                    # 如果有 Pod 未就绪，获取详细错误信息并抛出异常
-                    if pods_not_ready:
-                        LOG.error('❌ %d/%d pods are not ready after %d seconds', 
-                                 len(pods_not_ready), len(pod_list), max_wait_time)
-                        
-                        # 获取更详细的失败信息
-                        for pod in pods.items:
-                            if pod.metadata.name in pods_not_ready:
-                                pod_name = pod.metadata.name
-                                phase = pod.status.phase if pod.status else 'Unknown'
-                                LOG.error('Pod %s - Phase: %s', pod_name, phase)
-                                
-                                # 记录容器状态
-                                if pod.status and pod.status.container_statuses:
-                                    for container_status in pod.status.container_statuses:
-                                        restart_count = container_status.restart_count or 0
-                                        
-                                        if container_status.state:
-                                            if container_status.state.waiting:
-                                                reason = container_status.state.waiting.reason or 'Unknown'
-                                                message = container_status.state.waiting.message or ''
-                                                LOG.error('  Container %s waiting: %s (restarts: %d) - %s',
-                                                        container_status.name, reason, restart_count, message)
-                                                
-                                                # 在错误详情中包含重启次数（如果有的话）
-                                                if restart_count > 0:
-                                                    error_details.append(f'{pod_name}/{container_status.name}: {reason} (restarted {restart_count} times)')
-                                                else:
-                                                    error_details.append(f'{pod_name}/{container_status.name}: {reason}')
-                                            elif container_status.state.terminated:
-                                                reason = container_status.state.terminated.reason or 'Unknown'
-                                                exit_code = container_status.state.terminated.exit_code or 0
-                                                LOG.error('  Container %s terminated: %s (exit code %d, restarts: %d)',
-                                                        container_status.name, reason, exit_code, restart_count)
-                                                error_details.append(f'{pod_name}/{container_status.name}: terminated (exit {exit_code}, restarted {restart_count} times)')
-                                            elif container_status.state.running:
-                                                # 容器在运行但 Pod 不 ready（健康检查持续失败）
-                                                if restart_count > 0:
-                                                    LOG.error('  Container %s running but not ready (restarts: %d)',
-                                                            container_status.name, restart_count)
-                                                    error_details.append(f'{pod_name}/{container_status.name}: running but not ready (restarted {restart_count} times)')
-                                                else:
-                                                    # 无重启但 not-ready，最典型原因是健康检查配置不当或应用启动慢
-                                                    LOG.error('  Container %s running but not ready (no restarts, likely health check failure)',
-                                                            container_status.name)
-                                                    error_details.append(f'{pod_name}/{container_status.name}: running but not ready (no restarts, likely health check failure - check readiness probe config)')
-                                        else:
-                                            # 没有状态信息，但可能有重启次数
-                                            if restart_count > 0:
-                                                LOG.error('  Container %s - restarts: %d', container_status.name, restart_count)
-                                                error_details.append(f'{pod_name}/{container_status.name}: restarted {restart_count} times')
-                        
-                        error_msg = '; '.join(error_details[:5])  # 只显示前5个错误，避免信息过长
+                current = k8s_client.get_statefulset(resource_name, data['namespace'], _request_timeout=5)
+            except (exceptions.K8sCallError, HTTPError) as error:
+                LOG.warning('Skipping CMDB sync for StatefulSet %s: %s', resource_name, error)
+            else:
+                if (current is None or current.metadata.uid != exists_resource.metadata.uid
+                        or current.metadata.generation != exists_resource.metadata.generation):
+                    raise exceptions.PluginError(message=f'StatefulSet {resource_name} rollout was superseded or removed')
+                self._sync_pods_to_cmdb(k8s_client, data['namespace'], sync_records, resource_id)
 
-                        # 拉取 Pod 日志辅助定位（等价于 kubectl logs [-p] --tail=50）
-                        pod_logs = self._get_pod_logs_summary(k8s_client, resource_name, data['namespace'])
-                        if pod_logs:
-                            LOG.error('Pod logs for failed pods:\n%s', pod_logs)
-                            full_details = f'{error_msg}\n\nPod Logs:\n{pod_logs}'
-                        else:
-                            full_details = error_msg
-
-                        raise exceptions.PluginError(
-                            message=_('StatefulSet created but %(count)d/%(total)d pods failed to become ready within %(timeout)ds. Details: %(details)s') % {
-                                'count': len(pods_not_ready),
-                                'total': len(pod_list),
-                                'timeout': max_wait_time,
-                                'details': full_details
-                            }
-                        )
-                    
-                    LOG.info('✅ All %d pods are ready', len(pod_list))
-                    
-            except exceptions.PluginError:
-                # 重新抛出业务异常
-                raise
-            except Exception as e:
-                LOG.error('Final pod status check failed: %s', str(e))
-                raise exceptions.PluginError(
-                    message=_('Failed to verify pod status: %(error)s') % {'error': str(e)}
-                )
-            
-            # 同步 Pod 信息到 CMDB（只同步有 ID 的 Pod）
-            self._sync_pods_to_cmdb(k8s_client, data['namespace'], pod_list, resource_id)
-        
         # 将 Pod 列表转换为字符串格式（用分号拼接），方便页面显示
         pods_str = ';'.join([pod['name'] for pod in pod_list]) if pod_list else ''
         
@@ -4414,7 +3946,7 @@ class PackageDeploy:
                 {
                     'name': 'deploy-package',
                     'image': deploy_image,
-                    'imagePullPolicy': 'Always',
+                    'imagePullPolicy': 'IfNotPresent',
                     'command': ['/bin/sh', '-c'],
                     'args': [inline_script],
                     'env': [

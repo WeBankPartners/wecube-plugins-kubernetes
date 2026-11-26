@@ -61,13 +61,20 @@ class Client:
         self.networking_client = client.NetworkingV1Api(api_client)
         self.batch_client = client.BatchV1Api(api_client)
 
+    def _api_error(self, error):
+        try:
+            message = json.loads(error.body).get('message')
+        except (AttributeError, TypeError, ValueError):
+            message = None
+        return exceptions.K8sCallError(cluster=self.auth.api_server, msg=message or error.reason or error.status)
+
     def _action(self, client, func_name, *args, **kwargs):
         func = getattr(client, func_name)
         try:
             result = func(*args, **kwargs)
             return result
         except k8s_exceptions.ApiException as e:
-            raise exceptions.K8sCallError(cluster=self.auth.api_server, msg=json.loads(e.body)['message'])
+            raise self._api_error(e) from e
 
     def _action_detail(self, client, func_name, *args, **kwargs):
         func = getattr(client, func_name)
@@ -77,7 +84,7 @@ class Client:
         except k8s_exceptions.ApiException as e:
             if e.status == 404:
                 return None
-            raise exceptions.K8sCallError(cluster=self.auth.api_server, msg=json.loads(e.body)['message'])
+            raise self._api_error(e) from e
 
     # Node
     def list_node(self, **kwargs):
