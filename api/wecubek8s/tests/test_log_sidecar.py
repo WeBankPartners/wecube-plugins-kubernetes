@@ -152,6 +152,61 @@ def test_reuses_legacy_hostpath(apply, monkeypatch):
     assert pod == apply_with(enable_log_sidecar=True)
 
 
+def test_derives_container_path_without_creating_hostpath(apply, monkeypatch):
+    apply_with, _, _ = apply
+    monkeypatch.setattr(plugin_api.CONF, 'enable_host_path', 'true')
+    deployment_path = '/data/app/aim-backen/'
+    path = '/data/app/aim-backen/logs'
+    pod = apply_with(enable_log_sidecar=True, deployment_path=deployment_path)
+    app, exporter = pod['spec']['containers']
+    app_mount = {'name': sidecar.SHARED_VOLUME_NAME, 'mountPath': path, 'readOnly': False}
+    assert app_mount in app['volumeMounts']
+    assert exporter['volumeMounts'][0] == dict(app_mount, readOnly=True)
+    assert {'name': '__FILE_LOG_PATH__', 'value': path + '/*.log'} in app['env']
+    assert {'name': sidecar.SHARED_VOLUME_NAME, 'emptyDir': {}} in pod['spec']['volumes']
+    assert not any('hostPath' in volume for volume in pod['spec']['volumes'])
+    disabled = apply_with(enable_log_sidecar=False)
+    assert app_mount in disabled['spec']['containers'][0]['volumeMounts']
+    assert disabled == apply_with(enable_log_sidecar=False, deployment_path=deployment_path)
+
+
+def test_explicit_log_path_takes_priority_over_deployment_path(apply):
+    apply_with, _, _ = apply
+    pod = apply_with(enable_log_sidecar=True, log_path='/custom/logs', deployment_path='/data/app/aim-backen')
+    app, exporter = pod['spec']['containers']
+    assert exporter['volumeMounts'][0]['mountPath'] == '/custom/logs'
+    assert {'name': '__FILE_LOG_PATH__', 'value': '/custom/logs/*.log'} in app['env']
+
+
+def test_reuses_volume_covering_derived_path(apply):
+    apply_with, _, _ = apply
+    pod = apply_with(enable_log_sidecar=True, deployment_path='/data/app/aim-backen',
+                     volumes=[{'name': 'shared-data', 'type': 'emptyDir', 'mountPath': '/data/app'}])
+    app, exporter = pod['spec']['containers']
+    assert app['volumeMounts'][0]['mountPath'] == '/data/app'
+    assert exporter['volumeMounts'][0] == {
+        'name': 'shared-data', 'mountPath': '/data/app/aim-backen/logs', 'subPath': 'aim-backen/logs', 'readOnly': True,
+    }
+    assert not any(volume['name'] == sidecar.SHARED_VOLUME_NAME for volume in pod['spec']['volumes'])
+
+
+def test_legacy_hostpath_keeps_original_mount_when_derived_path_differs(apply, monkeypatch):
+    apply_with, _, _ = apply
+    monkeypatch.setattr(plugin_api.CONF, 'enable_host_path', 'true')
+    deployment_path = '/data/app/aim-backen'
+    legacy = apply_with(deployment_path=deployment_path)['spec']['containers'][0]
+    legacy_mount = {'name': 'instance-logs', 'mountPath': '/logs', 'readOnly': False}
+    assert legacy_mount in legacy['volumeMounts']
+    assert {'name': '__FILE_LOG_PATH__', 'value': '/logs/*.log'} in legacy['env']
+    enabled = apply_with(enable_log_sidecar=True, deployment_path=deployment_path)
+    app, exporter = enabled['spec']['containers']
+    assert legacy_mount in app['volumeMounts']
+    assert {'name': 'instance-logs', 'hostPath': {'path': deployment_path + '/logs', 'type': 'DirectoryOrCreate'}} in enabled['spec']['volumes']
+    assert exporter['volumeMounts'][0]['name'] == sidecar.SHARED_VOLUME_NAME
+    assert exporter['volumeMounts'][0]['mountPath'] == deployment_path + '/logs'
+    assert enabled == apply_with(deployment_path=deployment_path)
+
+
 @pytest.mark.parametrize('apply', [plugin_api.StatefulSet], indirect=True)
 def test_statefulset_applies_sidecar_after_pvc_reconciliation(apply):
     apply_with, client, _ = apply
@@ -172,6 +227,7 @@ def test_statefulset_applies_sidecar_after_pvc_reconciliation(apply):
      sidecar.CACHE_VOLUME_NAME),
     ({'volumes': [{'name': 'read-only', 'type': 'emptyDir', 'mountPath': '/logs', 'readOnly': True}]}, 'read-only'),
     ({'volumes': [{'name': 'nested', 'type': 'emptyDir', 'mountPath': '/logs/nested'}]}, 'nested'),
+    ({'deployment_path': 'relative/app'}, 'expected an absolute log directory'),
 ])
 def test_invalid_sidecar_configuration_is_rejected_before_workload_write(apply, parameters, message):
     apply_with, client, _ = apply
@@ -194,7 +250,7 @@ def test_private_sidecar_registry_secret(apply, monkeypatch):
 
 
 def test_sidecar_preserves_existing_registry_secrets(apply, monkeypatch):
-    apply_with, _, _ = apply
+    apply_with, client, _ = apply
     cluster = plugin_api.db_resource.Cluster().list({})[0]
     cluster.update(image_pull_username='test-user', image_pull_password='test-password')
     image_name = 'registry.example.test/samples/sample-app:1.0'
@@ -202,7 +258,45 @@ def test_sidecar_preserves_existing_registry_secrets(apply, monkeypatch):
     monkeypatch.setattr(plugin_api.CONF, 'log_sidecar_image_pull_secret', baseline[0]['name'])
     enabled = apply_with(image_name=image_name, enable_log_sidecar=True)['spec']
     assert enabled['imagePullSecrets'] == baseline
+    client.secrets['test', 'exporter-auth'] = SimpleNamespace(type='kubernetes.io/dockerconfigjson')
+    monkeypatch.setattr(plugin_api.CONF, 'log_sidecar_image_pull_secret', 'exporter-auth')
+    enabled = apply_with(image_name=image_name, enable_log_sidecar=True)['spec']
+    assert enabled['imagePullSecrets'] == [*baseline, {'name': 'exporter-auth'}]
     assert apply_with(image_name=image_name, enable_log_sidecar=False)['spec']['imagePullSecrets'] == baseline
+
+
+@pytest.mark.parametrize('reference', [
+    'wecube/monitor-exporter-sidecar:v1.0.0',
+    'wecube/monitor-exporter-sidecar@sha256:' + 'a' * 64,
+])
+def test_resolves_relative_image_against_target_cluster_registry(apply, monkeypatch, reference):
+    apply_with, _, _ = apply
+    registry = '10.200.16.10:8443'
+    cluster = plugin_api.db_resource.Cluster().list({})[0]
+    cluster.update(private_registry=registry, image_pull_username='test-user', image_pull_password='test-password')
+    monkeypatch.setattr(plugin_api.CONF, 'log_sidecar_image', reference)
+    baseline = apply_with()['spec']['imagePullSecrets']
+    enabled = apply_with(enable_log_sidecar=True)['spec']
+    assert enabled['containers'][1]['image'] == registry + '/' + reference
+    assert len(baseline) == 1
+    assert enabled['imagePullSecrets'] == baseline
+
+
+@pytest.mark.parametrize('reference', [EXPORTER_IMAGE, 'other.example.test/tree/monitor@sha256:' + 'b' * 64])
+def test_uses_complete_image_without_prefixing_target_registry(apply, monkeypatch, reference):
+    apply_with, _, _ = apply
+    plugin_api.db_resource.Cluster().list({})[0]['private_registry'] = '10.200.16.10:8443'
+    monkeypatch.setattr(plugin_api.CONF, 'log_sidecar_image', reference)
+    assert apply_with(enable_log_sidecar=True)['spec']['containers'][1]['image'] == reference
+
+
+def test_requires_target_cluster_registry_for_relative_image(apply, monkeypatch):
+    apply_with, client, _ = apply
+    monkeypatch.setattr(plugin_api.CONF, 'log_sidecar_image', 'wecube/monitor-exporter-sidecar:v1.0.0')
+    with pytest.raises(plugin_api.exceptions.ValidationError, match='requires private_registry on the target cluster'):
+        apply_with(enable_log_sidecar=True)
+    assert client.workload is None
+    assert not client.services
 
 
 @pytest.mark.parametrize('value, expected', [(False, False), (' False ', False), ('TRUE', True), ('', None), (None, None)])

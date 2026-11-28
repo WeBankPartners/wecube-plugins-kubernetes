@@ -57,6 +57,48 @@ def _normalize(path):
     return '/' + posixpath.normpath(path).lstrip('/')
 
 
+def resolve_log_data(data, enabled, existing):
+    if enabled is None:
+        return data
+    path = (data.get('log_path') or '').strip()
+    attribute = 'log_path'
+    if not path and enabled:
+        deployment_path = (data.get('deployment_path') or '').strip()
+        if deployment_path:
+            path = posixpath.join(deployment_path, 'logs')
+            attribute = 'deployment_path'
+    if not path and not enabled and existing is not None:
+        path = (existing.metadata.annotations or {}).get(LOG_PATH_ANNOTATION)
+    path = path or '/logs'
+    normalized = _normalize(path)
+    if not path.startswith('/') or '..' in path.split('/') or '\0' in path or normalized == '/':
+        raise exceptions.ValidationError(attribute=attribute, msg=_('expected an absolute log directory below /'))
+    return dict(data, log_path=normalized)
+
+
+def _has_registry(image):
+    first, separator, _ = image.partition('/')
+    return bool(separator) and ('.' in first or ':' in first or first.lower() == 'localhost')
+
+
+def _resolve_image(cluster_info):
+    attribute = 'KUBERNETES_LOG_SIDECAR_IMAGE'
+    image = (getattr(CONF, 'log_sidecar_image', '') or '').strip()
+    if not image or '://' in image or any(char.isspace() for char in image):
+        raise exceptions.ValidationError(attribute=attribute, msg=_('configure a valid log exporter image reference'))
+    if not _has_registry(image):
+        registry = (cluster_info.get('private_registry') or '').strip().rstrip('/')
+        if not registry:
+            raise exceptions.ValidationError(
+                attribute=attribute,
+                msg=_('relative log exporter image requires private_registry on the target cluster'))
+        image = registry + '/' + image
+    if (not _has_registry(image) or not all(image.split('/')) or '://' in image
+            or any(char.isspace() for char in image)):
+        raise exceptions.ValidationError(attribute=attribute, msg=_('invalid log exporter image or private_registry'))
+    return image
+
+
 def _under(path, parent):
     return path == parent or path.startswith(parent.rstrip('/') + '/')
 
@@ -97,9 +139,27 @@ def _append_volume(volumes, claim_names, volume):
     volumes.append(volume)
 
 
-def _restore_mount(path, previous_pod, volumes, claim_names, host_volume, enabled):
-    previous_app = next((item for item in previous_pod.get('containers', []) if item['name'] != CONTAINER_NAME), {})
-    mount, conflicts = _log_mount(previous_app.get('volumeMounts', []), path)
+def _is_legacy_host_path(volume):
+    return volume['name'] == 'instance-logs' and volume.get('hostPath', {}).get('type') == 'DirectoryOrCreate'
+
+
+def _keep_legacy_host_path(mounts, volumes, claim_names, previous_mounts, previous_volumes):
+    if not utils.host_path_enabled():
+        return
+    volume = next((item for item in previous_volumes if _is_legacy_host_path(item)), None)
+    if not volume or volume['name'] in claim_names or any(item['name'] == volume['name'] for item in volumes):
+        return
+    mount = next((item for item in previous_mounts if item['name'] == volume['name']), None)
+    if mount is None:
+        return
+    replacement, conflicts = _log_mount(mounts, _normalize(mount['mountPath']))
+    if not replacement and not conflicts:
+        volumes.append(deepcopy(volume))
+        mounts.append({**mount, 'readOnly': mount.get('readOnly', False)})
+
+
+def _restore_mount(path, previous_mounts, previous_volumes, volumes, claim_names, enabled):
+    mount, conflicts = _log_mount(previous_mounts, path)
     if enabled and conflicts:
         raise _mount_conflict(path, conflicts)
     if not mount:
@@ -109,13 +169,8 @@ def _restore_mount(path, previous_pod, volumes, claim_names, host_volume, enable
     if name in claim_names:
         return mount
 
-    previous_volume = next((volume for volume in previous_pod.get('volumes', []) if volume['name'] == name), None)
-    if not previous_volume:
-        return None
-    if host_volume and name in ('instance-logs', SHARED_VOLUME_NAME):
-        return None
-    automatic_host_path = name == 'instance-logs' and previous_volume.get('hostPath', {}).get('type') == 'DirectoryOrCreate'
-    if automatic_host_path and not utils.host_path_enabled():
+    previous_volume = next((volume for volume in previous_volumes if volume['name'] == name), None)
+    if not previous_volume or (_is_legacy_host_path(previous_volume) and not utils.host_path_enabled()):
         return None
     if previous_volume not in volumes:
         _append_volume(volumes, claim_names, deepcopy(previous_volume))
@@ -146,7 +201,7 @@ def _referenced_env(app, expression):
     return list(reversed(selected))
 
 
-def configure(k8s_client, template, data, enabled, existing):
+def configure(k8s_client, template, data, enabled, existing, cluster_info):
     if enabled is None:
         return
     pod = template['spec']['template']
@@ -156,26 +211,23 @@ def configure(k8s_client, template, data, enabled, existing):
     mounts = app['volumeMounts']
     volumes = pod_spec['volumes']
     claim_names = {claim['metadata']['name'] for claim in template['spec'].get('volumeClaimTemplates', [])}
-    raw_path = data.get('log_path') or '/logs'
-    path = _normalize(raw_path)
-    if not raw_path.startswith('/') or '..' in raw_path.split('/') or path == '/':
-        raise exceptions.ValidationError(attribute='log_path', msg=_('expected an absolute log directory below /'))
+    path = data['log_path']
+    previous_mounts = []
+    previous_volumes = []
+    if existing is not None:
+        from kubernetes import client
+
+        previous_pod = client.ApiClient().sanitize_for_serialization(existing.spec.template.spec)
+        previous_app = next((item for item in previous_pod.get('containers', []) if item['name'] != CONTAINER_NAME), {})
+        previous_mounts = previous_app.get('volumeMounts', [])
+        previous_volumes = previous_pod.get('volumes', [])
+        _keep_legacy_host_path(mounts, volumes, claim_names, previous_mounts, previous_volumes)
 
     mount, conflicts = _log_mount(mounts, path)
     if enabled and conflicts:
         raise _mount_conflict(path, conflicts)
     if not mount and not conflicts:
-        host_volume = utils.instance_log_volume(data)
-        if existing is not None:
-            from kubernetes import client
-
-            previous_path = (existing.metadata.annotations or {}).get(LOG_PATH_ANNOTATION)
-            if previous_path is None or previous_path == path:
-                previous_pod = client.ApiClient().sanitize_for_serialization(existing.spec.template.spec)
-                mount = _restore_mount(path, previous_pod, volumes, claim_names, host_volume, enabled)
-        if not mount and host_volume:
-            volume, mount = host_volume
-            _append_volume(volumes, claim_names, volume)
+        mount = _restore_mount(path, previous_mounts, previous_volumes, volumes, claim_names, enabled)
         if not mount and enabled:
             _append_volume(volumes, claim_names, {'name': SHARED_VOLUME_NAME, 'emptyDir': {}})
             mount = {'name': SHARED_VOLUME_NAME, 'mountPath': path, 'readOnly': False}
@@ -208,12 +260,7 @@ def configure(k8s_client, template, data, enabled, existing):
                     port.get('containerPort') == PORT and (port.get('protocol') or 'TCP').upper() == 'TCP'):
                 raise exceptions.ValidationError(attribute='image_port', msg=_('port already in use: 9100/TCP or log-metrics'))
 
-    image = (getattr(CONF, 'log_sidecar_image', '') or '').strip()
-    registry, separator, repository = image.partition('/')
-    if (not separator or not repository or '://' in image or any(char.isspace() for char in image)
-            or not ('.' in registry or ':' in registry or registry == 'localhost')):
-        raise exceptions.ValidationError(attribute='KUBERNETES_LOG_SIDECAR_IMAGE',
-                                         msg=_('configure a fully qualified log exporter image'))
+    image = _resolve_image(cluster_info)
     _append_volume(volumes, claim_names, {'name': CACHE_VOLUME_NAME, 'emptyDir': {}})
     shared = _exporter_mount(path, mount)
     sidecar = {
@@ -234,7 +281,8 @@ def configure(k8s_client, template, data, enabled, existing):
     if env:
         sidecar['env'] = env
     pull_secret = (getattr(CONF, 'log_sidecar_image_pull_secret', '') or '').strip()
-    if pull_secret:
+    secrets = pod_spec.get('imagePullSecrets', [])
+    if pull_secret and not any(item['name'] == pull_secret for item in secrets):
         namespace = data['namespace']
         secret = k8s_client.get_secret(pull_secret, namespace)
         if not secret or secret.type not in ('kubernetes.io/dockerconfigjson', 'kubernetes.io/dockercfg'):
@@ -243,9 +291,7 @@ def configure(k8s_client, template, data, enabled, existing):
                 msg=_('registry Secret %(name)s is missing or invalid in namespace %(namespace)s') % {
                     'name': pull_secret, 'namespace': namespace,
                 })
-        secrets = pod_spec.setdefault('imagePullSecrets', [])
-        if not any(item['name'] == pull_secret for item in secrets):
-            secrets.append({'name': pull_secret})
+        pod_spec['imagePullSecrets'] = [*secrets, {'name': pull_secret}]
     containers.append(sidecar)
     pod['metadata']['labels'] = {**pod['metadata']['labels'], DISCOVERY_LABEL: 'enabled'}
     pod['metadata']['annotations'][WORKLOAD_ID_ANNOTATION] = data['correlation_id']

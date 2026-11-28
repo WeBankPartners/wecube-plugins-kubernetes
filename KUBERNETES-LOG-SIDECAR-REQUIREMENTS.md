@@ -12,7 +12,7 @@ WeCube 通过 Kubernetes 插件部署 Deployment 和 StatefulSet。需要采集�
 | --- | --- |
 | 生效接口 | `POST /kubernetes/v1/deployments/apply` 和 `POST /kubernetes/v1/statefulsets/apply` |
 | 开关 | 新增可选入参 `enable_log_sidecar`，默认 `false`。通过 WeCube 编排开启的部署，在后续每次 `apply` 时继续传 `true`。在两个接口的插件注册描述和请求校验中声明该字段。 |
-| 容器日志目录 | 复用现有 `log_path`，默认 `/logs`。使用该目录在应用容器内的绝对路径。 |
+| 容器日志目录 | 启用时优先使用显式的 `log_path`，其次使用 `deployment_path` 下的 `logs` 子目录，两者均为空时使用 `/logs`。应用和 exporter 使用同一个目录，`__FILE_LOG_PATH__` 使用该目录下的 `*.log`。 |
 | 发现标签 | 在启用时向 `spec.template.metadata.labels` 写入 `wecube.io/log-monitor: enabled`。标签用于 Pod 发现，模板构建时保持原有 workload 和 Service selector。 |
 | 部署标识 | 向 `spec.template.metadata.annotations` 写入 `wecube.io/log-monitor-workload-id`，值来自现有 `correlation_id`，保留标识原值。编排用同一个值注册业务日志配置，Monitor 用集群、namespace 和该标识匹配。 |
 
@@ -27,13 +27,13 @@ WeCube 通过 Kubernetes 插件部署 Deployment 和 StatefulSet。需要采集�
 ### 容器与镜像
 
 - 在 `spec.template.spec.containers` 追加名为 `log-exporter` 的容器，使用镜像默认命令，声明名为 `log-metrics` 的 `9100/TCP` 容器端口。已有应用容器继续使用自己的启动脚本、探针和资源配置。`package-downloader` 继续作为 `initContainers` 处理差异化变量包。
-- 通过插件配置提供完整的 exporter 镜像地址。首轮联调使用 `registry.nysupport.wiki/open-monitor/node-exporter-sidecar:dev-d960a182c`，当前镜像支持 `linux/amd64`。所用节点需要能从该仓库拉取镜像。需要认证时，在目标 namespace 引用该仓库对应的拉取 Secret，并与现有 `imagePullSecrets` 合并去重。
+- 从 `KUBERNETES_LOG_SIDECAR_IMAGE` 读取 exporter 镜像。完整地址直接使用，相对地址用目标集群的 `private_registry` 补齐，两种形式都支持 tag 和 digest。Sandbox 的 `wecube/monitor-exporter-sidecar:v1.0.0` 解析为 `10.200.16.10:8443/wecube/monitor-exporter-sidecar:v1.0.0`。相对地址缺少仓库配置时，在提交工作负载前报错。同仓库复用 Pod 已有的 `imagePullSecrets`，额外配置的拉取 Secret 按名称合并去重。
 - Prometheus 和 Monitor 从集群外直接访问 Pod IP。工作负载模板声明容器端口即可。应用与 sidecar 共用 Pod 网络，已声明的容器名、端口或卷名冲突应在提交 workload 前给出明确错误。
 
 ### 日志共享与规则缓存
 
 1. **优先复用已有日志卷。** 按 `log_path` 查找应用容器的有效可写挂载。找到后将同一个卷以同一路径只读挂载给 exporter，并保留 `subPath` 或 `subPathExpr`（如已配置）。现有 `instance-logs`、日志 PVC 和 Pod 级日志卷均按此规则处理。StatefulSet 以最终有效的 PVC 模板和挂载为准。已有挂载占用该目录但无法用作共享日志卷时，报出冲突和原挂载来源。
-2. **没有日志卷时创建 Pod 级 `emptyDir`。** 应用在 `log_path` 读写，exporter 在同一路径只读。沿用集群的 `KUBERNETES_ENABLE_HOST_PATH` 设置。应用部署配置应把实际日志写到共享目录中。`emptyDir` 随 Pod 结束，Pod 被替换时会得到新目录。
+2. **没有日志卷时创建 Pod 级 `emptyDir`。** 应用读写解析出的容器日志目录，exporter 在同一路径只读。`deployment_path` 推导容器目录时无须新增节点挂载。原有自动 `hostPath` 仍受 `KUBERNETES_ENABLE_HOST_PATH` 控制，启用采集时可继续使用存量挂载。应用部署配置应把实际日志写到共享目录中。`emptyDir` 随 Pod 结束，Pod 被替换时会得到新目录。
 3. **给 exporter 提供独立可写卷。** 用单独的 `emptyDir` 挂载 `/app/monitor/data`，保存下发的规则缓存。配置包、业务日志和规则缓存分别使用各自的卷。
 4. **确认权限与副本隔离。** 沿用现有 Pod `fsGroup: 10001`。exporter 以 `65534:65534` 运行，需要能遍历日志目录、读取新建及轮转后的文件，并写入自己的缓存目录。复用 `hostPath` 时用节点上的实际目录权限验证。多个副本共用存储时，日志路径应按副本隔离，避免同一文件被重复采集。
 

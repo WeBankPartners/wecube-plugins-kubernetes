@@ -2354,9 +2354,10 @@ class Deployment(WorkloadPodOps):
         resource_name = api_utils.escape_name(data['name'])
         exists_resource = k8s_client.get_deployment(resource_name, data['namespace'])
         sidecar_enabled = log_sidecar.apply_state(data, exists_resource)
+        data = log_sidecar.resolve_log_data(data, sidecar_enabled, exists_resource)
         resource_template = self.to_resource(k8s_client, data, cluster_info,
                                              defer_instance_logs=sidecar_enabled is not None)
-        log_sidecar.configure(k8s_client, resource_template, data, sidecar_enabled, exists_resource)
+        log_sidecar.configure(k8s_client, resource_template, data, sidecar_enabled, exists_resource, cluster_info)
         if exists_resource is None:
             LOG.info('Creating new Deployment: %s/%s', data['namespace'], resource_name)
             exists_resource = k8s_client.create_deployment(data['namespace'], resource_template)
@@ -2991,6 +2992,7 @@ class StatefulSet(WorkloadPodOps):
         
         exists_resource = k8s_client.get_statefulset(resource_name, data['namespace'])
         sidecar_enabled = log_sidecar.apply_state(data, exists_resource)
+        data = log_sidecar.resolve_log_data(data, sidecar_enabled, exists_resource)
         # Build the application template first. Its effective PVCs are reconciled below.
         resource_template = self.to_resource(k8s_client, data, cluster_info,
                                              defer_instance_logs=sidecar_enabled is not None)
@@ -3104,7 +3106,7 @@ class StatefulSet(WorkloadPodOps):
                 LOG.info('Preserving existing podManagementPolicy (immutable field): %s', old_pod_mgmt_policy)
                 resource_template['spec']['podManagementPolicy'] = old_pod_mgmt_policy
 
-        log_sidecar.configure(k8s_client, resource_template, data, sidecar_enabled, exists_resource)
+        log_sidecar.configure(k8s_client, resource_template, data, sidecar_enabled, exists_resource, cluster_info)
         self._ensure_headless_service(k8s_client, data, resource_template)
         if exists_resource is None:
             LOG.info('Creating new StatefulSet: %s/%s', data['namespace'], resource_name)

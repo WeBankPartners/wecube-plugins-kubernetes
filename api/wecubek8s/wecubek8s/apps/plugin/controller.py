@@ -105,9 +105,8 @@ class Deployment(controller.Plugin):
         if 'log_path' in item:
             log_path = item['log_path']
             if log_path is None or (isinstance(log_path, str) and log_path.strip() == ''):
-                # 空值，移除该字段，将使用默认值 /logs
+                # 空值由 apply 按部署配置解析
                 del item['log_path']
-                LOG.info('[Deployment] log_path is empty, will use default /logs for %s', item.get('name'))
             elif not log_path.startswith('/'):
                 # 非空值但格式不正确
                 raise exceptions.ValidationError(
@@ -595,9 +594,8 @@ class StatefulSet(controller.Plugin):
         if 'log_path' in item:
             log_path = item['log_path']
             if log_path is None or (isinstance(log_path, str) and log_path.strip() == ''):
-                # 空值，移除该字段，将使用默认值 /logs
+                # 空值由 apply 按部署配置解析
                 del item['log_path']
-                LOG.info('[StatefulSet] log_path is empty, will use default /logs for %s', item.get('name'))
             elif not log_path.startswith('/'):
                 # 非空值但格式不正确
                 raise exceptions.ValidationError(

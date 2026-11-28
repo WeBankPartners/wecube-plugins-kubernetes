@@ -189,7 +189,7 @@ deployment_rules = [
                          validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='log_path',
-                         rule=validator.RegexValidator(r'^(/[a-zA-Z0-9_\-./]*)?$'),
+                         rule=validator.RegexValidator(r'^(/[a-zA-Z0-9_\-./]*|\s*)$'),
                          validate_on=['check:O'],
                          nullable=True),
     crud.ColumnValidator(field='enable_log_sidecar', validate_on=['check:O'], nullable=True),
