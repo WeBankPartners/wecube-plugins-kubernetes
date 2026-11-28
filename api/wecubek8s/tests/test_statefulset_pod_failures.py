@@ -43,6 +43,7 @@ def _install_import_stubs():
     common.const = types.SimpleNamespace(
         Tag=types.SimpleNamespace(
             DEPLOYMENT_ID_TAG='wecube-deployment-id',
+            STATEFULSET_ID_TAG='wecube-statefulset-id',
             POD_AUTO_TAG='wecube-pod-auto-tag',
             POD_AFFINITY_TAG='wecube-pod-affinity-tag',
             SERVICE_ID_TAG='wecube-service-correlation-id',
@@ -72,6 +73,7 @@ def _install_import_stubs():
     db.resource = types.ModuleType('wecubek8s.db.resource')
     apps = types.ModuleType('wecubek8s.apps')
     plugin = types.ModuleType('wecubek8s.apps.plugin')
+    plugin.__path__ = [str(Path(__file__).resolve().parents[1] / 'wecubek8s/apps/plugin')]
     sys.modules.setdefault('wecubek8s', wecubek8s)
     sys.modules.setdefault('wecubek8s.common', common)
     sys.modules.setdefault('wecubek8s.common.k8s', common.k8s)

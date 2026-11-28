@@ -13,6 +13,7 @@ from wecubek8s.common import exceptions
 from wecubek8s.common import const
 from wecubek8s.common import utils as k8s_utils
 from wecubek8s.db import resource as db_resource
+from wecubek8s.apps.plugin import log_sidecar
 from wecubek8s.apps.plugin import utils as api_utils
 
 CONF = config.CONF
@@ -2066,7 +2067,7 @@ class Deployment(WorkloadPodOps):
             available, replicas, current, replicas, observed, generation)
         return ready, updated, complete, extra
 
-    def to_resource(self, k8s_client, data, cluster_info):
+    def to_resource(self, k8s_client, data, cluster_info, defer_instance_logs=False):
         resource_id = data['correlation_id']
         resource_name = api_utils.escape_name(data['name'])
         resource_namespace = data['namespace']
@@ -2118,44 +2119,14 @@ class Deployment(WorkloadPodOps):
         
         pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
         
-        # 受系统参数 KUBERNETES_ENABLE_HOST_PATH 控制，false 时跳过 hostPath 挂载（适用于 baseline 安全策略）
-        enable_host_path = (getattr(CONF, 'enable_host_path', '') or '').strip().lower() == 'true'
-        # 自动添加 /logs hostPath 挂载（基于传入的 deployment_path 参数）
         deployment_path = data.get('deployment_path')
-        if deployment_path and enable_host_path:
-            # 确保路径以 / 结尾
-            if not deployment_path.endswith('/'):
-                deployment_path += '/'
-            # 构建宿主机日志路径：deployment_path + logs
-            host_log_path = deployment_path + 'logs'
-            
-            # 获取容器内日志挂载路径（支持自定义，默认 /logs）
-            log_path = data.get('log_path', '/logs')
-            
-            # 添加 hostPath volume
-            log_volume_name = 'instance-logs'
-            pod_spec_src_vols.append({
-                'name': log_volume_name,
-                'hostPath': {
-                    'path': host_log_path,
-                    'type': 'DirectoryOrCreate'
-                }
-            })
-            
-            # 添加 volume mount 到容器（使用 log_path 参数）
-            pod_spec_mnt_vols.append({
-                'name': log_volume_name,
-                'mountPath': log_path,
-                'readOnly': False
-            })
-            
-            LOG.info('Auto-mounted host path %s to %s', host_log_path, log_path)
-        
-        elif deployment_path and not enable_host_path:
-            LOG.info('KUBERNETES_ENABLE_HOST_PATH is false, skipping hostPath log mount for deployment_path=%s',
-                     deployment_path)
-        # 自动注入日志文件路径环境变量（无论是否有 deployment_path 都添加）
-        # 获取日志路径（如果上面的 deployment_path 块设置了 log_path 变量，使用该值；否则使用默认值）
+        if not defer_instance_logs:
+            host_volume = api_utils.instance_log_volume(data)
+            if host_volume:
+                volume, mount = host_volume
+                pod_spec_src_vols.append(volume)
+                pod_spec_mnt_vols.append(mount)
+
         log_path_for_env = data.get('log_path', '/logs')
         import os
         log_file_path = os.path.join(log_path_for_env, "*.log")
@@ -2381,8 +2352,11 @@ class Deployment(WorkloadPodOps):
         k8s_client = k8s.Client(k8s_auth)
         k8s_client.ensure_namespace(data['namespace'])
         resource_name = api_utils.escape_name(data['name'])
-        resource_template = self.to_resource(k8s_client, data, cluster_info)
         exists_resource = k8s_client.get_deployment(resource_name, data['namespace'])
+        sidecar_enabled = log_sidecar.apply_state(data, exists_resource)
+        resource_template = self.to_resource(k8s_client, data, cluster_info,
+                                             defer_instance_logs=sidecar_enabled is not None)
+        log_sidecar.configure(k8s_client, resource_template, data, sidecar_enabled, exists_resource)
         if exists_resource is None:
             LOG.info('Creating new Deployment: %s/%s', data['namespace'], resource_name)
             exists_resource = k8s_client.create_deployment(data['namespace'], resource_template)
@@ -2522,7 +2496,7 @@ class StatefulSet(WorkloadPodOps):
         normalized_name = api_utils.normalize_statefulset_name(data['name'])
         return api_utils.escape_service_name(normalized_name, max_length=50)
 
-    def to_resource(self, k8s_client, data, cluster_info):
+    def to_resource(self, k8s_client, data, cluster_info, defer_instance_logs=False):
         resource_id = data['correlation_id']
         # StatefulSet 的 metadata.name 必须符合 DNS-1123 label 规范（不允许点号）
         # 因为 Pod 的 hostname 会使用 <statefulset-name>-<ordinal> 格式
@@ -2581,44 +2555,14 @@ class StatefulSet(WorkloadPodOps):
         
         pod_spec_src_vols, pod_spec_mnt_vols = api_utils.convert_volume(data.get('volumes', []))
         
-        # 受系统参数 KUBERNETES_ENABLE_HOST_PATH 控制，false 时跳过 hostPath 挂载（适用于 baseline 安全策略）
-        enable_host_path = (getattr(CONF, 'enable_host_path', '') or '').strip().lower() == 'true'
-        # 自动添加 /logs hostPath 挂载（基于传入的 deployment_path 参数）
         deployment_path = data.get('deployment_path')
-        if deployment_path and enable_host_path:
-            # 确保路径以 / 结尾
-            if not deployment_path.endswith('/'):
-                deployment_path += '/'
-            # 构建宿主机日志路径：deployment_path + logs
-            host_log_path = deployment_path + 'logs'
-            
-            # 获取容器内日志挂载路径（支持自定义，默认 /logs）
-            log_path = data.get('log_path', '/logs')
-            
-            # 添加 hostPath volume
-            log_volume_name = 'instance-logs'
-            pod_spec_src_vols.append({
-                'name': log_volume_name,
-                'hostPath': {
-                    'path': host_log_path,
-                    'type': 'DirectoryOrCreate'
-                }
-            })
-            
-            # 添加 volume mount 到容器（使用 log_path 参数）
-            pod_spec_mnt_vols.append({
-                'name': log_volume_name,
-                'mountPath': log_path,
-                'readOnly': False
-            })
-            
-            LOG.info('Auto-mounted host path %s to %s', host_log_path, log_path)
-        
-        elif deployment_path and not enable_host_path:
-            LOG.info('KUBERNETES_ENABLE_HOST_PATH is false, skipping hostPath log mount for deployment_path=%s',
-                     deployment_path)
-        # 自动注入日志文件路径环境变量（无论是否有 deployment_path 都添加）
-        # 获取日志路径（如果上面的 deployment_path 块设置了 log_path 变量，使用该值；否则使用默认值）
+        if not defer_instance_logs:
+            host_volume = api_utils.instance_log_volume(data)
+            if host_volume:
+                volume, mount = host_volume
+                pod_spec_src_vols.append(volume)
+                pod_spec_mnt_vols.append(mount)
+
         log_path_for_env = data.get('log_path', '/logs')
         import os
         log_file_path = os.path.join(log_path_for_env, "*.log")
@@ -3045,19 +2989,13 @@ class StatefulSet(WorkloadPodOps):
         normalized_name = api_utils.normalize_statefulset_name(data['name'])
         resource_name = api_utils.escape_service_name(normalized_name, max_length=50)
         
-        # 生成 StatefulSet 资源模板
-        resource_template = self.to_resource(k8s_client, data, cluster_info)
-        
-        # 确保关联的 Headless Service 存在，假如不存在则创建service
-        self._ensure_headless_service(k8s_client, data, resource_template)
-        
         exists_resource = k8s_client.get_statefulset(resource_name, data['namespace'])
-        if exists_resource is None:
-            LOG.info('Creating new StatefulSet: %s/%s', data['namespace'], resource_name)
-            exists_resource = k8s_client.create_statefulset(data['namespace'], resource_template)
-        else:
-            LOG.info('Updating existing StatefulSet: %s/%s', data['namespace'], resource_name)
+        sidecar_enabled = log_sidecar.apply_state(data, exists_resource)
+        # Build the application template first. Its effective PVCs are reconciled below.
+        resource_template = self.to_resource(k8s_client, data, cluster_info,
+                                             defer_instance_logs=sidecar_enabled is not None)
 
+        if exists_resource is not None:
             # ==================== 处理不可变字段（immutable fields）====================
             # Kubernetes StatefulSet 的以下字段一旦创建就不能修改：
             # - volumeClaimTemplates
@@ -3166,6 +3104,13 @@ class StatefulSet(WorkloadPodOps):
                 LOG.info('Preserving existing podManagementPolicy (immutable field): %s', old_pod_mgmt_policy)
                 resource_template['spec']['podManagementPolicy'] = old_pod_mgmt_policy
 
+        log_sidecar.configure(k8s_client, resource_template, data, sidecar_enabled, exists_resource)
+        self._ensure_headless_service(k8s_client, data, resource_template)
+        if exists_resource is None:
+            LOG.info('Creating new StatefulSet: %s/%s', data['namespace'], resource_name)
+            exists_resource = k8s_client.create_statefulset(data['namespace'], resource_template)
+        else:
+            LOG.info('Updating existing StatefulSet: %s/%s', data['namespace'], resource_name)
             # 使用 replace 而不是 patch,完全替换资源定义
             # 这样可以避免 patch 合并时保留旧字段的问题
             # 注意: replace 需要保留 resourceVersion

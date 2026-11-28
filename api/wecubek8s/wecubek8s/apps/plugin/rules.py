@@ -82,6 +82,8 @@ volume_item_rules = [
                          validate_on=['check:O'],
                          nullable=False,
                          converter=converter.BooleanConverter()),
+    crud.ColumnValidator(field='subPath', rule=validator.TypeValidator(str), validate_on=['check:O'], nullable=True),
+    crud.ColumnValidator(field='subPathExpr', rule=validator.TypeValidator(str), validate_on=['check:O'], nullable=True),
     crud.ColumnValidator(field='type',
                          rule=validator.InValidator(
                              ['configMap', 'hostPath', 'emptyDir', 'secret', 'nfs', 'persistentVolumeClaim']),
@@ -190,6 +192,7 @@ deployment_rules = [
                          rule=validator.RegexValidator(r'^(/[a-zA-Z0-9_\-./]*)?$'),
                          validate_on=['check:O'],
                          nullable=True),
+    crud.ColumnValidator(field='enable_log_sidecar', validate_on=['check:O'], nullable=True),
     crud.ColumnValidator(field='block_storage',
                          rule=validator.TypeValidator(list),
                          validate_on=['check:O'],

@@ -360,9 +360,28 @@ def convert_volume(items):
                 volume_type_spec_new['claimName'] = volume_type_spec['name']
                 volume_type_spec_new['readOnly'] = volume_read_only
 
-            mounts.append({'name': volume_name, 'mountPath': volume_mount_path, 'readOnly': volume_read_only})
+            mount = {'name': volume_name, 'mountPath': volume_mount_path, 'readOnly': volume_read_only}
+            for field in ('subPath', 'subPathExpr'):
+                if item.get(field):
+                    mount[field] = item[field]
+            mounts.append(mount)
     
     return volumes, mounts
+
+
+def host_path_enabled():
+    return (getattr(CONF, 'enable_host_path', '') or '').strip().lower() == 'true'
+
+
+def instance_log_volume(data):
+    deployment_path = data.get('deployment_path')
+    if not deployment_path or not host_path_enabled():
+        return None
+    host_path = deployment_path + ('logs' if deployment_path.endswith('/') else '/logs')
+    return (
+        {'name': 'instance-logs', 'hostPath': {'path': host_path, 'type': 'DirectoryOrCreate'}},
+        {'name': 'instance-logs', 'mountPath': data.get('log_path') or '/logs', 'readOnly': False},
+    )
 
 
 def convert_resource_limit(cpu, memory):

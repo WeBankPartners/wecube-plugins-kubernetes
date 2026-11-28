@@ -13,6 +13,7 @@ from wecubek8s.common import controller
 from wecubek8s.common import const
 from wecubek8s.common import exceptions
 from wecubek8s.common import utils as k8s_utils
+from wecubek8s.apps.plugin import log_sidecar
 from wecubek8s.apps.plugin import rules
 from wecubek8s.apps.plugin import api as plugin_api
 
@@ -121,6 +122,7 @@ class Deployment(controller.Plugin):
         clean_item = crud.ColumnValidator.get_clean_data(rules.deployment_rules, item, 'check')
         self.set_item_default(clean_item)
         self.validate_log_path(clean_item)
+        clean_item['enable_log_sidecar'] = log_sidecar.parse_enabled(clean_item.get('enable_log_sidecar'))
         return clean_item
 
     def validate_item_destroy(self, item_index, item):
@@ -734,6 +736,7 @@ class StatefulSet(controller.Plugin):
         clean_item = crud.ColumnValidator.get_clean_data(rules.deployment_rules, item, 'check')
         self.set_item_default(clean_item)
         self.validate_log_path(clean_item)
+        clean_item['enable_log_sidecar'] = log_sidecar.parse_enabled(clean_item.get('enable_log_sidecar'))
         return clean_item
 
     def validate_item_destroy(self, item_index, item):
